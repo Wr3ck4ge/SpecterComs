@@ -87,6 +87,120 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// ── Peer backfill sync ────────────────────────────────────────────────────────
+// The server holds no message history, so a client that missed messages while
+// offline (or is opening the channel for the first time on a new device) can't
+// ask the server for a gap-fill. Instead it asks whichever *other members* are
+// currently online: sync-request fans out over the same per-channel NATS
+// subject every member's SSE connection already subscribes to (see
+// sseController.ts), and any peer holding newer local history responds
+// directly to the requester's user-scoped subject with its own IndexedDB
+// contents. The server only ever relays these — it doesn't read or store the
+// message bodies, same as sendMessage above.
+const SYNC_MESSAGES_MAX = 200;
+
+const syncRequestSchema = z.object({
+  since: z.string().datetime().nullable().optional(),
+});
+
+/**
+ * POST /orgs/:orgId/channels/:chanId/messages/sync-request
+ * Broadcast to all online members of this channel: "does anyone have
+ * messages newer than `since`?" No server-side lookup — pure fan-out.
+ */
+export const requestChannelSync = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const { orgId, chanId } = req.params;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  const parsed = syncRequestSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: 'Validation failed' });
+
+  try {
+    const memberCheck = await pool.query(
+      'SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2',
+      [orgId, userId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Not a member of this organization' });
+    }
+    const chanCheck = await pool.query(
+      'SELECT 1 FROM channels WHERE id = $1 AND org_id = $2',
+      [chanId, orgId]
+    );
+    if (chanCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Channel not found' });
+    }
+
+    await publishEvent(`specter.msg.channel.${chanId}`, {
+      type: 'sync_request',
+      payload: { channel_id: chanId, requester_id: userId, since: parsed.data.since ?? null },
+    });
+
+    res.status(202).json({ ok: true });
+  } catch (err) {
+    console.error('requestChannelSync error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+const syncResponseSchema = z.object({
+  to_user_id: z.string().uuid(),
+  messages: z.array(z.object({
+    id: z.string(),
+    sender_id: z.string(),
+    callsign: z.string().nullable().optional(),
+    global_tag: z.string().nullable().optional(),
+    encrypted_content: z.string().max(6000),
+    image_url: z.string().max(IMAGE_URL_MAX).nullable().optional(),
+    timestamp: z.string(),
+  })).max(SYNC_MESSAGES_MAX),
+});
+
+/**
+ * POST /orgs/:orgId/channels/:chanId/messages/sync-response
+ * A peer answering someone else's sync-request with messages from its own
+ * local store. Delivered only to the original requester's user-scoped
+ * subject — not broadcast back to the whole channel.
+ */
+export const respondChannelSync = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const { orgId, chanId } = req.params;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  const parsed = syncResponseSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ message: 'Validation failed' });
+
+  try {
+    const memberCheck = await pool.query(
+      'SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2',
+      [orgId, userId]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Not a member of this organization' });
+    }
+    // The recipient must also be a member — prevents using this endpoint to
+    // shove arbitrary channel content at an unrelated user.
+    const recipientCheck = await pool.query(
+      'SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2',
+      [orgId, parsed.data.to_user_id]
+    );
+    if (recipientCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Recipient is not a member of this organization' });
+    }
+
+    await publishEvent(`specter.event.user.${parsed.data.to_user_id}`, {
+      type: 'sync_response',
+      payload: { channel_id: chanId, messages: parsed.data.messages },
+    });
+
+    res.status(202).json({ ok: true });
+  } catch (err) {
+    console.error('respondChannelSync error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 // ── Removed: getMessages, deleteMessage ──────────────────────────────────────
 // Server-side message history no longer exists. Clients store messages locally.
 // These routes now return 404 (route entries removed from message.ts).

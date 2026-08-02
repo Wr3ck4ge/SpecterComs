@@ -205,6 +205,30 @@ export function createApi(API_BASE_URL) {
     sendMessage: (orgId, chanId, encrypted_content, image_url = null) =>
       fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/messages`, { method: "POST", body: { encrypted_content, ...(image_url ? { image_url } : {}) } }),
 
+    // Peer backfill sync — server has no history to serve, so these just fan
+    // requests/answers out to other online members over the existing relay.
+    // See messageController.ts / dmController.ts for the full explanation.
+    requestChannelSync: (orgId, chanId, since) =>
+      fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/messages/sync-request`, { method: 'POST', body: { since } }),
+    respondChannelSync: (orgId, chanId, toUserId, messages) =>
+      fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/messages/sync-response`, { method: 'POST', body: { to_user_id: toUserId, messages } }),
+    requestDmSync: (userId, since) =>
+      fetchWithAuth(`/dm/${userId}/sync-request`, { method: 'POST', body: { since } }),
+    respondDmSync: (userId, messages) =>
+      fetchWithAuth(`/dm/${userId}/sync-response`, { method: 'POST', body: { messages } }),
+
+    // MLS device identity / group commits — see deviceController.ts /
+    // mlsGroupController.ts. KeyPackages are public key material by design
+    // (no different a security boundary than fetching someone's public key).
+    registerDevice: (deviceId, keyPackageB64, credentialB64) =>
+      fetchWithAuth(`/devices`, { method: 'POST', body: { device_id: deviceId, key_package: keyPackageB64, credential: credentialB64 } }),
+    getUserDeviceKeyPackages: (userId) =>
+      fetchWithAuth(`/devices/${userId}/key-packages`, { method: 'GET' }),
+    submitDmCommit: (userId, epoch, commitB64, welcomeB64 = null) =>
+      fetchWithAuth(`/dm/${userId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64 } }),
+    submitChannelCommit: (orgId, chanId, epoch, commitB64, welcomeB64 = null, welcomedUserIds = []) =>
+      fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64, welcomed_user_ids: welcomedUserIds } }),
+
     // Abuse reports
     sendAbuseReport: (body) =>
       fetchWithAuth('/abuse-reports', { method: 'POST', body: body }),

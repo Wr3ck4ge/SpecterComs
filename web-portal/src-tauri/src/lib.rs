@@ -478,6 +478,85 @@ fn delete_credentials(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ─── Encrypted MLS Device State Storage ───────────────────────────────────────
+// The MLS device state (signature private key, plus every group's ratchet
+// tree/epoch secrets this device holds) is opaque bytes produced by the
+// mls-crypto WASM module. It's AES-256-GCM encrypted here with its own
+// OS-keyring-held key — a distinct keyring entry from creds_key() above, so
+// compromising one doesn't expose the other — and persisted to its own file
+// in the app data directory, following the same shape as save_credentials.
+
+const MLS_KEYRING_SERVICE: &str = "specter-coms-mls";
+const MLS_KEYRING_USER: &str = "identity-key";
+
+fn mls_state_key() -> Result<[u8; 32], String> {
+    let entry = keyring::Entry::new(MLS_KEYRING_SERVICE, MLS_KEYRING_USER)
+        .map_err(|e| format!("keyring entry error: {e}"))?;
+
+    if let Ok(existing) = entry.get_secret() {
+        if existing.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&existing);
+            return Ok(key);
+        }
+    }
+
+    let mut key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+    entry.set_secret(&key).map_err(|e| format!("keyring set error: {e}"))?;
+    Ok(key)
+}
+
+fn mls_state_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(dir.join(".specter_mls_state"))
+}
+
+/// Encrypt and persist this device's MLS state blob (as produced by
+/// mls-crypto's generate_identity/create_group/add_member/etc.).
+#[tauri::command]
+fn mls_save_state(app: tauri::AppHandle, state: Vec<u8>) -> Result<(), String> {
+    let key_bytes = mls_state_key()?;
+    let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+    let cipher = Aes256Gcm::new(key);
+
+    let mut nonce_bytes = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher.encrypt(nonce, state.as_slice())
+        .map_err(|e| format!("encrypt error: {e}"))?;
+
+    let path = mls_state_path(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut blob = nonce_bytes.to_vec();
+    blob.extend_from_slice(&ciphertext);
+    std::fs::write(&path, blob).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Load and decrypt this device's MLS state blob. Returns an empty Vec if
+/// none is saved yet (mls-crypto treats empty bytes as "no state yet,
+/// generate a fresh identity") or the file is unreadable/corrupted.
+#[tauri::command]
+fn mls_load_state(app: tauri::AppHandle) -> Vec<u8> {
+    (|| -> Option<Vec<u8>> {
+        let path = mls_state_path(&app).ok()?;
+        let blob = std::fs::read(&path).ok()?;
+        if blob.len() < 13 { return None; }
+
+        let key_bytes = mls_state_key().ok()?;
+        let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
+        let cipher = Aes256Gcm::new(key);
+        let nonce = Nonce::from_slice(&blob[..12]);
+
+        cipher.decrypt(nonce, &blob[12..]).ok()
+    })().unwrap_or_default()
+}
+
 /// Managed state holding the overlay WebviewWindow so commands can access it
 /// without needing to look it up by label (which can fail if Tauri internals
 /// haven't fully initialised the window registry yet).
@@ -762,7 +841,7 @@ pub fn run() {
   tauri::Builder::default()
     .manage(MisconductReportBuffer { frames: Mutex::new(VecDeque::new()) })
     .manage(OverlayHandle(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![get_hwid, submit_report_frame, snip_report_clip, capture_start, capture_stop, capture_list_monitors, capture_list_sources, capture_get_perf_report, capture_get_errors, capture_get_breadcrumbs, get_setup_errors, get_capture_debug_log, get_app_log, client_log, capture_get_compatibility_report, save_credentials, load_credentials, delete_credentials, show_overlay, hide_overlay, close_app])
+        .invoke_handler(tauri::generate_handler![get_hwid, submit_report_frame, snip_report_clip, capture_start, capture_stop, capture_list_monitors, capture_list_sources, capture_get_perf_report, capture_get_errors, capture_get_breadcrumbs, get_setup_errors, get_capture_debug_log, get_app_log, client_log, capture_get_compatibility_report, save_credentials, load_credentials, delete_credentials, mls_save_state, mls_load_state, show_overlay, hide_overlay, close_app])
     .plugin(tauri_plugin_specter_audio::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_process::init())

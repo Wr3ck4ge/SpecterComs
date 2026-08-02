@@ -9,6 +9,7 @@ This repo is a public snapshot of the app code for anyone who wants to see how i
 | Path | What it is |
 |---|---|
 | `web-portal/` | Desktop client — Tauri 2 (Rust) shell + React frontend. Voice, the in-game overlay window, mission/event tooling, org management. |
+| `web-portal/mls-crypto/` | Rust/WASM crate — end-to-end encryption for text and video, built on [MLS (RFC 9420)](https://datatracker.ietf.org/doc/html/rfc9420) via [OpenMLS](https://github.com/openmls/openmls). |
 | `services/identity-node/` | Node/TypeScript API — auth, orgs, messaging, billing, push notifications. |
 | `services/media-rust/` | Rust media pipeline — audio/video relay and mixing. |
 | `packages/shared-web/` | Shared frontend code/API client used by both `web-portal` and `website`. |
@@ -19,6 +20,7 @@ This repo is a public snapshot of the app code for anyone who wants to see how i
 - **Desktop client:** Tauri 2, Rust, React, Vite
 - **Backend:** Node.js, TypeScript, Express
 - **Media:** Rust (custom SFU/relay), FFmpeg
+- **End-to-end encryption:** MLS (RFC 9420) via OpenMLS, compiled to WASM — DMs, org channels, and video are genuinely E2E encrypted per-device (multi-device aware), with forward secrecy and post-compromise security. Voice stays TLS-only: the media relay mixes audio server-side for priority ducking (so a squad lead's voice cuts through), which is fundamentally incompatible with E2E without dropping that feature.
 - **Frontend tooling:** Tailwind, Vite
 
 ## Status

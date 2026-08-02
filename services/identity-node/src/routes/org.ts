@@ -10,6 +10,7 @@ import modRoutes from './mod.js';
 import eventRoutes from './events.js';
 import billingRoutes from './billing.js';
 import messageRoutes from './message.js';
+import mlsGroupRoutes from './mlsGroup.js';
 
 const router = Router();
 
@@ -24,6 +25,7 @@ router.use('/:orgId/members', modRoutes);
 router.use('/:orgId/events', eventRoutes);
 router.use('/:id/billing', billingRoutes);
 router.use('/:orgId/channels/:chanId/messages', messageRoutes);
+router.use('/:orgId/channels/:chanId/mls', mlsGroupRoutes);
 
 router.post('/',                        validate(createOrgSchema), createOrg);
 router.get('/me',                       getMyOrgs);

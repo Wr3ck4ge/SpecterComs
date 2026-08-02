@@ -13,6 +13,7 @@ import friendRoutes from './routes/friend.js';
 import downloadRoutes from './routes/download.js';
 import sseRoutes from './routes/sse.js';
 import dmRoutes from './routes/dm.js';
+import deviceRoutes from './routes/device.js';
 import abuseRoutes from './routes/abuse.js';
 import diagRoutes from './routes/diag.js';
 import gameShipsRoutes from './routes/gameShips.js';
@@ -106,6 +107,7 @@ app.use('/diag', diagRoutes);
 app.use('/game-ships', gameShipsRoutes);
 app.use('/hangar', hangarRoutes);
 app.use('/dm', dmRoutes);
+app.use('/devices', deviceRoutes);
 app.use('/abuse-reports', abuseRoutes);
 
 // Serve uploaded chat images

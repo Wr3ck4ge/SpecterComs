@@ -14,13 +14,29 @@ import useEventStream from '../useEventStream';
 import useMonitorChannel from '../useMonitorChannel';
 import UserProfileModal from './UserProfileModal';
 import BillingPanel, { BILLING_UI_ENABLED } from './BillingPanel';
-import { saveChannelMessage, getChannelMessages, saveDmMessage, getDmMessages } from '../messageStore';
+import {
+  saveChannelMessage, getChannelMessages, saveDmMessage, getDmMessages,
+  getLatestChannelTimestamp, getChannelMessagesSince, saveChannelMessages,
+  getLatestDmTimestamp, getDmMessagesSince, saveDmMessages,
+} from '../messageStore';
+import {
+  ensureDmGroup, encryptDm, decryptDmOrRecallOwn, notePendingSent, handleDmCommit, handleDmWelcome,
+  ensureChannelGroup, encryptChannel, decryptChannelOrRecallOwn, handleChannelCommit, handleChannelWelcome,
+} from '../mlsSession';
 import { barColor, fmtBytes } from '../utils/format';
 
 // ── Module-level relay refs ───────────────────────────────────────────────────
 // TextChat and DmCabinet set these on mount; useEventStream calls them on message_relay.
 const _textChatRelayRef  = { current: null };
 const _dmCabinetRelayRef = { current: null };
+// Peer backfill sync — see messageStore.js / messageController.js /
+// dmController.js. TextChat/DmCabinet set these on mount; useEventStream
+// calls them on sync_request (someone else wants our local history) and
+// sync_response (someone answered a request we made).
+const _textChatSyncRequestRef  = { current: null };
+const _textChatSyncResponseRef = { current: null };
+const _dmCabinetSyncRequestRef  = { current: null };
+const _dmCabinetSyncResponseRef = { current: null };
 const LAST_SELECTED_ORG_KEY = 'specter_last_selected_org_id';
 
 // ── Palette ─────────────────────────────────────────────────────────────────
@@ -408,14 +424,87 @@ function DmCabinet({ friend, onBack, currentUserId }) {
       if (payload.context !== 'dm' || payload.partner_id !== friend.user_id) return;
       const msg = payload.message;
       if (!msg) return;
-      saveDmMessage({ ...msg, conversation_id: convId }).catch(() => {});
-      setMessages(prev => {
-        if (prev.some(m => m.id === msg.id)) return prev;
-        return [...prev, msg];
-      });
+      (async () => {
+        // isOwnAccount: could be this exact device's own message echoed back
+        // for multi-device sync (undecryptable here — recalled from the
+        // pending-sent queue instead) or a genuinely different device on
+        // this same account (decrypts normally). See decryptDmOrRecallOwn.
+        const isOwnAccount = msg.sender_id === currentUserId;
+        let plaintext = null;
+        try {
+          plaintext = await decryptDmOrRecallOwn(api, currentUserId, convId, msg.encrypted_content, isOwnAccount);
+        } catch {
+          plaintext = null; // genuinely undecryptable (e.g. arrived before this device joined the group)
+        }
+        const stored = { ...msg, conversation_id: convId, plaintext };
+        saveDmMessage(stored).catch(() => {});
+        setMessages(prev => {
+          if (prev.some(m => m.id === msg.id)) return prev;
+          return [...prev, stored];
+        });
+      })();
     };
     return () => { _dmCabinetRelayRef.current = null; };
   }, [friend?.user_id, convId]);
+
+  // ── Ask the other participant for anything missing from our local history ─
+  React.useEffect(() => {
+    if (!convId || !friend?.user_id) return;
+    let cancelled = false;
+    (async () => {
+      const since = await getLatestDmTimestamp(convId).catch(() => null);
+      if (cancelled) return;
+      api.requestDmSync(friend.user_id, since).catch(() => {});
+    })();
+    return () => { cancelled = true; };
+  }, [convId, friend?.user_id]);
+
+  // ── Answer the other participant's sync-request with what we have locally ─
+  React.useEffect(() => {
+    if (!convId || !friend?.user_id) return;
+    _dmCabinetSyncRequestRef.current = (payload) => {
+      if (payload.conversation_id !== convId) return;
+      if (payload.requester_id === currentUserId) return; // don't answer our own request
+      getDmMessagesSince(convId, payload.since).then((rows) => {
+        if (rows.length === 0) return;
+        const messages = rows.map(({ id, sender_id, to_user_id, callsign, encrypted_content, timestamp }) => (
+          { id, sender_id, to_user_id, callsign, encrypted_content, timestamp }
+        ));
+        api.respondDmSync(friend.user_id, messages).catch(() => {});
+      }).catch(() => {});
+    };
+    return () => { _dmCabinetSyncRequestRef.current = null; };
+  }, [convId, friend?.user_id, currentUserId]);
+
+  // ── Merge the other participant's answer into local store + UI ───────────
+  // Backfilled rows carry real ciphertext (see respondDmSync's field-picked
+  // payload above) — each is decrypted once here, same one-shot constraint
+  // as the live relay path, before it's ever stored or rendered.
+  React.useEffect(() => {
+    _dmCabinetSyncResponseRef.current = (payload) => {
+      if (payload.conversation_id !== convId || !payload.messages?.length) return;
+      (async () => {
+        const decrypted = await Promise.all(payload.messages.map(async (m) => {
+          const isOwnAccount = m.sender_id === currentUserId;
+          let plaintext = null;
+          try {
+            plaintext = await decryptDmOrRecallOwn(api, currentUserId, convId, m.encrypted_content, isOwnAccount);
+          } catch {
+            plaintext = null;
+          }
+          return { ...m, conversation_id: convId, plaintext };
+        }));
+        saveDmMessages(convId, decrypted).catch(() => {});
+        setMessages((prev) => {
+          const existing = new Set(prev.map((m) => m.id));
+          const fresh = decrypted.filter((m) => !existing.has(m.id));
+          if (fresh.length === 0) return prev;
+          return [...prev, ...fresh].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        });
+      })();
+    };
+    return () => { _dmCabinetSyncResponseRef.current = null; };
+  }, [convId, currentUserId]);
 
   // ── Scroll to bottom on new messages ─────────────────────────────────────
   React.useEffect(() => {
@@ -428,7 +517,10 @@ function DmCabinet({ friend, onBack, currentUserId }) {
     inFlightRef.current = true;
     setInput('');
     try {
-      await api.sendDmMessage(friend.user_id, content);
+      await ensureDmGroup(api, currentUserId, friend.user_id, convId);
+      const ciphertext = await encryptDm(api, currentUserId, convId, content);
+      notePendingSent(convId, content);
+      await api.sendDmMessage(friend.user_id, ciphertext);
     } catch {
       // Sender receives own message back via SSE relay; silent failure is acceptable
     }
@@ -502,7 +594,10 @@ function DmCabinet({ friend, onBack, currentUserId }) {
                   fontSize: 13, color: mine ? '#e0f2fe' : '#e5e7eb', lineHeight: 1.5,
                   wordBreak: 'break-word',
                 }}>
-                  {msg.encrypted_content}
+                  {/* A row with no `plaintext` key at all predates E2E — encrypted_content
+                      was genuinely plaintext back then, so show it as-is. A row where
+                      plaintext is explicitly null means decryption was attempted and failed. */}
+                  {msg.plaintext !== undefined ? (msg.plaintext ?? '[unable to decrypt]') : msg.encrypted_content}
                   <span style={{ display: 'block', fontSize: 9, color: '#0e7490', marginTop: 2, textAlign: mine ? 'right' : 'left' }}>
                     {fmtTime(msg.timestamp)}
                   </span>
@@ -1243,25 +1338,96 @@ function TextChat({ orgId, channel, user }) {
   useEffect(() => {
     _textChatRelayRef.current = (payload) => {
       if (payload.channel_id !== channel?.id) return;
-      const msg = {
-        id:                payload.id,
-        channel_id:        payload.channel_id,
-        sender_id:         payload.sender_id,
-        callsign:          payload.callsign ?? null,
-        global_tag:        payload.global_tag ?? null,
-        encrypted_content: payload.encrypted_content,
-        image_url:         payload.image_url ?? null,
-        timestamp:         payload.timestamp,
-        received_at:       new Date().toISOString(),
-      };
-      saveChannelMessage(msg).catch(() => {});
-      setMessages(prev => {
-        if (prev.some(m => m.id === msg.id)) return prev;
-        return [...prev, msg];
-      });
+      (async () => {
+        const isOwnAccount = payload.sender_id === user?.id;
+        let plaintext = null;
+        try {
+          plaintext = await decryptChannelOrRecallOwn(api, user?.id, channel.id, payload.encrypted_content, isOwnAccount);
+        } catch {
+          plaintext = null; // genuinely undecryptable (e.g. arrived before this device joined the group)
+        }
+        const msg = {
+          id:                payload.id,
+          channel_id:        payload.channel_id,
+          sender_id:         payload.sender_id,
+          callsign:          payload.callsign ?? null,
+          global_tag:        payload.global_tag ?? null,
+          encrypted_content: payload.encrypted_content,
+          plaintext,
+          image_url:         payload.image_url ?? null,
+          timestamp:         payload.timestamp,
+          received_at:       new Date().toISOString(),
+        };
+        saveChannelMessage(msg).catch(() => {});
+        setMessages(prev => {
+          if (prev.some(m => m.id === msg.id)) return prev;
+          return [...prev, msg];
+        });
+      })();
     };
     return () => { _textChatRelayRef.current = null; };
-  }, [channel?.id]);
+  }, [channel?.id, user?.id]);
+
+  // ── Ask other online members for anything missing from our local history ──
+  // There's no server copy to pull from, so this fans out over the same
+  // per-channel relay subject everyone's already subscribed to.
+  useEffect(() => {
+    if (!channel?.id || !orgId) return;
+    let cancelled = false;
+    (async () => {
+      const since = await getLatestChannelTimestamp(channel.id).catch(() => null);
+      if (cancelled) return;
+      api.requestChannelSync(orgId, channel.id, since).catch(() => {});
+    })();
+    return () => { cancelled = true; };
+  }, [channel?.id, orgId]);
+
+  // ── Answer another member's sync-request with whatever we have locally ───
+  useEffect(() => {
+    if (!channel?.id || !orgId) return;
+    _textChatSyncRequestRef.current = (payload) => {
+      if (payload.channel_id !== channel.id) return;
+      if (payload.requester_id === user?.id) return; // don't answer our own request
+      getChannelMessagesSince(channel.id, payload.since).then((rows) => {
+        if (rows.length === 0) return;
+        const messages = rows.map(({ id, sender_id, callsign, global_tag, encrypted_content, image_url, timestamp }) => (
+          { id, sender_id, callsign, global_tag, encrypted_content, image_url, timestamp }
+        ));
+        api.respondChannelSync(orgId, channel.id, payload.requester_id, messages).catch(() => {});
+      }).catch(() => {});
+    };
+    return () => { _textChatSyncRequestRef.current = null; };
+  }, [channel?.id, orgId, user?.id]);
+
+  // ── Merge a peer's answer to our own sync-request into local store + UI ───
+  // Backfilled rows carry real ciphertext (see respondChannelSync's
+  // field-picked payload) — each is decrypted once here, same one-shot
+  // constraint as the live relay path, before it's ever stored or rendered.
+  useEffect(() => {
+    _textChatSyncResponseRef.current = (payload) => {
+      if (payload.channel_id !== channel?.id || !payload.messages?.length) return;
+      (async () => {
+        const decrypted = await Promise.all(payload.messages.map(async (m) => {
+          const isOwnAccount = m.sender_id === user?.id;
+          let plaintext = null;
+          try {
+            plaintext = await decryptChannelOrRecallOwn(api, user?.id, channel.id, m.encrypted_content, isOwnAccount);
+          } catch {
+            plaintext = null;
+          }
+          return { ...m, channel_id: channel.id, plaintext, received_at: new Date().toISOString() };
+        }));
+        saveChannelMessages(channel.id, decrypted).catch(() => {});
+        setMessages((prev) => {
+          const existing = new Set(prev.map((m) => m.id));
+          const fresh = decrypted.filter((m) => !existing.has(m.id));
+          if (fresh.length === 0) return prev;
+          return [...prev, ...fresh].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        });
+      })();
+    };
+    return () => { _textChatSyncResponseRef.current = null; };
+  }, [channel?.id, user?.id]);
 
   // ── Auto-scroll on new messages ───────────────────────────────────────────
   useEffect(() => {
@@ -1274,8 +1440,14 @@ function TextChat({ orgId, channel, user }) {
     if (!text || !orgId || !channel?.id) return;
     setInput('');
     setSending(true);
-    // Pass content as encrypted_content (E2E encryption to be added in a future phase)
-    await api.sendMessage(orgId, channel.id, text);
+    try {
+      await ensureChannelGroup(api, user?.id, orgId, channel.id);
+      const ciphertext = await encryptChannel(api, user?.id, channel.id, text);
+      notePendingSent(channel.id, text);
+      await api.sendMessage(orgId, channel.id, ciphertext);
+    } catch {
+      // Sender receives own message back via SSE relay; silent failure is acceptable
+    }
     setSending(false);
     // Optimistic message arrives back via SSE message_relay
   };
@@ -1322,9 +1494,12 @@ function TextChat({ orgId, channel, user }) {
               {msg.callsign || 'Unknown'}
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              {msg.encrypted_content && (
+              {/* A row with no `plaintext` key at all predates E2E — encrypted_content
+                  was genuinely plaintext back then, so show it as-is. A row where
+                  plaintext is explicitly null means decryption was attempted and failed. */}
+              {(msg.plaintext !== undefined ? msg.plaintext : msg.encrypted_content) != null && (
                 <span style={{ fontSize: 13, color: '#e5e7eb', wordBreak: 'break-word', fontFamily: 'monospace' }}>
-                  <MessageContent text={msg.encrypted_content} />
+                  <MessageContent text={msg.plaintext !== undefined ? (msg.plaintext ?? '[unable to decrypt]') : msg.encrypted_content} />
                 </span>
               )}
               {msg.image_url && (
@@ -1365,7 +1540,9 @@ function TextChat({ orgId, channel, user }) {
               The content below will be visible to admins. Only proceed if you believe this message violates the rules.
             </div>
             <div style={{ fontSize: 13, color: '#e5e7eb', background: '#041018', border: '1px solid #0e2233', borderRadius: 3, padding: '8px 10px', marginBottom: 14, wordBreak: 'break-all', maxHeight: 120, overflow: 'auto' }}>
-              {reportModal.msg.encrypted_content}
+              {reportModal.msg.plaintext !== undefined
+                ? (reportModal.msg.plaintext ?? '[unable to decrypt]')
+                : reportModal.msg.encrypted_content}
             </div>
             <div className="flex gap-2 justify-end">
               <button
@@ -1378,11 +1555,15 @@ function TextChat({ orgId, channel, user }) {
                   setReportModal(null);
                   const iv  = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2,'0')).join('');
                   const tag = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2,'0')).join('');
+                  // Reports need to stay readable by admins reviewing them, so this
+                  // submits the resolved plaintext (see the render logic above) —
+                  // submitting msg.encrypted_content here would hand admins ciphertext
+                  // they have no way to decrypt.
                   await api.sendAbuseReport({
                     accused_id:        msg.sender_id,
                     channel_id:        msg.channel_id,
                     reported_at:       msg.timestamp,
-                    encrypted_content: msg.encrypted_content,
+                    encrypted_content: msg.plaintext !== undefined ? (msg.plaintext ?? '[unable to decrypt]') : msg.encrypted_content,
                     encryption_iv:     iv,
                     encryption_tag:    tag,
                   });
@@ -2615,6 +2796,25 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
       _textChatRelayRef.current?.(payload);
       _dmCabinetRelayRef.current?.(payload);
       commLinkRelayRef.current?.(payload);
+    },
+    // MLS group-management traffic (see mlsGroupController.ts's submitDmCommit) —
+    // handled globally, not just while the relevant DM is open, since a
+    // Commit/Welcome can arrive for a conversation the user isn't currently
+    // viewing. Both handlers are no-ops when not actionable for this device
+    // (see mlsSession.js's handleDmCommit/handleDmWelcome doc comments).
+    mls_commit: (payload) => {
+      if (payload?.conversation_id && payload?.commit) {
+        handleDmCommit(api, user?.id, payload.conversation_id, payload.commit).catch(() => {});
+      } else if (payload?.channel_id && payload?.commit) {
+        handleChannelCommit(api, user?.id, payload.channel_id, payload.commit).catch(() => {});
+      }
+    },
+    mls_welcome: (payload) => {
+      if (payload?.conversation_id && payload?.welcome) {
+        handleDmWelcome(api, user?.id, payload.conversation_id, payload.welcome).catch(() => {});
+      } else if (payload?.channel_id && payload?.welcome) {
+        handleChannelWelcome(api, user?.id, payload.channel_id, payload.welcome).catch(() => {});
+      }
     },
     // Real-time channel occupant presence
     channel_presence_changed: (payload) => {
@@ -4120,8 +4320,10 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
                 );
               })()}
 
-              {/* Calendar header tab */}
-              {selectedOrg && (
+              {/* Calendar header tab — hidden while actively watching a shared stream so it
+                  doesn't float above (and its dropdown doesn't nearly cover) CommLink's
+                  full-bleed video panel underneath. */}
+              {selectedOrg && !watchTarget && (
                 <button
                   onClick={() => setCalendarOpen(o => !o)}
                   className="flex items-center gap-2 px-4 py-1.5 flex-shrink-0 transition-colors hover:bg-white/5"
@@ -4144,7 +4346,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
               )}
 
               {/* Calendar dropdown overlay — opens over channel content */}
-              {selectedOrg && calendarOpen && (
+              {selectedOrg && calendarOpen && !watchTarget && (
                 <div
                   className="absolute left-0 right-0 z-20 overflow-y-auto depth-floating"
                   style={{

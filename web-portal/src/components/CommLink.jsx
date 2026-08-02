@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api';
-import initWasm, { SFrameCrypto, generate_group_key } from 'wasm-crypto';
+import initWasm, { SFrameCrypto } from 'wasm-crypto';
 import { saveChannelMessage, getChannelMessages } from '../messageStore';
+import { ensureChannelGroup, exportGroupSecret } from '../mlsSession';
 
 // ── Diagnostic trace logging (debrief/reconnect-storm investigation) ────────
 // See WarRoom.jsx's traceLog for the full rationale — same mechanism (writes
@@ -157,12 +158,6 @@ function annexBToAvcc(data) {
   }
   return out;
 }
-
-// Placeholder key for the SFrame crypto engine below — it is initialized but
-// not yet applied to any traffic (see voiceEncryptionEnabled). Voice runs
-// over TLS/WebTransport today; a real per-session key distributed via MLS
-// or Double Ratchet is required before this is used for text/video E2E.
-const TEST_KEY = new Uint8Array(32);
 
 // Stream quality profiles — indexed by org tier (0 = Free, 1 = Premium, 2 = Ultra)
 // Tier 2 is wired and ready; gate it via org.tier = 2 in the DB when billing is ready.
@@ -737,19 +732,27 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     setStatus('connecting');
     addMsg(`Initiating handshake with ${org.callsign} [${channelRef.current.name}]...`);
 
-    // Phase 4: voice path uses no E2E encryption — TLS on WebTransport is the transport boundary.
-    // WASM crypto is kept initialised (non-fatal) for future text/video encryption paths.
+    // Voice is mixed server-side by media-rust (priority ducking needs plaintext
+    // PCM to mix), which is fundamentally incompatible with E2E without dropping
+    // that feature — so voice stays TLS-on-WebTransport only. Video is a pure
+    // relay server-side (media-rust never decodes it), so it's keyed from this
+    // channel's real MLS group below instead.
     const voiceEncryptionEnabled = false;
 
     try {
-      // Initialize WASM cryptography engine for this session (non-fatal for voice)
+      // Initialize WASM cryptography engine for this session (non-fatal — video
+      // just stays unencrypted, same as voice, if this fails or the MLS group
+      // can't be established for any reason)
       try {
         await initWasm();
-        cryptoRef.current = new SFrameCrypto(TEST_KEY);
-        addMsg('WASM Cryptography Engine Initialized (ChaCha20Poly1305)');
+        const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+        await ensureChannelGroup(api, currentUserId, org.id, channelRef.current.id);
+        const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
+        cryptoRef.current = new SFrameCrypto(videoKey);
+        addMsg('WASM Cryptography Engine Initialized (ChaCha20Poly1305, MLS-derived key)');
       } catch (err) {
-        console.warn('WASM SFrame init failed (non-fatal, voice E2E is disabled):', err);
-        addMsg('WASM Crypto unavailable (non-fatal, voice runs over TLS only).', 'system');
+        console.warn('WASM SFrame init failed (non-fatal, video E2E is disabled):', err);
+        addMsg('WASM Crypto unavailable (non-fatal, video runs over TLS only).', 'system');
       }
       
       // Initialize Audio Mixer Core
@@ -878,11 +881,14 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       } else if (msg.type === 'Leave') {
           setRoster(prev => {
               const updated = prev.filter(u => u !== msg.data);
-              // Key Rotation Logic: Rotate SFrame keys immediately on user exit
-              // Ensure the departed user's stolen context cannot decrypt future datagrams
-              if (updated.length < prev.length) {
-                  rotateGroupKey();
-              }
+              // Leaving the voice roster is presence, not group membership — an
+              // org member who steps out of the call for a minute still holds a
+              // legitimate copy of the MLS group secret, so there's nothing to
+              // revoke here. This just re-derives from whatever the group's
+              // current epoch actually is, picking up a real rotation if one
+              // happened concurrently (e.g. another client's commit landed) —
+              // a no-op key-for-key if it didn't.
+              refreshVideoKey();
               return updated;
           });
       } else if (msg.type === 'Move') {
@@ -907,14 +913,13 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       }
   };
 
-  const rotateGroupKey = () => {
+  const refreshVideoKey = async () => {
       try {
-          const newKey = generate_group_key();
-          cryptoRef.current = new SFrameCrypto(newKey);
-          addMsg('[Security] SenderKey rotated due to roster change (PFS enforced).', 'system');
+          const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+          const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
+          cryptoRef.current = new SFrameCrypto(videoKey);
       } catch (err) {
-          console.error("Key rotation failed", err);
-          addMsg('[Security] CRITICAL: Key rotation failed!', 'error');
+          console.error("Video key refresh failed", err);
       }
   };
 
@@ -1109,7 +1114,22 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         // H.264 data arrives in Annex-B format (FFmpeg/native encoder output).
         // VideoDecoder configured WITHOUT a description operates in Annex-B
         // (bytestream) mode per the WebCodecs AVC spec — do NOT convert to AVCC.
-        const frameData = buffer.slice(9, 4 + frameSize);
+        let frameData = buffer.slice(9, 4 + frameSize);
+        // The wire payload is this channel's MLS-keyed ciphertext (see
+        // cryptoRef/refreshVideoKey above) — media-rust never sees plaintext,
+        // only this [size][type][timestamp] header plus opaque bytes. A
+        // decrypt failure (stale key mid-rotation, or crypto init failed and
+        // the sender never encrypted at all) drops just this one frame rather
+        // than feeding garbage into the decoder.
+        let frameUndecryptable = false;
+        if (cryptoRef.current) {
+          try {
+            frameData = cryptoRef.current.decrypt(frameData);
+          } catch (err) {
+            frameUndecryptable = true;
+          }
+        }
+        if (!frameUndecryptable) {
         // Accumulate GOP buffer so we can replay a complete reference chain when seeding
         // the overlay decoder — sending only a keyframe causes P-frame decode errors.
         if (frameType === 'key') {
@@ -1151,6 +1171,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
             }
           }
         }
+        } // !frameUndecryptable
         const recvMs = performance.now() - recvStageStart;
         const stats = videoStageStatsRef.current;
         stats.recvCount += 1;
@@ -1171,6 +1192,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         }
         buffer = buffer.slice(4 + frameSize);
 
+        if (!frameUndecryptable) {
         // Relay raw H.264 NAL bytes to overlay for its own decoder — no extra
         // network cost, just local IPC. Overlay decodes at native stream quality.
         // On keyframes we re-send the header atomically (same .then() callback) so
@@ -1210,6 +1232,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
             }).catch(() => {});
           }
         }
+        } // !frameUndecryptable
       }
     } catch {}
     if (decoder.state !== 'closed') decoder.close();
@@ -2015,8 +2038,19 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     let submitVideoFrame;
     const encoder = new VideoEncoder({
       output: (chunk) => {
-        const data = new Uint8Array(chunk.byteLength);
-        chunk.copyTo(data);
+        const rawData = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(rawData);
+        // Encrypt with this channel's MLS-derived key (see cryptoRef/refreshVideoKey
+        // above) — media-rust relays this payload opaquely, never decoding it, so
+        // this is the only place plaintext video ever exists off-device.
+        let data = rawData;
+        if (cryptoRef.current) {
+          try {
+            data = cryptoRef.current.encrypt(rawData);
+          } catch (err) {
+            console.warn('[share] video frame encryption failed, sending unencrypted:', err);
+          }
+        }
         const frameSize = 1 + 4 + data.length;
         const frameBuf = new ArrayBuffer(4 + frameSize);
         const v = new DataView(frameBuf);
@@ -2404,13 +2438,26 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           const bin = atob(data_b64);
           const nalData = new Uint8Array(bin.length);
           for (let i = 0; i < bin.length; i++) nalData[i] = bin.charCodeAt(i);
-          const frameSize = 1 + 4 + nalData.length;
+          // Encrypt with this channel's MLS-derived key before it leaves this
+          // process — media-rust relays it opaquely (see cryptoRef/refreshVideoKey
+          // above). The overlay self-view relay above uses nalData pre-encryption
+          // deliberately: that's local Tauri IPC to this same device, never
+          // touching the network or media-rust.
+          let payload = nalData;
+          if (cryptoRef.current) {
+            try {
+              payload = cryptoRef.current.encrypt(nalData);
+            } catch (err) {
+              console.warn('[share] video frame encryption failed, sending unencrypted:', err);
+            }
+          }
+          const frameSize = 1 + 4 + payload.length;
           const frameBuf = new ArrayBuffer(4 + frameSize);
           const v = new DataView(frameBuf);
           v.setUint32(0, frameSize);
           v.setUint8(4, is_keyframe ? 0 : 1);
           v.setUint32(5, timestamp_ms >>> 0);
-          new Uint8Array(frameBuf, 9).set(nalData);
+          new Uint8Array(frameBuf, 9).set(payload);
           submitVideoFrame(new Uint8Array(frameBuf), is_keyframe);
         });
         captureUnlistenRef.current = unlistenNal;
@@ -2470,13 +2517,23 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
             const bin = atob(data_b64);
             const nalData = new Uint8Array(bin.length);
             for (let i = 0; i < bin.length; i++) nalData[i] = bin.charCodeAt(i);
-            const frameSize = 1 + 4 + nalData.length;
+            // Same channel key as the main video stream above — this is a
+            // second, independent network stream to the same server.
+            let payload = nalData;
+            if (cryptoRef.current) {
+              try {
+                payload = cryptoRef.current.encrypt(nalData);
+              } catch (err) {
+                console.warn('[simulcast] overlay frame encryption failed, sending unencrypted:', err);
+              }
+            }
+            const frameSize = 1 + 4 + payload.length;
             const frameBuf = new ArrayBuffer(4 + frameSize);
             const v = new DataView(frameBuf);
             v.setUint32(0, frameSize);
             v.setUint8(4, is_keyframe ? 0 : 1);
             v.setUint32(5, timestamp_ms >>> 0);
-            new Uint8Array(frameBuf, 9).set(nalData);
+            new Uint8Array(frameBuf, 9).set(payload);
             submitOverlayFrame(new Uint8Array(frameBuf), is_keyframe);
           });
           captureOverlayUnlistenRef.current = unlistenOverlayNal;
