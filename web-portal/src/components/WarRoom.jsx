@@ -656,9 +656,9 @@ function EventHistoryPanel({ orgId }) {
 // CommLink's rolling drop/reconnect count over the last 60s (see
 // recomputeConnectionQuality in CommLink.jsx). Purely a visibility aid: it
 // doesn't change any behavior itself, but turns "is my connection actually
-// flaky right now" from a question that used to require pulling server logs
-// into something visible at a glance, for the user and for anyone helping
-// them debug a report of choppy audio/video.
+// flaky right now" into something visible at a glance, for the user and for
+// anyone helping them debug a report of choppy audio/video, instead of a
+// question that requires pulling server logs.
 const CONNECTION_QUALITY_META = {
   excellent: { bars: 4, color: '#22c55e', label: 'Excellent connection' },
   good:      { bars: 3, color: '#22c55e', label: 'Good connection — one recent drop' },
@@ -2014,18 +2014,14 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
         // Rust's show_overlay already verifies (and SetWindowPos-corrects, if
         // needed) that the window is genuinely visible on the main thread
         // before it ever returns success — see do_show_overlay_on_main_thread.
-        // A JS-side re-check here used to add a second, independent
-        // getByLabel()/isVisible() query that could disagree with Rust's own
-        // already-authoritative confirmation and throw 'Overlay did not
-        // become visible' even when the window really was showing. That
-        // throw skipped setIsOverlay(true) below entirely, which broke three
-        // things at once: no overlay-update was ever emitted (empty channel
-        // name / stream picker despite the HUD being visible on screen), and
-        // — since React's isOverlay state never flipped to true — the NEXT
-        // toggle click computed nextOverlayState from a stale `false`,
-        // meaning it tried to open again instead of closing. Trust the Rust
-        // signal directly instead of re-deriving it from a second, flakier
-        // query.
+        // Trust that signal directly rather than adding a second, independent
+        // getByLabel()/isVisible() query here: a disagreeing re-check could
+        // throw 'Overlay did not become visible' even when the window really
+        // was showing, which would skip setIsOverlay(true) below — leaving no
+        // overlay-update emitted (empty channel name / stream picker despite
+        // the HUD being visible on screen) and React's isOverlay state stuck
+        // at `false`, so the next toggle click would try to open again
+        // instead of closing.
         console.log('[overlay] overlay shown — emitting overlay-update');
         invoke('client_log', { msg: '[Overlay] native show_overlay returned' }).catch(() => {});
 
@@ -2418,11 +2414,10 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
   };
 
   // Shared by scheduleEventStartPrompts' local timer and the event_launched SSE
-  // handler below — previously this logic only lived inline in the SSE handler,
-  // so a user whose join prompt fired from the local start-time timer (rather
-  // than receiving the launch SSE live) never got monitor/frequency access
-  // populated. Kept component-scoped (not module-level) since it closes over
-  // several setState setters.
+  // handler below, so a user whose join prompt fires from the local
+  // start-time timer (rather than receiving the launch SSE live) still gets
+  // monitor/frequency access populated. Kept component-scoped (not
+  // module-level) since it closes over several setState setters.
   const applyEventAssignmentExtras = useCallback((eventId, eventName, a, all) => {
     traceLog(`applyEventAssignmentExtras eventId=${eventId} a.launched=${a?.launched} a.channel_id=${a?.channel_id} freqCount=${(a?.frequencies || []).length}`);
     const access = {};

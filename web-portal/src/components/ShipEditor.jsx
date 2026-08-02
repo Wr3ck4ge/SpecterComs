@@ -389,11 +389,11 @@ const GRADE_LETTERS = { 1: 'A', 2: 'B', 3: 'C', 4: 'D' };
 
 // Every numeric stat a component might carry, as an ordered {label, value}
 // list — one source of truth for both the equipped-slot card (SlotCard) and
-// the swap-search picker (ComponentPicker's result rows), so the two never
-// drift back out of sync: picking a replacement used to show far less
-// detail than the slot you were replacing, for the exact same underlying
-// data. Field paths verified against real scunpacked-data (ship-items.json),
-// not guessed. Rendered as a labeled grid (see ComponentStatLine) instead of
+// the swap-search picker (ComponentPicker's result rows), so a replacement
+// candidate always shows the same level of detail as the slot it would
+// replace, for the same underlying data. Field paths verified against real
+// scunpacked-data (ship-items.json), not guessed. Rendered as a labeled grid
+// (see ComponentStatLine) instead of
 // a wrapped line of bare numbers, so each figure says what it is.
 function buildStatEntries(detail) {
   const out = [];
@@ -812,10 +812,10 @@ function CombatTab({ ship, stats }) {
   );
 }
 
-// Compact hull/armor/deflection readout shown in the header on every tab
-// (previously only visible buried in the Combat tab). Deflection is in
-// degrees off the incoming shot's angle, from game_ships.combat_stats (see
-// scunpackedSync.ts's extractCombatStats) — not a percentage.
+// Compact hull/armor/deflection readout shown in the header on every tab,
+// not just the Combat tab. Deflection is in degrees off the incoming shot's
+// angle, from game_ships.combat_stats (see scunpackedSync.ts's
+// extractCombatStats) — not a percentage.
 function ShipHeaderStats({ stats }) {
   if (!stats) return null;
   const armor = stats.armor;

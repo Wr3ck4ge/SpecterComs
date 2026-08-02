@@ -27,8 +27,8 @@ struct OverlayShowResult {
 /// share it. Writes to %APPDATA%\specter-coms\setup_errors.log. eprintln!
 /// alone is not reliable here since this is a Windows-subsystem (no console) exe.
 /// pub(crate) so capture::stop_capture can log its own teardown checkpoints
-/// here too — those previously only used eprintln!, which is invisible on this
-/// no-console build, making it impossible to tell whether a stuck join() in
+/// here too, rather than only via eprintln! (invisible on this no-console
+/// build) — otherwise there'd be no way to tell whether a stuck join() in
 /// stop_capture (rather than something overlay-specific) was behind a given hang.
 pub(crate) fn write_setup_error(msg: &str) {
     eprintln!("{msg}");
@@ -129,12 +129,11 @@ fn try_exclude_overlay_from_capture() {
 /// Force-show the overlay window via SetWindowPos(SWP_SHOWWINDOW), bypassing
 /// WebviewWindow::show(). show_overlay() reuses the same cached window across
 /// toggles (ensure_overlay_window) rather than rebuilding it every time — and
-/// WebviewWindow::show() wraps ShowWindow(SW_SHOW) on Windows, which has been
-/// confirmed (via a live debugger session on a hung instance) to silently no-op
-/// on a window that was previously hidden via hide_overlay: it returns success,
-/// but the OS-level visible flag never actually flips, leaving the overlay
-/// invisible with no error anywhere. SetWindowPos with SWP_SHOWWINDOW reliably
-/// restores visibility on the same window where ShowWindow does not.
+/// WebviewWindow::show() wraps ShowWindow(SW_SHOW) on Windows, which can
+/// silently no-op on a window that was hidden via hide_overlay: it returns
+/// success, but the OS-level visible flag never actually flips, leaving the
+/// overlay invisible with no error anywhere. SetWindowPos with SWP_SHOWWINDOW
+/// reliably restores visibility on the same window where ShowWindow does not.
 ///
 /// Uses FindWindowW by title rather than WebviewWindow::hwnd() because tauri
 /// 2.10's HWND comes from its own `windows 0.61` dependency, a different Rust
@@ -563,9 +562,9 @@ fn do_show_overlay_on_main_thread(app: &tauri::AppHandle, x: f64, y: f64) -> Res
 
         write_setup_error("[overlay] show ok");
 
-        // win.show() reports success unconditionally on Windows even when the
-        // window was previously hidden and ShowWindow silently failed to
-        // restore visibility (see force_show_overlay_window's doc comment).
+        // win.show() reports success unconditionally on Windows even when
+        // ShowWindow silently failed to restore visibility for a previously-
+        // hidden window (see force_show_overlay_window's doc comment).
         // Verify and correct that before treating this as a real success.
         #[cfg(target_os = "windows")]
         match win.is_visible() {
@@ -615,9 +614,8 @@ fn do_show_overlay_on_main_thread(app: &tauri::AppHandle, x: f64, y: f64) -> Res
 /// WebView2 event handler, this approach leads to attempted reentrancy...
 /// [and] would leave the event handler in the stack indefinitely."
 /// (https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/threading-model)
-/// That's a precise match for a permanent whole-app freeze confirmed via a
-/// live cdb stack on a hung 1.9.1 instance. Marking this command `async` does
-/// NOT fix this — WebView2 creation must still happen on the UI thread's
+/// That's a precise match for a permanent whole-app freeze. Marking this
+/// command `async` does NOT fix this — WebView2 creation must still happen on the UI thread's
 /// message pump regardless of which thread polls the Rust future, and Tauri
 /// still marshals the actual `.build()` call onto the main thread internally.
 ///

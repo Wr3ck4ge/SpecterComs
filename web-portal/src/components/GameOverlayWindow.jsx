@@ -289,7 +289,7 @@ export default function GameOverlayWindow() {
             console.error('[overlay decoder]', e);
             // On any decode error the decoder is unusable. Reset and wait for the
             // next live keyframe — the CommLink relay sends header+keyframe atomically
-            // on every keyframe (v1.6.61), so the decoder self-heals within ≤2s.
+            // on every keyframe, so the decoder self-heals within ≤2s.
             // DO NOT re-emit overlay-ready here: it triggers a GOP seed that races
             // with the live relay's queued microtasks, causing more decode errors
             // and an infinite recovery loop.
@@ -527,12 +527,12 @@ export default function GameOverlayWindow() {
 
   // Fully OPAQUE background. On Windows transparent Tauri windows, semi-transparent
   // (alpha < 1) fills can fail to composite and render invisible — leaving only the
-  // 1px border visible (matches the reported blank-overlay symptom). A solid fill
-  // composites reliably regardless of the transparent window surface beneath it.
+  // 1px border visible. A solid fill composites reliably regardless of the
+  // transparent window surface beneath it.
   const pill = {
-    // Fully OPAQUE background — do not add alpha or backdropFilter here (Windows
-    // compositor bug: semi-transparent fills on this transparent WebView2 window
-    // previously rendered invisible; blur would also blur the game behind the HUD).
+    // Fully OPAQUE background — do not add alpha or backdropFilter here (this
+    // transparent WebView2 window can fail to composite semi-transparent fills
+    // on Windows; blur would also blur the game behind the HUD).
     // Border/shadow mirror WarRoom.jsx's GLASS_PANEL glow language at a lighter
     // radius, to match the wallet/ops look without the blur.
     background: '#030a13',

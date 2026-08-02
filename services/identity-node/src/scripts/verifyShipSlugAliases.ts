@@ -30,8 +30,7 @@ const KNOWN_ALIASES = new Set([
   'orig-600i-explorer', 'drak-dragonfly-black', 'drak-dragonfly-yellowjacket',
   'argo-mpuv-cargo', 'argo-mpuv-personnel', 'argo-mpuv-tractor',
   'misc-reliant-kore', 'aegs-vanguard-warden',
-  // Added 2026-07-31 (see scunpackedSync.ts's SHIP_SLUG_ALIASES for the
-  // full explanation of each):
+  // See scunpackedSync.ts's SHIP_SLUG_ALIASES for the full explanation of each:
   'krig-l-21-wolf', 'krig-l-22-alpha-wolf', 'krig-p-52-merlin', 'krig-p-72-archimedes',
   'orig-890-jump', 'xnaa-san-tok-yai', 'grey-basher', 'grey-shiv',
   'mrai-fury', 'mrai-fury-lx', 'mrai-fury-mx', 'mrai-razor', 'mrai-razor-ex', 'mrai-razor-lx',

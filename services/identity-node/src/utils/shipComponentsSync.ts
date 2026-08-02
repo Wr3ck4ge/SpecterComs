@@ -60,8 +60,8 @@ function extractItemClass(description: unknown): string | null {
 // "Scattergun", "Ballistic Repeater" -> "Repeater", "Neutron Cannon" ->
 // "Cannon") without hand-maintaining a manufacturer/tech-name map.
 //
-// A 2026-07-28 data audit found "last word" alone breaks on a handful of
-// real labels in the live catalog: a trailing parenthetical becomes the
+// "Last word" alone breaks on a handful of real labels in the live catalog:
+// a trailing parenthetical becomes the
 // "family" ("Ballistic Gatling (x2)" -> "(x2)", "Turret (Reliant Exclusive)"
 // -> "Exclusive)"), an upstream typo splits one family in two ("Plasma
 // Canon" -> "Canon", separate from the 7 correctly-spelled "Cannon" items),

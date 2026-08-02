@@ -12,10 +12,9 @@ import ShipCompositionPicker from './ShipCompositionPicker';
 // The backend is authoritative; this only drives client-side UI framing.
 const PILOT_ROLE_NAMES = new Set(['Pilot', 'Captain']);
 
-// MissionMap is mid-rework (cursor/grid fixes + 3D model import just landed,
-// route/movement recording still to come) — gate the entry points until it's
-// ready for org use rather than removing them, so re-enabling is a one-line
-// flip back to `true`.
+// MissionMap isn't feature-complete yet (route/movement recording still to
+// come) — gate the entry points until it's ready for org use rather than
+// removing them, so re-enabling is a one-line flip back to `true`.
 const MISSION_MAP_ENABLED = false;
 
 const S = {
@@ -1554,8 +1553,8 @@ export const GroupPlanner = forwardRef(function GroupPlanner({ orgId, eventId, m
         const g = groups[oldIdx];
         return {
           // Real DB id when this group already exists (from load()) so the backend
-          // can update it in place instead of destroying and recreating it — that
-          // used to wipe every member row (including self-signups) on every save.
+          // can update it in place instead of destroying and recreating it, which
+          // would wipe every member row (including self-signups) on every save.
           id: g.id || null,
           name: g.name,
           max_members: g.max_members || 0,
@@ -2219,10 +2218,10 @@ export default function OperationPlanner({ org, event: eventProp, members, user,
   const groupPlannerRef = useRef(null);
   // Local copy of the event so that, once creation succeeds below, this same
   // modal instance can switch straight into the group/tier planner for the
-  // event it just created — previously EventForm's onSaved just closed the
-  // whole modal, forcing a close-and-reopen before groups/tiers could be set
-  // up at all. Kept in sync with the prop for the normal case (parent passes
-  // a different/updated event into an already-mounted instance).
+  // event it just created, instead of closing the whole modal and forcing a
+  // close-and-reopen before groups/tiers could be set up. Kept in sync with
+  // the prop for the normal case (parent passes a different/updated event
+  // into an already-mounted instance).
   const [event, setEvent] = useState(eventProp);
   useEffect(() => { setEvent(eventProp); }, [eventProp]);
 

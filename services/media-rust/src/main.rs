@@ -53,17 +53,15 @@ const MAX_VIDEO_FRAME_AGE: Duration = Duration::from_millis(300);
 /// Codec extradata (SPS/PPS or equivalent) is a few hundred bytes to a few KB
 /// at most; this is a generous ceiling that exists only so a publisher can't
 /// send a bogus 4-byte length prefix (e.g. 0xFFFFFFFF) and make the server
-/// attempt a multi-gigabyte allocation before reading a single header byte —
-/// unlike the frame body a few lines later, this length was previously
-/// trusted with no bound at all.
+/// attempt a multi-gigabyte allocation before reading a single header byte.
 const MAX_VIDEO_HEADER_LEN: usize = 65_536;
 
 /// Bounds how often an authenticated publisher can send a near-max-size video
 /// frame. A single 1080p IDR keyframe legitimately brushes this size
-/// occasionally, but sustained repeats have no legitimate encoder reason and
-/// previously had no limit at all beyond the 25MB single-frame cap — a
-/// compromised/malicious publisher could still sustain repeated 25MB
-/// allocations indefinitely.
+/// occasionally, but sustained repeats have no legitimate encoder reason —
+/// without this, a compromised/malicious publisher could sustain repeated
+/// 25MB allocations indefinitely (the single-frame cap alone doesn't bound
+/// the rate).
 const LARGE_VIDEO_FRAME_THRESHOLD: usize = 5_000_000;
 const MAX_LARGE_VIDEO_FRAMES_PER_WINDOW: u32 = 10;
 const LARGE_VIDEO_FRAME_WINDOW: Duration = Duration::from_secs(5);
@@ -194,11 +192,10 @@ struct ChannelTreeNode {
 type ChannelTreeRegistry = Arc<RwLock<HashMap<String, ChannelTreeNode>>>;
 
 /// Collect all descendant channel_ids from a root channel. Iterative with a
-/// visited set (rather than the previous unbounded recursion) so a malformed
-/// or cyclic tree — a bug upstream in identity-node, or a spoofed NATS
-/// message if the bus isn't yet authenticated (see NATS_AUTH_TOKEN) — can't
-/// stack-overflow this process; a cycle just stops expanding once every node
-/// in it has been visited once.
+/// visited set so a malformed or cyclic tree — a bad upstream payload from
+/// identity-node, or a spoofed NATS message if the bus isn't yet
+/// authenticated (see NATS_AUTH_TOKEN) — can't stack-overflow this process;
+/// a cycle just stops expanding once every node in it has been visited once.
 fn get_descendants(tree: &HashMap<String, ChannelTreeNode>, root: &str) -> Vec<String> {
     let mut result = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
@@ -287,9 +284,8 @@ async fn mixer_task(
         // Fast path: most rooms have no priority/dispatcher users and are not
         // currently ducked, so skip the write lock entirely in that case. A
         // shared read lock lets every other room's mixer tick proceed
-        // concurrently; the write lock below previously ran unconditionally
-        // every 20ms for every room, serializing all rooms' mixer loops
-        // against each other regardless of whether there was ducking work to do.
+        // concurrently instead of serializing all rooms' mixer loops against
+        // each other on every 20ms tick.
         let needs_ducking_work = {
             let rooms_lock = rooms.read().await;
             match rooms_lock.get(&room_id) {
@@ -376,9 +372,9 @@ async fn mixer_task(
         };
 
         // ── Per-sender speaking gate (computed once per tick, with hangover) ──
-        // Was previously recomputed per (recipient, sender) pair with a hard,
-        // un-held cutoff — this both wastes work and gates mid-word on the
-        // slightest RMS dip. Compute each sender's held "active" state once.
+        // Computed once per sender rather than per (recipient, sender) pair,
+        // with a held "active" state rather than a hard cutoff, so a
+        // momentary RMS dip mid-word doesn't gate the speaker closed.
         let mut sender_active: HashMap<String, bool> = HashMap::new();
         for (sender_id, buffer) in &pcm_buffers {
             let n = buffer.len().min(960);
@@ -432,9 +428,9 @@ async fn mixer_task(
                 .map(|&s| s.clamp(-32_768, 32_767) as i16)
                 .collect();
 
-            // A creation failure here used to panic the whole mixer_task via
-            // .expect(), killing audio for every participant in the room —
-            // not just this one recipient. Skip this recipient this tick instead.
+            // A creation failure here must not panic the whole mixer_task —
+            // that would kill audio for every participant in the room, not
+            // just this one recipient. Skip this recipient this tick instead.
             let encoder = match encoders.entry(recipient.clone()) {
                 std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                 std::collections::hash_map::Entry::Vacant(e) => {
@@ -588,10 +584,8 @@ async fn mixer_task(
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    // No insecure fallback: previously defaulted to a hardcoded "super_secret_docker_key"
-    // (which also didn't match identity-node's own 'dev_secret' fallback, so a missing
-    // env var would present as "auth is broken" rather than "auth is insecure"). Refuse
-    // to start rather than silently accept forgeable tokens.
+    // No insecure fallback: refuse to start rather than silently accept
+    // forgeable tokens signed with a default secret.
     let jwt_secret = Arc::new(match env::var("JWT_SECRET") {
         Ok(s) if !s.is_empty() => s,
         _ => {
@@ -1940,9 +1934,9 @@ async fn handle_video_publish(
 
                 // Read and relay complete frames one at a time so each broadcast
                 // message contains exactly one [4B size][1B type][4B ts][data] unit.
-                // This prevents burst/stall — previously raw read() chunks were
-                // broadcast which could contain partial or multiple frames, causing
-                // the subscriber to lag then flush on network buffer boundaries.
+                // Broadcasting raw read() chunks instead would let a message
+                // contain partial or multiple frames, causing the subscriber
+                // to lag then flush on network buffer boundaries.
                 let mut large_frame_window_start = Instant::now();
                 let mut large_frame_count: u32 = 0;
                 loop {
@@ -2006,14 +2000,13 @@ async fn handle_video_publish(
     // this old session's cleanup got here, so clearing now would wipe the live
     // stream and falsely broadcast "sharer left" out from under it.
     //
-    // Check-and-remove happens under a single write lock (not a read lock
-    // followed by a separate write lock) — those two steps used to race: a
-    // reconnecting session could claim a fresh nonce for this user_id in the
-    // gap between them, and this session's unconditional `.remove()` would
-    // then delete the NEW session's nonce entry (remove() doesn't check the
-    // value), causing the new session's own cleanup to see a mismatch and
-    // skip its teardown — leaking its video_headers/video_streams/etc. state
-    // forever instead of the race being prevented.
+    // Check-and-remove happens under a single write lock, not a read lock
+    // followed by a separate write lock — that gap would let a reconnecting
+    // session claim a fresh nonce for this user_id between the check and the
+    // remove, and an unconditional `.remove()` would then delete the NEW
+    // session's nonce entry (remove() doesn't check the value), causing the
+    // new session's own cleanup to see a mismatch and skip its teardown —
+    // leaking its video_headers/video_streams/etc. state forever.
     let still_current = {
         let mut nonces = video_publish_nonces.write().await;
         if nonces.get(&user_id).copied() == Some(publish_nonce) {
@@ -2225,11 +2218,12 @@ async fn handle_video_subscribe(
     info!("Video subscribe: uni stream ready, writing prefix to '{}'", subscriber_callsign);
 
     // Activate the publisher and count this viewer only now that the stream is
-    // actually open — this used to happen before open_uni()/opening.await, so
-    // either failing (both early-return above) leaked the increment forever
-    // with no matching decrement, permanently inflating video_viewer_count and
-    // potentially leaving the publisher's activation task stuck "active".
-    // The publisher's activation task sees the 0→1 transition and starts full streaming.
+    // actually open. Doing this before open_uni()/opening.await would mean
+    // either one failing (both early-return above) leaks the increment
+    // forever with no matching decrement, permanently inflating
+    // video_viewer_count and potentially leaving the publisher's activation
+    // task stuck "active". The publisher's activation task sees the 0→1
+    // transition and starts full streaming.
     if let Some(act_tx) = video_activation_senders.read().await.get(&sharer_uid) {
         act_tx.send_modify(|v| *v += 1);
     }

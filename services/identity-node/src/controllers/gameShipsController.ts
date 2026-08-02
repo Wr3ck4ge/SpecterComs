@@ -195,12 +195,10 @@ export const getShipComponents = async (req: AuthRequest, res: Response) => {
       params
     );
     // Same derivation the equipped-slot detail view uses (see
-    // getShipComponentDetails below) — the swap-search picker used to only
-    // surface a hand-rolled DPS/Alpha subset here, meaning candidates and
-    // the already-equipped part showed different levels of detail for the
-    // exact same data. Merge derived fields onto the raw picker-only ones
-    // (name/sub_type/weapon_family/dmg_type/manufacturer_code) instead of
-    // replacing them.
+    // getShipComponentDetails below), so a swap candidate and the already-
+    // equipped part always show the same level of derived detail. Merge
+    // derived fields onto the raw picker-only ones (name/sub_type/
+    // weapon_family/dmg_type/manufacturer_code) instead of replacing them.
     const components = result.rows.map(row => ({
       ...row,
       ...deriveComponentDetail(row),

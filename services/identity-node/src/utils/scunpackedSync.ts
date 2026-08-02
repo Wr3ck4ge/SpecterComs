@@ -73,9 +73,9 @@ const CORE_SEAT_ROLES = new Set(['Captain', 'Helmsman', 'CoHelmsman', 'Turret', 
 // wrongly inflate that role to several slots.
 //
 // CoHelmsman/TorpedoOperator/Engineering are deliberately NOT singular
-// (unlike the two above) — a full data audit (2026-07-28) found real ships
-// with more than one genuine seat of each, and the singular collapse was
-// silently discarding whichever one the raw JSON happened to list second:
+// (unlike the two above): real ships exist with more than one genuine seat
+// of each, and collapsing to singular would silently discard whichever one
+// the raw JSON happens to list second:
 //  - CoHelmsman: the Carrack has two distinct co-pilot seats
 //    (ANVL_Carrack_SCItem_Seat_CoPilot on both hardpoint_seat_copilot_l and
 //    _r) and the Constellation family (Andromeda/Aquila/Phoenix/Taurus) has
@@ -293,34 +293,32 @@ const SHIP_SLUG_ALIASES: Record<string, string> = {
   'rsi-zeus-mk-ii-es': 'rsi_zeus_es',
   'orig-600i-explorer': 'orig_600i',
   'drak-dragonfly-black': 'drak_dragonfly',
-  // Was 'drak_dragonfly' (the base/Black trim's file) — a 2026-07-28 data
-  // audit found the dedicated drak_dragonfly_yellow.json file exists (its
-  // pilot seat is even named "..._Pilot_YellowJacket") and just wasn't
-  // referenced. No visible symptom today since all 3 Dragonfly trims are
-  // currently stat-identical, but this is the correct file to point at.
+  // The dedicated drak_dragonfly_yellow.json file exists (its pilot seat is
+  // even named "..._Pilot_YellowJacket") and is the correct file to point
+  // at, rather than reusing 'drak_dragonfly' (the base/Black trim's file).
+  // No visible symptom today since all 3 Dragonfly trims are currently
+  // stat-identical, but this is still the correct mapping.
   'drak-dragonfly-yellowjacket': 'drak_dragonfly_yellow',
   'argo-mpuv-cargo': 'argo_mpuv',
-  // Were both wrongly aliased to 'argo_mpuv' (the Cargo variant's file) — a
-  // 2026-07-28 data audit found this was showing the Cargo model's seats and
-  // stats (e.g. Health 5920) under the Personnel and Tractor variants, which
-  // each have their own scunpacked file with real stat differences (Tractor
-  // is Health 6380, not 5920). Confirmed via each file's own `Name` field.
+  // The Personnel and Tractor variants each have their own scunpacked file
+  // with real stat differences from the Cargo variant (Tractor is Health
+  // 6380, not the Cargo file's 5920) — aliasing them to 'argo_mpuv' would
+  // show the Cargo model's seats and stats under the wrong variant.
+  // Confirmed via each file's own `Name` field.
   'argo-mpuv-personnel': 'argo_mpuv_transport',
   'argo-mpuv-tractor': 'argo_mpuv_1t',
   'misc-reliant-kore': 'misc_reliant',
   'aegs-vanguard-warden': 'aegs_vanguard',
 
-  // 2026-07-31: verifyShipSlugAliases.ts run against the live DB found 74
-  // ships (of 243) whose default filename guess didn't resolve — meaning
-  // ensureShipDataFresh's fetch 404s every time, and (see the refreshShipData
-  // fix above, same commit) that was silently wiping any loadout/seat data
-  // back to empty, showing as "No loadout data available for this ship" in
-  // the UI. Every entry below was confirmed against the target file's own
-  // `Name` field before adding (a wrong pairing is worse than no data). The
-  // other ~39 ships from that run have no scunpacked-data file at all yet
-  // (Hercules A2/C2/M2, Kraken, Merchantman, Galaxy, Bengal, Hull D/E, etc. —
-  // capital/large ships not yet flyable in this data source) — "no data" is
-  // correct for those until scunpacked-data adds them, nothing to alias.
+  // Ships whose default filename guess doesn't resolve to a real
+  // scunpacked-data file need an explicit alias here. Every entry below is
+  // confirmed against the target file's own `Name` field before being added
+  // (a wrong pairing is worse than no data — see refreshShipData's
+  // skip-on-failure behavior). Some ships have no scunpacked-data file at
+  // all yet (Hercules A2/C2/M2, Kraken, Merchantman, Galaxy, Bengal,
+  // Hull D/E, etc. — capital/large ships not yet flyable in this data
+  // source); "no data" is correct for those until scunpacked-data adds
+  // them, nothing to alias.
 
   // Kruger/Origin/Aopoa: hyphenated model codes ("L-21", "P-52", "890")
   // fuse into one token on the scunpacked side ("l21", "p52", "890jump")
@@ -472,13 +470,12 @@ const inFlight: Record<string, Promise<ShipData | null> | undefined> = {};
 //
 // Only writes when `fetchShipData` actually returned something: `data` is
 // null on a 404/network failure (wrong SHIP_SLUG_ALIASES guess, transient
-// GitHub outage, etc.) — previously this still ran the UPDATE with `|| []`/
-// `|| null` fallbacks, which *wiped a ship's real cached loadout/seats back
-// to empty* on every failed refresh, and since ensureShipDataFresh treats
+// GitHub outage, etc.), and since ensureShipDataFresh treats
 // combat_stats === null as "needs a refetch," a permanently-mismatched slug
-// re-triggered this wipe on every single page view. Skipping the write on
-// failure leaves whatever was last successfully cached (possibly nothing,
-// but never regressed from something) until a real fetch succeeds.
+// would otherwise re-trigger a write on every single page view. Skipping
+// the write on failure leaves whatever was last successfully cached
+// (possibly nothing, but never regressed from something) until a real
+// fetch succeeds.
 export function refreshShipData(game: string, slug: string): Promise<ShipData | null> {
   if (game !== 'star_citizen' || !slug) return Promise.resolve(null);
   const key = `${game}:${slug}`;

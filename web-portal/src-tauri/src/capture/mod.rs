@@ -2182,7 +2182,7 @@ pub fn start_capture(
                             Ok(f) => f,
                             Err(_) => continue,
                         };
-                        // Drain to newest frame — same stale-frame fix as wgc/window path.
+                        // Drain to newest frame — same pattern as the wgc/window path.
                         while frame_signal_rx.try_recv().is_ok() {
                             if let Ok(newer) = wgc_pool.TryGetNextFrame() {
                                 frame = newer;

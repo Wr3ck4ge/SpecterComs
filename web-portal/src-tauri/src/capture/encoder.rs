@@ -627,12 +627,9 @@ impl StatefulEncoder {
             (*frames_ctx).sw_format        = ffi::AVPixelFormat::AV_PIX_FMT_NV12;
             (*frames_ctx).width            = enc_w as std::os::raw::c_int;
             (*frames_ctx).height           = enc_h as std::os::raw::c_int;
-            // Reverted to 2 (briefly tried 4 to add timing headroom, but that change
-            // is suspected of introducing a NEW clean failure — av_hwframe_ctx_init
-            // returning an error — never observed with depth 2 across many prior
-            // tests. Reverting to isolate that variable; the output_views fix
-            // (removed entirely — see below) is the debugger-confirmed fix and
-            // doesn't depend on pool depth. Must match "surfaces" dict value below.
+            // Pool depth of 2 is required here — a higher depth has been observed to
+            // make av_hwframe_ctx_init fail intermittently. Must match "surfaces"
+            // dict value below.
             (*frames_ctx).initial_pool_size = 2;
             // Set D3D11_BIND_RENDER_TARGET on pool textures so we can create
             // VideoProcessorOutputViews on them.

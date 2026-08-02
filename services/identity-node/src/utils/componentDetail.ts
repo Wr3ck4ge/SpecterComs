@@ -1,9 +1,7 @@
 // Shared stat-derivation for a game_ship_components row — used by both the
 // swap-search picker (getShipComponents) and the equipped-slot detail lookup
-// (getShipComponentDetails), so the two surfaces never drift out of sync
-// again (they used to: the picker only got a hand-rolled DPS/Alpha subset,
-// nothing else, making candidates hard to compare — see the ShipEditor.jsx
-// ComponentPicker rewrite that consumes this).
+// (getShipComponentDetails), so the two surfaces always derive the same
+// stats for the same data and candidates stay directly comparable.
 //
 // Field paths below are verified against real scunpacked-data (ship-items.json),
 // not guessed — fetched and inspected directly:

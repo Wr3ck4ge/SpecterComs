@@ -258,7 +258,7 @@ fn test_overlay_exclusion_timing_note() {
     // If SetWindowDisplayAffinity returns an error (FindWindowW fails),
     // the overlay IS captured in DXGI Desktop Duplication output.
     // Releasing DXGI while a transparent overlay composes causes a GPU driver
-    // crash on some systems (the bug that was fixed in v1.8.40).
+    // crash on some systems.
     //
     // Without a real GUI, we can only verify the logic path exists.
 

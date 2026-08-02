@@ -158,12 +158,11 @@ function annexBToAvcc(data) {
   return out;
 }
 
-// In a real SFrame multi-party call, this key is distributed securely via MLS 
-// or Double Ratchet. Here, we generate a random 32-byte key for demonstration.
-// For two-way demo logic to work simply, we'll just fix a zero-key locally for dev
-// or use a randomly generated one if everyone had MLS sync.
-// We'll use a hardcoded 32-byte key (32 zeroes) purely for testing SFrame locally
-const TEST_KEY = new Uint8Array(32); 
+// Placeholder key for the SFrame crypto engine below — it is initialized but
+// not yet applied to any traffic (see voiceEncryptionEnabled). Voice runs
+// over TLS/WebTransport today; a real per-session key distributed via MLS
+// or Double Ratchet is required before this is used for text/video E2E.
+const TEST_KEY = new Uint8Array(32);
 
 // Stream quality profiles — indexed by org tier (0 = Free, 1 = Premium, 2 = Ultra)
 // Tier 2 is wired and ready; gate it via org.tier = 2 in the DB when billing is ready.
@@ -472,12 +471,10 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const videoEncoderRef = useRef(null);
   const processorReaderRef = useRef(null);
   const autoConnectedRef = useRef(false);
-  // Auto-reconnect state (see scheduleReconnect) — a 2026-07-29 log audit found
-  // users hitting real network drops with no recovery: monitorClosure only ever
-  // set status to 'error'/'disconnected' and tore down state, so a transient
-  // blip left the user silently stuck out of voice/video until they noticed
-  // and manually rejoined (visible server-side as short, repeatedly-restarted
-  // viewing sessions for the same user).
+  // Auto-reconnect state (see scheduleReconnect). Without it, a transient
+  // network blip leaves the user silently stuck out of voice/video until
+  // they notice and manually rejoin: monitorClosure on its own only sets
+  // status to 'error'/'disconnected' and tears down state, with no retry.
   const reconnectTimerRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
   // Set true immediately before any deliberate teardown (unmount, server Move)
@@ -541,9 +538,9 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     // live keyframe. We intentionally do NOT replay the GOP here: the live delta
     // frames that are already queued in the IPC pipeline would arrive at the overlay
     // BEFORE this seed (JS microtask ordering), causing immediate P-frame decode
-    // errors that permanently close the decoder. Instead, v1.6.61's atomic
-    // header+keyframe relay ensures the decoder syncs cleanly on the next live
-    // keyframe (≤2s wait = one GOP interval).
+    // errors that permanently close the decoder. Instead, the atomic header+keyframe
+    // relay below ensures the decoder syncs cleanly on the next live keyframe
+    // (≤2s wait = one GOP interval).
     if (overlayActive && remoteStreamHeaderRef?.current && window.__TAURI__) {
       const hdr = remoteStreamHeaderRef.current;
       import('@tauri-apps/api/event').then(({ emit }) => {
@@ -584,7 +581,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         // are already queued and would arrive at the overlay BEFORE this seed block,
         // injecting orphaned P-frames before the I-frame arrives, which causes an
         // immediate decode error and permanently closes the decoder in an infinite loop.
-        // The v1.6.61 live relay sends header+keyframe atomically on every live keyframe,
+        // The live relay sends header+keyframe atomically on every live keyframe,
         // so the overlay decoder syncs cleanly within ≤2s (one GOP interval) with no
         // race conditions.
         // NOTE: overlay-ready already guarantees the overlay is open — skip the
@@ -1132,16 +1129,16 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           framesDecoded = 0;
           stallWarned = false;
         } else if (!mainNeedsResync || frameType === 'key') {
-          // Decoder falling behind (e.g. a weaker machine that can't keep up with
-          // the incoming rate) — decoder.decode() was previously called
-          // unconditionally for every arriving frame, with decodeQueueSize never
-          // checked. A network burst releasing a backlog (see the sender-side
-          // fix above) would otherwise still make the local decoder try to chew
-          // through everything at once, piling extra CPU/GPU load onto the exact
-          // machine that's already the bottleneck. Drop non-keyframe frames when
-          // the queue is backed up instead, and resync on the next keyframe —
-          // same pattern as mainNeedsResync's existing overlay-handoff logic,
-          // and the same threshold as OVERLAY_MAX_DECODE_QUEUE.
+          // Guard against the decoder falling behind (e.g. a weaker machine
+          // that can't keep up with the incoming rate): check decodeQueueSize
+          // before calling decoder.decode() on every arriving frame, so a
+          // network burst releasing a backlog doesn't make the local decoder
+          // try to chew through everything at once and pile extra CPU/GPU
+          // load onto the exact machine that's already the bottleneck. Drop
+          // non-keyframe frames when the queue is backed up instead, and
+          // resync on the next keyframe — same pattern as mainNeedsResync's
+          // existing overlay-handoff logic, and the same threshold as
+          // OVERLAY_MAX_DECODE_QUEUE.
           if (frameType !== 'key' && decoder.decodeQueueSize > MAIN_MAX_DECODE_QUEUE) {
             mainNeedsResync = true;
           } else {
@@ -2232,13 +2229,14 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
         console.log('[share] calling capture_start...');
         await window.__TAURI__.core.invoke('capture_start', {
-          // Flat profile.bitrate for the (now hard-capped 1080p) output resolution —
-          // previously this scaled bitrate up to 1.5x for high-res source monitors
-          // (e.g. 4K) even though the encode target was downscaled to the same 1080p
-          // either way, so a weak connection on a 4K monitor paid extra bits for zero
-          // extra quality. Native capture is always at the monitor's full resolution
-          // (DXGI/WGC don't support a lower-res request) — enc_dims() on the Rust side
-          // downscales to max_height via GPU VideoProcessorBlt before NVENC/AMF sees it.
+          // Flat profile.bitrate for the hard-capped 1080p output resolution — not
+          // scaled up for high-res source monitors (e.g. 4K), since the encode
+          // target is downscaled to the same 1080p either way and a weak
+          // connection on a 4K monitor shouldn't pay extra bits for zero extra
+          // quality. Native capture is always at the monitor's full resolution
+          // (DXGI/WGC don't support a lower-res request) — enc_dims() on the Rust
+          // side downscales to max_height via GPU VideoProcessorBlt before
+          // NVENC/AMF sees it.
           config: {
             source_id: effectiveSource.id,
             fps: profile.fps,
@@ -2250,10 +2248,10 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         console.log('[share] capture_start succeeded');
 
         // ── Real-time bitrate adaptation ────────────────────────────────────────
-        // Bitrate/resolution were previously picked once from the static tier
-        // table and never touched again for the rest of the call — a connection
-        // that can't sustain the tier's bitrate stayed stuck oversending for the
-        // whole session. This steps bitrate down under sustained congestion
+        // Bitrate/resolution aren't just picked once from the static tier table
+        // and left alone for the rest of the call — a connection that can't
+        // sustain the tier's bitrate would stay stuck oversending for the whole
+        // session otherwise. This steps bitrate down under sustained congestion
         // (signalled by the send pump's onDrop below) and back up after a
         // sustained healthy period, capped at the profile's original target.
         //
@@ -2783,8 +2781,8 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   // render, each closing over a stale isMuted=true and both racing into the
   // unmute branch concurrently. That double-invoke of native start_capture can
   // throw on the native side, leaving isMuted stuck true (mic silently never
-  // starts). Dropping any call that arrives while one is already in flight
-  // fixes it without touching the mute/unmute logic itself.
+  // starts). Drop any call that arrives while one is already in flight,
+  // without touching the mute/unmute logic itself.
   const toggleBusyRef = useRef(false);
   const toggleMic = async () => {
     if (toggleBusyRef.current) return;
