@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpecterComs Overlay</title>
+    <style>
+      html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        background: #030a13 !important;
+        overflow: hidden !important;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Visible before ANY JS runs. overlay.jsx hides this after React mounts. -->
+    <div id="overlay-boot-status" style="position:fixed;top:0;left:0;right:0;padding:5px 8px;background:#854d0e;color:#fef08a;font:11px/1.4 monospace;z-index:9999;white-space:pre-wrap;word-break:break-all">⬛ OVERLAY LOADING...</div>
+    <div id="overlay-root"></div>
+    <script>
+      window.onerror = function(msg, src, line, col, err) {
+        var el = document.getElementById('overlay-boot-status');
+        if (el) { el.style.background='#7f1d1d'; el.style.color='#fca5a5'; el.textContent = 'UNCAUGHT: ' + msg + ' (' + src + ':' + line + ')'; }
+      };
+      window.onunhandledrejection = function(e) {
+        var el = document.getElementById('overlay-boot-status');
+        if (el) { el.style.background='#7f1d1d'; el.style.color='#fca5a5'; el.textContent = 'UNHANDLED REJECTION: ' + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason)); }
+      };
+    </script>
+    <script type="module" src="/src/overlay.jsx"></script>
+  </body>
+</html>

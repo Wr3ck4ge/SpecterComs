@@ -1,0 +1,412 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Global tokens */
+:root {
+  --specter-text-primary: #ecf9ff;
+  --specter-text-secondary: #b7d1df;
+  --specter-text-muted: #86a9bd;
+  --specter-accent: #59e9ff;
+  --holo-panel: rgba(6, 20, 34, 0.78);
+  --holo-edge: rgba(76, 204, 236, 0.32);
+  --holo-edge-strong: rgba(96, 230, 255, 0.54);
+
+  /* SPECTER depth system */
+  --bg-app: #05070b;
+  --bg-panel: #0a0e16;
+  --bg-panel-alt: #0d1220;
+  --bg-card: #10161f;
+  --bg-card-hover: #141b28;
+  --bg-input: #0b0f18;
+
+  --accent: #4fd8ff;
+  --accent-dim: rgba(79, 216, 255, 0.35);
+  --accent-glow: rgba(79, 216, 255, 0.55);
+
+  --border-soft: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  --shadow-card:
+    0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 8px 20px rgba(0, 0, 0, 0.45),
+    0 2px 6px rgba(0, 0, 0, 0.35);
+
+  --shadow-card-hover:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 12px 28px rgba(0, 0, 0, 0.55),
+    0 3px 8px rgba(0, 0, 0, 0.4);
+
+  --shadow-panel:
+    0 0 0 1px var(--border-soft) inset,
+    4px 0 24px rgba(0, 0, 0, 0.5);
+}
+
+body {
+  @apply bg-slate-900 text-slate-100;
+  font-family: "Bahnschrift", "Rajdhani", "Segoe UI", system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+  letter-spacing: 0.015em;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Readability first: body copy remains crisp, accent text glows lightly. */
+.text-specter-primary-cyan,
+.text-specter-primary-neon {
+  text-shadow: 0 0 8px rgba(40, 210, 245, 0.28);
+}
+
+.text-specter-text-main {
+  color: var(--specter-text-primary);
+}
+
+.text-specter-text-muted {
+  color: var(--specter-text-secondary);
+}
+
+input,
+textarea,
+select,
+button {
+  text-shadow: none;
+}
+
+/* Holographic atmosphere: depth gradient + scanlines + edge vignette. */
+#root {
+  position: relative;
+  isolation: isolate;
+}
+
+#root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(1200px 500px at 50% 112%, rgba(55, 218, 255, 0.2) 0%, rgba(55, 218, 255, 0) 62%),
+    radial-gradient(900px 400px at 10% 14%, rgba(56, 110, 200, 0.18) 0%, rgba(56, 110, 200, 0) 64%),
+    radial-gradient(760px 360px at 95% 26%, rgba(42, 172, 206, 0.15) 0%, rgba(42, 172, 206, 0) 60%),
+    linear-gradient(180deg, #030912 0%, #02070f 58%, #01050c 100%);
+}
+
+#root::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      rgba(130, 220, 245, 0.03) 0,
+      rgba(130, 220, 245, 0.03) 1px,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 0, 0, 0) 6px
+    ),
+    radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 56%, rgba(0, 0, 0, 0.48) 100%);
+}
+
+/* Root viewport wrapper used by the WarRoom shell. */
+.holo-viewport {
+  position: relative;
+  z-index: 2;
+}
+
+.app-shell {
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(20, 30, 45, 0.5) 0%, transparent 55%),
+    radial-gradient(ellipse at 50% 100%, rgba(0, 0, 0, 0.6) 0%, transparent 60%),
+    var(--bg-app);
+  background-attachment: fixed;
+  position: relative;
+}
+
+.app-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.015) 0px,
+    rgba(255, 255, 255, 0.015) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: overlay;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-panel);
+}
+
+.glass-card {
+  background: linear-gradient(180deg, var(--bg-card) 0%, var(--bg-panel-alt) 100%);
+  border: 1px solid var(--border-soft);
+  border-radius: 0;
+  /* Cut corners read as HUD/hologram; rounded rects read as "app". */
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+  box-shadow: var(--shadow-card);
+  backdrop-filter: blur(6px);
+  transition: box-shadow 160ms ease, transform 160ms ease, border-color 160ms ease;
+}
+
+.glass-card:hover {
+  background: linear-gradient(180deg, var(--bg-card-hover) 0%, var(--bg-panel-alt) 100%);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
+}
+
+.glass-card--active {
+  border-left: 3px solid var(--accent);
+  box-shadow:
+    var(--shadow-card),
+    -6px 0 18px -4px var(--accent-glow);
+}
+
+.glow-text {
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent-dim);
+}
+
+.glow-ring {
+  box-shadow: 0 0 0 1px var(--accent-dim), 0 0 16px -2px var(--accent-glow);
+}
+
+.badge-live {
+  background: rgba(79, 216, 255, 0.08);
+  border: 1px solid var(--accent-dim);
+  /* Overrides the Tailwind `rounded` utility applied alongside this class in
+     JSX — this rule comes later in the cascade so it wins at equal specificity. */
+  border-radius: 0;
+  clip-path: polygon(4px 0, 100% 0, 100% calc(100% - 4px), calc(100% - 4px) 100%, 0 100%, 0 4px);
+  color: var(--accent);
+  box-shadow: 0 0 12px -2px var(--accent-glow);
+  text-shadow: 0 0 6px var(--accent-dim);
+}
+
+.btn-tactical {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0) 100%), var(--bg-input);
+  border: 1px solid var(--border-strong);
+  color: var(--accent);
+  border-radius: 0;
+  clip-path: polygon(5px 0, 100% 0, 100% calc(100% - 5px), calc(100% - 5px) 100%, 0 100%, 0 5px);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.06) inset,
+    0 2px 6px rgba(0, 0, 0, 0.4);
+  transition: box-shadow 120ms ease, transform 120ms ease, background 120ms ease;
+}
+
+.btn-tactical:hover {
+  border-color: var(--accent-dim);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.08) inset,
+    0 0 14px -3px var(--accent-glow),
+    0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+.btn-tactical:active {
+  transform: translateY(1px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.6) inset;
+}
+
+.btn-tactical--primary {
+  background: linear-gradient(180deg, rgba(79, 216, 255, 0.18) 0%, rgba(79, 216, 255, 0.06) 100%);
+  border-color: var(--accent-dim);
+}
+
+.modal-backdrop {
+  background: rgba(2, 4, 8, 0.6);
+  backdrop-filter: blur(3px);
+}
+
+.modal-surface {
+  background: linear-gradient(180deg, rgba(16, 22, 31, 0.92) 0%, rgba(10, 14, 22, 0.96) 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 20px 50px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(16px);
+}
+
+.depth-stage {
+  position: relative;
+}
+
+.depth-stage::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(620px 320px at 18% 12%, rgba(40, 184, 226, 0.12) 0%, rgba(40, 184, 226, 0) 72%),
+    radial-gradient(720px 360px at 86% 88%, rgba(18, 130, 214, 0.1) 0%, rgba(18, 130, 214, 0) 70%);
+  z-index: 0;
+}
+
+.depth-surface {
+  position: relative;
+  z-index: 1;
+  border: 1px solid rgba(95, 209, 240, 0.22);
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.46),
+    0 0 0 1px rgba(95, 209, 240, 0.08) inset,
+    0 1px 0 rgba(160, 238, 255, 0.18) inset;
+}
+
+.depth-elev-1 {
+  box-shadow:
+    0 12px 30px rgba(0, 0, 0, 0.42),
+    0 0 26px rgba(23, 176, 218, 0.12),
+    0 1px 0 rgba(160, 238, 255, 0.14) inset;
+}
+
+.depth-elev-2 {
+  box-shadow:
+    0 24px 52px rgba(0, 0, 0, 0.52),
+    0 0 32px rgba(23, 176, 218, 0.18),
+    0 1px 0 rgba(160, 238, 255, 0.2) inset;
+}
+
+.depth-inset {
+  border: 1px solid rgba(72, 168, 198, 0.24);
+  box-shadow:
+    inset 0 1px 0 rgba(130, 225, 248, 0.15),
+    inset 0 -20px 30px rgba(0, 0, 0, 0.2),
+    0 8px 18px rgba(0, 0, 0, 0.28);
+}
+
+.depth-floating {
+  border: 1px solid rgba(103, 218, 245, 0.34);
+  box-shadow:
+    0 28px 56px rgba(0, 0, 0, 0.6),
+    0 0 30px rgba(24, 185, 227, 0.18),
+    0 1px 0 rgba(165, 241, 255, 0.24) inset;
+}
+
+.hud-panel {
+  background:
+    linear-gradient(155deg, rgba(18, 43, 67, 0.28) 0%, rgba(7, 24, 39, 0.18) 46%, rgba(10, 18, 30, 0.3) 100%),
+    var(--holo-panel) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  backdrop-filter: blur(14px) saturate(1.15);
+  box-shadow:
+    0 0 28px rgba(26, 176, 222, 0.22),
+    0 10px 36px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(118, 232, 255, 0.2),
+    inset 0 -1px 0 rgba(30, 168, 214, 0.15);
+  border: 1px solid var(--holo-edge);
+}
+
+/* Stronger variant for the sidebar */
+.hud-panel-side {
+  background:
+    linear-gradient(180deg, rgba(20, 60, 88, 0.24) 0%, rgba(7, 28, 44, 0.5) 50%, rgba(5, 17, 29, 0.62) 100%),
+    rgba(3, 14, 24, 0.88) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(1.42);
+  backdrop-filter: blur(18px) saturate(1.42);
+  box-shadow:
+    2px 0 26px rgba(22, 170, 215, 0.14),
+    8px 0 44px rgba(0, 0, 0, 0.48),
+    inset -1px 0 0 rgba(96, 224, 255, 0.2),
+    inset 0 1px 0 rgba(96, 224, 255, 0.09);
+}
+
+.hud-border-b {
+  border-bottom: 1px solid var(--holo-edge-strong) !important;
+  box-shadow: 0 1px 14px rgba(15, 174, 223, 0.18);
+}
+
+.hud-border-r {
+  border-right: 1px solid var(--holo-edge-strong) !important;
+  box-shadow: 1px 0 18px rgba(15, 174, 223, 0.18);
+}
+
+.hud-border-t {
+  border-top: 1px solid var(--holo-edge-strong) !important;
+  box-shadow: 0 -1px 14px rgba(15, 174, 223, 0.18);
+}
+
+button:not(:disabled):hover {
+  box-shadow:
+    0 0 12px rgba(6, 182, 212, 0.17),
+    0 2px 10px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(200, 243, 255, 0.08);
+}
+
+.bg-specter-bg-panel {
+  background:
+    linear-gradient(165deg, rgba(18, 50, 73, 0.22), rgba(7, 22, 36, 0.56)),
+    rgba(8, 22, 36, 0.72) !important;
+  -webkit-backdrop-filter: blur(10px) saturate(1.1);
+  backdrop-filter: blur(10px) saturate(1.1);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.34),
+    0 0 14px rgba(6, 182, 212, 0.14),
+    inset 0 1px 0 rgba(112, 229, 255, 0.16);
+  border: 1px solid rgba(95, 209, 240, 0.28);
+}
+
+.bg-specter-bg-surface {
+  background:
+    linear-gradient(180deg, rgba(13, 34, 52, 0.72), rgba(7, 21, 33, 0.9)) !important;
+  -webkit-backdrop-filter: blur(8px) saturate(1.08);
+  backdrop-filter: blur(8px) saturate(1.08);
+  box-shadow:
+    0 4px 20px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(91, 216, 248, 0.14);
+  border: 1px solid rgba(95, 209, 240, 0.24);
+}
+
+.overlay-mode,
+.overlay-mode * {
+  border-color: transparent !important;
+  box-shadow: none !important;
+  background-color: rgba(0,0,0,0.1) !important;
+  backdrop-filter: none !important;
+}
+
+.tactical-panel {
+  background:
+    linear-gradient(160deg, rgba(28, 74, 104, 0.22), rgba(8, 22, 35, 0.8));
+  backdrop-filter: blur(12px) saturate(1.12);
+  -webkit-backdrop-filter: blur(12px) saturate(1.12);
+  border: 1px solid rgba(88, 218, 247, 0.3);
+  box-shadow:
+    0 0 20px rgba(0, 0, 0, 0.5),
+    inset 0 0 12px rgba(0, 242, 255, 0.08),
+    inset 0 1px 0 rgba(0, 242, 255, 0.16);
+  border-radius: 4px;
+}
+
+.active-status {
+  border-color: #39ff14 !important;
+  box-shadow: 0 0 10px rgba(57, 255, 20, 0.5) !important;
+  text-shadow: 0 0 5px rgba(57, 255, 20, 0.8) !important;
+  animation: pulse-glow 2s infinite;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.7; }
+}
+
+.glow-connector-h {
+  background: linear-gradient(90deg,
+    rgba(6,182,212,0.3),
+    rgba(6,182,212,0.65) 50%,
+    rgba(6,182,212,0.3));
+  box-shadow: 0 0 6px rgba(6,182,212,0.5);
+}
+.glow-connector-v {
+  background: rgba(6,182,212,0.5);
+  box-shadow: 0 0 6px rgba(6,182,212,0.45);
+}

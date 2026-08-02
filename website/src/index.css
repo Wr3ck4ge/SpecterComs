@@ -1,0 +1,100 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --specter-text-primary: #e2e8f0;
+  --specter-text-secondary: #94a3b8;
+  --specter-text-muted: #64748b;
+  --specter-accent: #22d3ee;
+}
+
+body {
+  @apply bg-specter-bg-deep text-slate-100;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 14px;
+}
+
+body,
+body * {
+  text-shadow:
+    0 0 4px rgba(6,182,212,0.12),
+    0 0 10px rgba(6,182,212,0.06) !important;
+}
+
+.text-specter-primary-cyan,
+[style*="color: #06b6d4"],
+[style*="color: #0e7490"],
+[style*="color: #0891b2"] {
+  text-shadow:
+    0 0 4px rgba(6,182,212,0.7),
+    0 0 12px rgba(6,182,212,0.5),
+    0 0 30px rgba(6,182,212,0.2) !important;
+}
+
+.text-specter-state-success {
+  text-shadow:
+    0 0 4px rgba(16,185,129,0.7),
+    0 0 12px rgba(16,185,129,0.4) !important;
+}
+
+.text-specter-state-error {
+  text-shadow:
+    0 0 4px rgba(239,68,68,0.7),
+    0 0 12px rgba(239,68,68,0.4) !important;
+}
+
+.text-specter-state-warning {
+  text-shadow:
+    0 0 4px rgba(245,158,11,0.7),
+    0 0 12px rgba(245,158,11,0.4) !important;
+}
+
+input, textarea, select {
+  text-shadow: none !important;
+}
+
+.hud-panel {
+  background-color: rgba(6, 14, 26, 0.60) !important;
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  box-shadow:
+    0 0 22px rgba(6,182,212,0.20),
+    0 4px 30px rgba(0,0,0,0.45),
+    inset 0 1px 0 rgba(6,182,212,0.38),
+    inset 0 -1px 0 rgba(6,182,212,0.12);
+  border: 1px solid rgba(6,182,212,0.38);
+  border-radius: 18px;
+}
+
+button:not(:disabled):hover {
+  box-shadow:
+    0 0 12px rgba(6,182,212,0.2),
+    0 2px 8px rgba(0,0,0,0.4),
+    inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+.bg-specter-bg-panel {
+  background-color: rgba(30,41,59,0.3) !important;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow:
+    0 10px 36px rgba(0,0,0,0.34),
+    0 0 0 1px rgba(6,182,212,0.14),
+    0 0 18px rgba(6,182,212,0.12),
+    inset 0 1px 0 rgba(255,255,255,0.03);
+  border: 1px solid rgba(6,182,212,0.2);
+  border-radius: 18px;
+}
+
+.bg-specter-bg-surface {
+  background-color: rgba(15,23,42,0.4) !important;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  box-shadow:
+    0 6px 24px rgba(0,0,0,0.32),
+    0 0 0 1px rgba(6,182,212,0.10),
+    inset 0 1px 0 rgba(6,182,212,0.15);
+  border: 1px solid rgba(6,182,212,0.15);
+  border-radius: 18px;
+}

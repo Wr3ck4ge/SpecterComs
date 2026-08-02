@@ -1,0 +1,10 @@
+[default]
+description = "Allows access to all specter-audio plugin commands"
+permissions = [
+    "allow-list-audio-devices",
+    "allow-list-output-devices",
+    "allow-start-capture",
+    "allow-stop-capture",
+    "allow-play-frame",
+    "allow-set-output-device",
+]

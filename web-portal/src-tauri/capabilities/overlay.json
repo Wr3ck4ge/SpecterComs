@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "narrow permissions for the always-on-top HUD overlay window — it only ever hides itself, resizes itself, and toggles click-through; window construction, positioning and always-on-top are done from the Rust side and don't need webview-side capability grants",
+  "windows": [
+    "specter-overlay"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-set-size",
+    "core:window:allow-set-ignore-cursor-events"
+  ]
+}
