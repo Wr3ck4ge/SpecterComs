@@ -22,6 +22,7 @@ import {
 import {
   ensureDmGroup, encryptDm, decryptDmOrRecallOwn, notePendingSent, handleDmCommit, handleDmWelcome,
   ensureChannelGroup, encryptChannel, decryptChannelOrRecallOwn, handleChannelCommit, handleChannelWelcome,
+  ensureEventGroup, handleEventGroupCommit, handleEventGroupWelcome,
 } from '../mlsSession';
 import { barColor, fmtBytes } from '../utils/format';
 
@@ -1940,6 +1941,8 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
   const [voiceConnectionQuality, setVoiceConnectionQuality] = useState('excellent');
   // Profile modal: { callsign, isLocal } or null
   const [profileModalUser,   setProfileModalUser]   = useState(null);
+  const [voiceReportModal,   setVoiceReportModal]   = useState(null); // { accusedUserId, accusedCallsign, orgId }
+  const [voiceReportSubmitting, setVoiceReportSubmitting] = useState(false);
   const [gainValue,          setGainValue]          = useState(() => parseFloat(localStorage.getItem('specter_audio_gain') || '1.0'));
   // Ref to CommLink action functions (toggleMic, startScreenShare, etc.)
   const commLinkActionsRef = useRef({});
@@ -2741,6 +2744,14 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
       const ev = events.find(e => e.id === payload.event_id);
       traceLog(`event_roster_changed event_id=${payload.event_id} local-cached ev.launched=${ev?.launched}`);
       if (!ev?.launched) return;
+      // Lazily reconcile the event's voice-cascade MLS group (see
+      // mlsSession.js's ensureEventGroup doc comment) — same "propagates the
+      // next time anyone's client happens to notice" design as
+      // ensureChannelGroup, just triggered by this roster-change signal
+      // instead of only on channel-open, since a priority speaker's cascade
+      // key needs to be current for whoever's already in-call, not just
+      // whoever opens the channel next.
+      ensureEventGroup(api, user?.id, selectedOrg.id, payload.event_id).catch(() => {});
       api.getMyEventAssignment(selectedOrg.id, payload.event_id).then(({ data }) => {
         const a = data?.assignment;
         const all = data?.assignments || (a ? [a] : []);
@@ -2807,6 +2818,8 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
         handleDmCommit(api, user?.id, payload.conversation_id, payload.commit).catch(() => {});
       } else if (payload?.channel_id && payload?.commit) {
         handleChannelCommit(api, user?.id, payload.channel_id, payload.commit).catch(() => {});
+      } else if (payload?.event_group_id && payload?.commit) {
+        handleEventGroupCommit(api, user?.id, payload.event_group_id, payload.commit).catch(() => {});
       }
     },
     mls_welcome: (payload) => {
@@ -2814,6 +2827,8 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
         handleDmWelcome(api, user?.id, payload.conversation_id, payload.welcome).catch(() => {});
       } else if (payload?.channel_id && payload?.welcome) {
         handleChannelWelcome(api, user?.id, payload.channel_id, payload.welcome).catch(() => {});
+      } else if (payload?.event_group_id && payload?.welcome) {
+        handleEventGroupWelcome(api, user?.id, payload.event_group_id, payload.welcome).catch(() => {});
       }
     },
     // Real-time channel occupant presence
@@ -4574,9 +4589,70 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
               else pushNotif('system', 'MEMBER BANNED', `${profileModalUser.callsign} has been banned`);
               setProfileModalUser(null);
             }}
+            canReportVoice={!profileModalUser.isLocal && !!targetChannelId}
+            onReportVoice={() => {
+              setProfileModalUser(null);
+              setVoiceReportModal({
+                accusedUserId: targetUserId,
+                accusedCallsign: profileModalUser.callsign,
+                orgId: selectedOrg?.id ?? null,
+                note: '',
+              });
+            }}
           />
         );
       })()}
+
+      {/* Voice misconduct report — attaches the last ~60s of actual call audio
+          (what this client heard) plus a real speaking-activity timeline for
+          that window. See CommLink.jsx's submitVoiceReport for what gets sent. */}
+      {voiceReportModal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50" onClick={() => !voiceReportSubmitting && setVoiceReportModal(null)}>
+          <div
+            className="bg-[#0a1520] border border-[#0e7490] rounded-lg p-5 max-w-md w-full mx-4 font-mono"
+            onClick={e => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 13, color: '#f59e0b', letterSpacing: '0.2em', marginBottom: 8 }}>⚠ REPORT VOICE MISCONDUCT</div>
+            <div style={{ fontSize: 13, color: '#cbd5e1', marginBottom: 10 }}>
+              This attaches the last ~60 seconds of call audio you actually heard, plus who was flagged as speaking during that window, to a report against <strong>{voiceReportModal.accusedCallsign}</strong>. Reviewed by platform admins only.
+            </div>
+            <textarea
+              value={voiceReportModal.note}
+              onChange={e => setVoiceReportModal(prev => ({ ...prev, note: e.target.value }))}
+              placeholder="Briefly describe what happened (optional, but helps a reviewer act on this faster)"
+              maxLength={2000}
+              rows={4}
+              style={{ width: '100%', fontSize: 13, color: '#e5e7eb', background: '#041018', border: '1px solid #0e2233', borderRadius: 3, padding: '8px 10px', marginBottom: 14, fontFamily: 'monospace', resize: 'vertical' }}
+            />
+            <div className="flex gap-2 justify-end">
+              <button
+                disabled={voiceReportSubmitting}
+                onClick={() => setVoiceReportModal(null)}
+                style={{ fontSize: 13, padding: '5px 14px', borderRadius: 3, background: '#1a1a2e', border: '1px solid #374151', color: '#cbd5e1', cursor: voiceReportSubmitting ? 'default' : 'pointer', letterSpacing: '0.1em', opacity: voiceReportSubmitting ? 0.5 : 1 }}
+              >CANCEL</button>
+              <button
+                disabled={voiceReportSubmitting}
+                onClick={async () => {
+                  setVoiceReportSubmitting(true);
+                  const result = await commLinkActionsRef.current?.submitVoiceReport?.(
+                    voiceReportModal.accusedUserId,
+                    voiceReportModal.note,
+                    voiceReportModal.orgId,
+                  );
+                  setVoiceReportSubmitting(false);
+                  if (result?.ok) {
+                    pushNotif('system', 'REPORT SUBMITTED', 'Voice report submitted for admin review.');
+                    setVoiceReportModal(null);
+                  } else {
+                    pushNotif('system', 'REPORT FAILED', result?.error || 'Could not submit report');
+                  }
+                }}
+                style={{ fontSize: 13, padding: '5px 14px', borderRadius: 3, background: '#3b0a0a', border: '1px solid #b91c1c', color: '#fca5a5', cursor: voiceReportSubmitting ? 'default' : 'pointer', letterSpacing: '0.1em', opacity: voiceReportSubmitting ? 0.6 : 1 }}
+              >{voiceReportSubmitting ? 'SUBMITTING…' : 'SUBMIT REPORT'}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {billingPanelOpen && selectedOrg && orgBilling && (
         <BillingPanel
           orgId={selectedOrg.id}

@@ -2,11 +2,29 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use log::{error, info, warn};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::AudioDevice;
 use super::opus_encode::OpusEncoder;
+
+/// How long a stream keeps transmitting after last clearing `threshold`, so a
+/// brief mid-word RMS dip (soft consonant, breath pause) doesn't chop real
+/// speech at the source — mirrors the server mixer's old VAD_HANGOVER_FRAMES
+/// (10 frames @ 20 ms = 200 ms).
+const SEND_GATE_HANGOVER: Duration = Duration::from_millis(200);
+
+/// Whether this 20 ms window should be encoded and transmitted: true if its RMS
+/// clears `threshold`, or if it's within `SEND_GATE_HANGOVER` of the last window
+/// that did. Updates `last_above` as a side effect.
+fn should_send(last_above: &mut Option<Instant>, threshold: f32, rms: f32) -> bool {
+    if rms >= threshold {
+        *last_above = Some(Instant::now());
+        true
+    } else {
+        matches!(last_above, Some(t) if t.elapsed() < SEND_GATE_HANGOVER)
+    }
+}
 
 pub struct CaptureHandle {
     running: Arc<AtomicBool>,
@@ -53,8 +71,11 @@ pub fn list_input_devices() -> Vec<AudioDevice> {
 /// Start capturing audio from `device_id` (or the system default), encode each 20 ms window to
 /// Opus, and invoke `on_frame` with the encoded bytes and a Unix-millisecond timestamp.
 /// `on_level` is invoked with the raw PCM RMS of every 20 ms window, whether or not it clears
-/// the noise gate — this feeds a live mic-level meter independent of transmit/encode outcome.
-pub fn start<F, L>(device_id: Option<String>, on_frame: F, on_level: L) -> Result<CaptureHandle, String>
+/// the send gate — this feeds a live mic-level meter independent of transmit/encode outcome.
+/// `threshold` is a live-updatable (f32 bit-packed) RMS gate — frames below it (outside the
+/// hangover window, see `should_send`) are never encoded or handed to `on_frame` at all, so a
+/// quiet mic transmits nothing rather than relying on a downstream mixer to drop it.
+pub fn start<F, L>(device_id: Option<String>, threshold: Arc<AtomicU32>, on_frame: F, on_level: L) -> Result<CaptureHandle, String>
 where
     F: Fn(Vec<u8>, u64) + Send + 'static,
     L: Fn(f32) + Send + 'static,
@@ -127,6 +148,8 @@ where
 
     let stream = match sample_format {
         cpal::SampleFormat::F32 => {
+            let threshold = threshold.clone();
+            let mut last_above: Option<Instant> = None;
             device.build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
@@ -141,11 +164,10 @@ where
 
                         if pcm_buf.len() >= 960 {
                             let f: Vec<i16> = pcm_buf.drain(..960).collect();
-                            // Client-side noise gate: block only true digital silence.
-                            // The server mixer has its own 150 RMS gate for hiss filtering.
                             let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
                             on_level(rms as f32);
-                            if rms < 30.0 { continue; }
+                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
                             match encoder.encode(&f) {
                                 Ok(enc) => {
                                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -161,6 +183,8 @@ where
             )
         },
         cpal::SampleFormat::I16 => {
+            let threshold = threshold.clone();
+            let mut last_above: Option<Instant> = None;
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
@@ -176,7 +200,8 @@ where
                             let f: Vec<i16> = pcm_buf.drain(..960).collect();
                             let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
                             on_level(rms as f32);
-                            if rms < 30.0 { continue; }
+                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
                             match encoder.encode(&f) {
                                 Ok(enc) => {
                                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -192,6 +217,8 @@ where
             )
         },
         cpal::SampleFormat::I32 => {
+            let threshold = threshold.clone();
+            let mut last_above: Option<Instant> = None;
             device.build_input_stream(
                 &config,
                 move |data: &[i32], _: &cpal::InputCallbackInfo| {
@@ -209,7 +236,8 @@ where
                             let f: Vec<i16> = pcm_buf.drain(..960).collect();
                             let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
                             on_level(rms as f32);
-                            if rms < 30.0 { continue; }
+                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
                             match encoder.encode(&f) {
                                 Ok(enc) => {
                                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -225,6 +253,8 @@ where
             )
         },
         cpal::SampleFormat::U8 => {
+            let threshold = threshold.clone();
+            let mut last_above: Option<Instant> = None;
             device.build_input_stream(
                 &config,
                 move |data: &[u8], _: &cpal::InputCallbackInfo| {
@@ -241,7 +271,8 @@ where
                             let f: Vec<i16> = pcm_buf.drain(..960).collect();
                             let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
                             on_level(rms as f32);
-                            if rms < 30.0 { continue; }
+                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
                             match encoder.encode(&f) {
                                 Ok(enc) => {
                                     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;

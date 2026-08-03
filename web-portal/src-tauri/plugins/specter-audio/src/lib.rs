@@ -7,6 +7,7 @@ use log::warn;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::Mutex;
 
 mod capture;
@@ -54,6 +55,11 @@ pub struct AudioState {
     stream_decoders: Mutex<HashMap<String, audiopus::coder::Decoder>>,
     /// Selected output device name. None = use system default.
     output_device_name: Mutex<Option<String>>,
+    /// Live-updatable send-gate RMS threshold (f32 bit-packed), read every 20 ms
+    /// capture window by whichever capture stream is currently running — see
+    /// capture::should_send. Survives across start_capture/stop_capture calls so
+    /// a threshold change made while the mic is on doesn't require restarting it.
+    send_threshold: Arc<AtomicU32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -110,6 +116,7 @@ fn start_capture<R: Runtime>(
     let level_app = app.clone();
     let handle = capture::start(
         device_id,
+        state.send_threshold.clone(),
         move |opus_frame, timestamp| {
             let event = AudioFrameEvent {
                 data: base64::engine::general_purpose::STANDARD.encode(&opus_frame),
@@ -253,6 +260,16 @@ fn clear_stream(state: tauri::State<'_, AudioState>, stream_id: String) -> Resul
     Ok(())
 }
 
+/// Update the live send-gate RMS threshold (see `AudioState::send_threshold`).
+/// Safe to call whether or not a capture stream is currently running — a
+/// running stream picks up the new value on its very next 20 ms window; a
+/// future start_capture picks it up immediately since it reads the same cell.
+#[tauri::command]
+fn set_send_threshold(state: tauri::State<'_, AudioState>, value: f32) -> Result<(), String> {
+    state.send_threshold.store(value.to_bits(), Ordering::Relaxed);
+    Ok(())
+}
+
 /// Set the audio output device by name. Pass `None` to revert to the system default.
 /// If playback is currently active, it is restarted on the new device immediately.
 #[tauri::command]
@@ -295,6 +312,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             play_frame,
             clear_stream,
             set_output_device,
+            set_send_threshold,
         ])
         .setup(|app, _api| {
             app.manage(AudioState {
@@ -303,6 +321,11 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
                 stream_queues: Arc::new(Mutex::new(HashMap::new())),
                 stream_decoders: Mutex::new(HashMap::new()),
                 output_device_name: Mutex::new(None),
+                // 150.0 matches the client's default micThreshold (CommLink.jsx) and the
+                // server mixer's old default user_audio_thresholds value — kept in sync
+                // going forward via set_send_threshold, called whenever the user changes
+                // the slider (see CommLink.jsx's handleMicThresholdChange).
+                send_threshold: Arc::new(AtomicU32::new(150.0f32.to_bits())),
             });
             Ok(())
         })

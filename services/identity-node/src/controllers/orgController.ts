@@ -408,13 +408,22 @@ export const getOrgToken = async (req: AuthRequest, res: Response) => {
     // Org commander (event commander) gets priority level 1 by default.
     let is_priority_channel = false;
     let priority_level = 5; // default: lowest priority (no ducking)
+    // E2E voice relay cutover flag (see migration 000059) — decided once per
+    // channel, defaults to false (today's server-mixed TLS-only voice) until a
+    // channel is explicitly flipped for pilot. media-rust rejects a joiner
+    // whose token disagrees with whatever mode the room already established at
+    // first-join, the same defensive pattern as the channel_id binding below.
+    let voice_relay = false;
     if (channel_id) {
       const chanRes = await pool.query(
-        `SELECT event_id, COALESCE(is_frequency, false) AS is_frequency FROM channels WHERE id = $1 AND org_id = $2`,
+        `SELECT event_id, COALESCE(is_frequency, false) AS is_frequency,
+                COALESCE(voice_relay_mode, false) AS voice_relay_mode
+         FROM channels WHERE id = $1 AND org_id = $2`,
         [channel_id, orgId]
       );
       const eventId = chanRes.rows.length > 0 ? chanRes.rows[0].event_id : null;
       const isFrequencyChannel: boolean = chanRes.rows.length > 0 ? chanRes.rows[0].is_frequency : false;
+      voice_relay = chanRes.rows.length > 0 ? chanRes.rows[0].voice_relay_mode : false;
       is_priority_channel = eventId != null;
 
       if (eventId) {
@@ -526,6 +535,7 @@ export const getOrgToken = async (req: AuthRequest, res: Response) => {
         max_video_bitrate_kbps: tierConfig.maxVideoBitrateKbps,
         is_priority_channel,
         priority_level,
+        voice_relay,
         channel_id: channel_id || null,
       },
       getJwtSecret(),
@@ -540,7 +550,12 @@ export const getOrgToken = async (req: AuthRequest, res: Response) => {
     // in-service/online — an outage scenario, not the normal path.
     const assignedMediaUrl = await getNodeForOrg(orgId as string);
     const mediaUrl = assignedMediaUrl || (await getBestSharedNode()) || getActiveMediaUrl();
-    res.json({ token, expires_in: 300, media_url: mediaUrl });
+    // Surfaced alongside the token (rather than requiring the client to decode
+    // its own JWT) so CommLink knows whether to actually encrypt/decrypt audio
+    // before it starts sending — encrypting into a still-mixed-mode room would
+    // break voice for everyone in it (the server mixer expects real Opus, not
+    // SFrame ciphertext).
+    res.json({ token, expires_in: 300, media_url: mediaUrl, voice_relay });
 
   } catch (error) {
     console.error('Get Org Token Error:', error);

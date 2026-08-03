@@ -111,6 +111,11 @@ export function group_member_labels(device_state: Uint8Array, group_id: Uint8Arr
 export function join_from_welcome(device_state: Uint8Array, welcome_bytes: Uint8Array): Uint8Array;
 
 /**
+ * This device's own Ed25519 public key, for distribution to other devices.
+ */
+export function own_public_key(device_state: Uint8Array): Uint8Array;
+
+/**
  * Applies an incoming Commit (an add or remove authored by another
  * member's device) to this device's copy of the group.
  */
@@ -122,6 +127,16 @@ export function process_commit(device_state: Uint8Array, group_id: Uint8Array, c
  * time.
  */
 export function remove_member(device_state: Uint8Array, group_id: Uint8Array, device_labels: string[]): JsAddMemberResult;
+
+/**
+ * Signs `message` with this device's Ed25519 MLS signature key.
+ */
+export function sign_bytes(device_state: Uint8Array, message: Uint8Array): Uint8Array;
+
+/**
+ * Verifies a sign_bytes signature against a claimed sender's public key.
+ */
+export function verify_bytes(public_key: Uint8Array, message: Uint8Array, signature: Uint8Array): boolean;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -149,20 +164,23 @@ export interface InitOutput {
     readonly group_exists: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly group_member_labels: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly join_from_welcome: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly own_public_key: (a: number, b: number) => [number, number, number, number];
     readonly process_commit: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly remove_member: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
-    readonly __wbg_get_jsdecryptresult_device_state: (a: number) => [number, number];
-    readonly __wbg_get_jsdecryptresult_plaintext: (a: number) => [number, number];
-    readonly __wbg_get_jsencryptresult_ciphertext: (a: number) => [number, number];
-    readonly __wbg_get_jsencryptresult_device_state: (a: number) => [number, number];
-    readonly __wbg_get_jsnewidentity_device_state: (a: number) => [number, number];
-    readonly __wbg_get_jsnewidentity_key_package: (a: number) => [number, number];
+    readonly sign_bytes: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly verify_bytes: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly __wbg_set_jsdecryptresult_device_state: (a: number, b: number, c: number) => void;
     readonly __wbg_set_jsdecryptresult_plaintext: (a: number, b: number, c: number) => void;
     readonly __wbg_set_jsencryptresult_ciphertext: (a: number, b: number, c: number) => void;
     readonly __wbg_set_jsencryptresult_device_state: (a: number, b: number, c: number) => void;
     readonly __wbg_set_jsnewidentity_device_state: (a: number, b: number, c: number) => void;
     readonly __wbg_set_jsnewidentity_key_package: (a: number, b: number, c: number) => void;
+    readonly __wbg_get_jsdecryptresult_device_state: (a: number) => [number, number];
+    readonly __wbg_get_jsdecryptresult_plaintext: (a: number) => [number, number];
+    readonly __wbg_get_jsencryptresult_ciphertext: (a: number) => [number, number];
+    readonly __wbg_get_jsencryptresult_device_state: (a: number) => [number, number];
+    readonly __wbg_get_jsnewidentity_device_state: (a: number) => [number, number];
+    readonly __wbg_get_jsnewidentity_key_package: (a: number) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

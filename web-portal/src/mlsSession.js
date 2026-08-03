@@ -21,6 +21,9 @@ import initMls, {
   decrypt,
   export_secret,
   frame_key_packages,
+  sign_bytes,
+  own_public_key,
+  verify_bytes,
 } from 'mls-crypto';
 
 let wasmReady = null;
@@ -95,7 +98,12 @@ export async function ensureIdentity(api, currentUserId) {
     const credential = credentialFor(currentUserId, deviceId);
     const identity = generate_identity(credential);
     state = identity.device_state;
-    await api.registerDevice(deviceId, toB64(identity.key_package), toB64(new TextEncoder().encode(credential)));
+    await api.registerDevice(
+      deviceId,
+      toB64(identity.key_package),
+      toB64(new TextEncoder().encode(credential)),
+      toB64(own_public_key(state)),
+    );
     await persist(state);
   } else {
     deviceStateCache = state;
@@ -342,4 +350,104 @@ export async function exportGroupSecret(api, currentUserId, groupIdStr, label, l
   const state = await ensureIdentity(api, currentUserId);
   const groupId = new TextEncoder().encode(groupIdStr);
   return export_secret(state, groupId, label, length);
+}
+
+/**
+ * Signs `messageBytes` with this device's Ed25519 MLS signature key — see
+ * AudioFrame.sender_signature. Independent of group membership/encryption;
+ * doesn't touch any group's ratchet state.
+ */
+export async function signBytes(api, currentUserId, messageBytes) {
+  const state = await ensureIdentity(api, currentUserId);
+  return sign_bytes(state, messageBytes);
+}
+
+/** Verifies a signBytes signature against a claimed sender's public key. Pure — no identity needed. */
+export function verifySignature(publicKeyBytes, messageBytes, signatureBytes) {
+  return verify_bytes(publicKeyBytes, messageBytes, signatureBytes);
+}
+
+// ── Event-scoped wrappers (groupIdStr = event_id) ────────────────────────
+// Exists so a priority speaker's voice-cascade audio can be decrypted by
+// every event participant, not just members of the speaker's own channel —
+// see submitEventGroupCommit's doc comment (mlsGroupController.ts) for why
+// "every accepted event_group_members row across the event's groups" is the
+// membership set. No encrypt/decrypt wrappers: this group backs
+// exportGroupSecret(..., eventId, 'audio-cascade', 32) directly (already
+// fully generic over groupIdStr), not MLS application messages.
+
+/**
+ * Establishes (or reconciles) the MLS group backing an event's voice-cascade
+ * key. Structurally identical to ensureChannelGroup — same lazy
+ * create-once-then-reconcile-on-open design, same "each step only persists
+ * once the server confirms it accepted the Commit" discipline — just sourced
+ * from event participants (api.getEventParticipants) and committed via
+ * api.submitEventGroupCommit instead of org members / submitChannelCommit.
+ */
+export async function ensureEventGroup(api, currentUserId, orgId, eventId) {
+  const state0 = await ensureIdentity(api, currentUserId);
+  const groupId = new TextEncoder().encode(eventId);
+
+  const { data: participantData } = await api.getEventParticipants(orgId, eventId);
+  const currentMemberIds = new Set((participantData?.participants ?? []).map((p) => p.user_id));
+
+  if (!group_exists(state0, groupId)) {
+    const soloState = create_group(state0, groupId);
+    await persist(soloState);
+
+    const toAdd = [...currentMemberIds].filter((id) => id !== currentUserId);
+    const keyPackages = [];
+    for (const userId of toAdd) {
+      const { data } = await api.getUserDeviceKeyPackages(userId);
+      for (const d of data?.devices ?? []) keyPackages.push(fromB64(d.key_package));
+    }
+    if (keyPackages.length > 0) {
+      const framed = frame_key_packages(keyPackages);
+      const targetEpoch = Number(group_epoch(soloState, groupId)) + 1;
+      const addResult = add_member(soloState, groupId, framed);
+      const { error } = await api.submitEventGroupCommit(orgId, eventId, targetEpoch, toB64(addResult.commit), toB64(addResult.welcome), toAdd);
+      if (!error) await persist(addResult.device_state);
+    }
+    return;
+  }
+
+  let state = state0;
+  const labels = group_member_labels(state, groupId);
+  const memberUserIdOf = (label) => label.slice(0, label.lastIndexOf(':'));
+
+  const staleLabels = labels.filter((label) => !currentMemberIds.has(memberUserIdOf(label)));
+  if (staleLabels.length > 0) {
+    const targetEpoch = Number(group_epoch(state, groupId)) + 1;
+    const removeResult = remove_member(state, groupId, staleLabels);
+    const { error } = await api.submitEventGroupCommit(orgId, eventId, targetEpoch, toB64(removeResult.commit));
+    if (!error) {
+      state = removeResult.device_state;
+      await persist(state);
+    }
+  }
+
+  const representedUserIds = new Set(labels.map(memberUserIdOf));
+  const missingUserIds = [...currentMemberIds].filter((id) => id !== currentUserId && !representedUserIds.has(id));
+  if (missingUserIds.length > 0) {
+    const keyPackages = [];
+    for (const userId of missingUserIds) {
+      const { data } = await api.getUserDeviceKeyPackages(userId);
+      for (const d of data?.devices ?? []) keyPackages.push(fromB64(d.key_package));
+    }
+    if (keyPackages.length > 0) {
+      const framed = frame_key_packages(keyPackages);
+      const targetEpoch = Number(group_epoch(state, groupId)) + 1;
+      const addResult = add_member(state, groupId, framed);
+      const { error } = await api.submitEventGroupCommit(orgId, eventId, targetEpoch, toB64(addResult.commit), toB64(addResult.welcome), missingUserIds);
+      if (!error) await persist(addResult.device_state);
+    }
+  }
+}
+
+export function handleEventGroupWelcome(api, currentUserId, eventId, welcomeB64) {
+  return handleGroupWelcome(api, currentUserId, eventId, welcomeB64);
+}
+
+export function handleEventGroupCommit(api, currentUserId, eventId, commitB64) {
+  return handleGroupCommit(api, currentUserId, eventId, commitB64);
 }

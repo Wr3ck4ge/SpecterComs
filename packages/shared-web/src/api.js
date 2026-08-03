@@ -220,18 +220,27 @@ export function createApi(API_BASE_URL) {
     // MLS device identity / group commits — see deviceController.ts /
     // mlsGroupController.ts. KeyPackages are public key material by design
     // (no different a security boundary than fetching someone's public key).
-    registerDevice: (deviceId, keyPackageB64, credentialB64) =>
-      fetchWithAuth(`/devices`, { method: 'POST', body: { device_id: deviceId, key_package: keyPackageB64, credential: credentialB64 } }),
+    registerDevice: (deviceId, keyPackageB64, credentialB64, publicKeyB64 = null) =>
+      fetchWithAuth(`/devices`, { method: 'POST', body: { device_id: deviceId, key_package: keyPackageB64, credential: credentialB64, public_key: publicKeyB64 } }),
     getUserDeviceKeyPackages: (userId) =>
       fetchWithAuth(`/devices/${userId}/key-packages`, { method: 'GET' }),
     submitDmCommit: (userId, epoch, commitB64, welcomeB64 = null) =>
       fetchWithAuth(`/dm/${userId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64 } }),
     submitChannelCommit: (orgId, chanId, epoch, commitB64, welcomeB64 = null, welcomedUserIds = []) =>
       fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64, welcomed_user_ids: welcomedUserIds } }),
+    submitEventGroupCommit: (orgId, eventId, epoch, commitB64, welcomeB64 = null, welcomedUserIds = []) =>
+      fetchWithAuth(`/orgs/${orgId}/events/${eventId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64, welcomed_user_ids: welcomedUserIds } }),
+    // Every accepted participant across an event's groups — the membership
+    // source for the event-scoped cascade MLS group (see ensureEventGroup in
+    // mlsSession.js). Superset of any single frequency's role-based grant.
+    getEventParticipants: (orgId, eventId) =>
+      fetchWithAuth(`/orgs/${orgId}/events/${eventId}/participants`),
 
     // Abuse reports
     sendAbuseReport: (body) =>
       fetchWithAuth('/abuse-reports', { method: 'POST', body: body }),
+    sendVoiceReport: (body) =>
+      fetchWithAuth('/voice-reports', { method: 'POST', body: body }),
 
     // Diagnostics — bundles capture perf/error/breadcrumb logs. Callsign is
     // attached server-side from the auth token, not sent in the body.
@@ -262,6 +271,15 @@ export function createApi(API_BASE_URL) {
     // Node Provisioning (Phase B of multi-tenant infra)
     adminProvisionNode:   (token, region, nodeId) => fetchWithAuth('/admin/nodes/provision',   { method: "POST", body: { region, node_id: nodeId } }, token),
     adminGetProvisioning: (token)                 => fetchWithAuth('/admin/nodes/provisioning', {}, token),
+
+    // Voice misconduct reports — audio evidence stays encrypted at rest
+    // server-side; adminGetVoiceReportAudioUrl only returns the URL (the
+    // caller fetches it with the admin token itself, since this needs to
+    // stay a plain URL usable by an <audio> element's src, not a fetch call).
+    adminGetVoiceReports:  (token, status = null) => fetchWithAuth(`/admin/voice-reports${status ? `?status=${encodeURIComponent(status)}` : ''}`, {}, token),
+    adminGetVoiceReportAudioUrl: (id) => `${API_BASE_URL}/admin/voice-reports/${id}/audio`,
+    adminUpdateVoiceReport: (token, id, status, adminNotes = null) =>
+      fetchWithAuth(`/admin/voice-reports/${id}`, { method: "PATCH", body: { status, admin_notes: adminNotes } }, token),
   };
 
   return { api, fetchWithAuth, API_BASE_URL, UPLOADS_BASE_URL };

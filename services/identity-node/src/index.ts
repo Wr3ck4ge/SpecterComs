@@ -15,6 +15,7 @@ import sseRoutes from './routes/sse.js';
 import dmRoutes from './routes/dm.js';
 import deviceRoutes from './routes/device.js';
 import abuseRoutes from './routes/abuse.js';
+import voiceReportRoutes from './routes/voiceReport.js';
 import diagRoutes from './routes/diag.js';
 import gameShipsRoutes from './routes/gameShips.js';
 import hangarRoutes from './routes/hangar.js';
@@ -109,6 +110,7 @@ app.use('/hangar', hangarRoutes);
 app.use('/dm', dmRoutes);
 app.use('/devices', deviceRoutes);
 app.use('/abuse-reports', abuseRoutes);
+app.use('/voice-reports', voiceReportRoutes);
 
 // Serve uploaded chat images
 // Cross-Origin-Resource-Policy must be 'cross-origin' here because the Tauri

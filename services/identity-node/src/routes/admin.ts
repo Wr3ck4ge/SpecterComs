@@ -25,6 +25,7 @@ import {
   listProvisioningRequests,
 } from '../controllers/adminController.js';
 import { registerPushToken, unregisterPushToken } from '../controllers/pushController.js';
+import { listVoiceReports, getVoiceReportAudio, updateVoiceReportStatus } from '../controllers/voiceReportController.js';
 import { authenticateTokenStrict } from '../middleware/authMiddleware.js';
 import { loginRateLimiter } from '../middleware/rateLimit.js';
 
@@ -89,5 +90,10 @@ router.get('/nodes/provisioning', listProvisioningRequests);
 router.post('/push/register',   registerPushToken);
 router.delete('/push/register', unregisterPushToken);
 router.get('/node-alerts',      listNodeAlertEvents);
+
+// Voice misconduct reports
+router.get('/voice-reports',            listVoiceReports);
+router.get('/voice-reports/:id/audio',  getVoiceReportAudio);
+router.patch('/voice-reports/:id',      updateVoiceReportStatus);
 
 export default router;

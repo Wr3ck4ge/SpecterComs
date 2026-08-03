@@ -1160,6 +1160,36 @@ export const launchEvent = async (req: AuthRequest, res: Response) => {
 };
 
 // ── Get / Set event planners ──────────────────────────────────────────────────
+/**
+ * GET /orgs/:orgId/events/:eventId/participants
+ * Every currently-accepted event_group_members row across the event's
+ * groups, deduplicated by user — the membership source for the event-scoped
+ * MLS cascade group (see mlsSession.js's ensureEventGroup). A safe superset
+ * of any single frequency's role-based grant: holding a role that a
+ * frequency grants access to requires being an accepted member of that
+ * role's group, so every possible cascade recipient is already covered here.
+ */
+export const getEventParticipants = async (req: AuthRequest, res: Response) => {
+  const { eventId } = req.params;
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  try {
+    const result = await pool.query(
+      `SELECT DISTINCT egm.user_id, u.callsign
+       FROM event_group_members egm
+       JOIN event_groups eg ON egm.group_id = eg.id
+       JOIN users u ON u.id = egm.user_id
+       WHERE eg.event_id = $1 AND egm.status = 'accepted'`,
+      [eventId],
+    );
+    res.json({ participants: result.rows });
+  } catch (err) {
+    console.error('Get event participants error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 export const getEventPlanners = async (req: AuthRequest, res: Response) => {
   const { eventId } = req.params;
   const userId = req.user?.id;

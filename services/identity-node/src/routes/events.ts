@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { authenticateTokenStrict } from '../middleware/authMiddleware.js';
+import { submitEventGroupCommit } from '../controllers/mlsGroupController.js';
 import {
   getOrgEvents, getOrgEventHistory, createOrgEvent, rsvpEvent, updateOrgEvent, deleteOrgEvent,
   getEventGroups, saveEventGroups, launchEvent,
-  getEventPlanners, setEventPlanners, joinEventGroup, leaveEventGroup, joinEventRole, leaveEventRole,
+  getEventPlanners, setEventPlanners, getEventParticipants, joinEventGroup, leaveEventGroup, joinEventRole, leaveEventRole,
   approveGroupMember, removeGroupMember, approveAllGroupMembers,
   quickJoinEvent, leaveMyEventSignup,
   respondEventAssignment, getEventChannelTree, getEventPresets, saveEventPreset, deleteEventPreset,
@@ -29,6 +30,7 @@ router.post('/:eventId/map-models',          authenticateTokenStrict, mapModelUp
 router.post('/:eventId/launch',              authenticateTokenStrict, launchEvent as any);
 router.get('/:eventId/tree',                 authenticateTokenStrict, getEventChannelTree as any);
 router.get('/:eventId/planners',             authenticateTokenStrict, getEventPlanners as any);
+router.get('/:eventId/participants',         authenticateTokenStrict, getEventParticipants as any);
 router.put('/:eventId/planners',             authenticateTokenStrict, setEventPlanners as any);
 router.post('/:eventId/groups/:groupId/join', authenticateTokenStrict, joinEventGroup as any);
 router.post('/:eventId/groups/:groupId/leave', authenticateTokenStrict, leaveEventGroup as any);
@@ -49,6 +51,7 @@ router.post('/:eventId/presence',            authenticateTokenStrict, pingPresen
 router.delete('/:eventId/presence',          authenticateTokenStrict, clearPresence as any);
 router.get('/:eventId/my-assignment',        authenticateTokenStrict, getMyEventAssignment as any);
 router.post('/:eventId/end',                 authenticateTokenStrict, endOperation as any);
+router.post('/:eventId/mls/commit',          authenticateTokenStrict, submitEventGroupCommit as any);
 
 // Channel layout presets (org-scoped)
 router.get('/presets',                       authenticateTokenStrict, getEventPresets as any);

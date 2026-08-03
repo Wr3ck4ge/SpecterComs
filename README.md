@@ -9,24 +9,26 @@ This repo is a public snapshot of the app code for anyone who wants to see how i
 | Path | What it is |
 |---|---|
 | `web-portal/` | Desktop client — Tauri 2 (Rust) shell + React frontend. Voice, the in-game overlay window, mission/event tooling, org management. |
-| `web-portal/mls-crypto/` | Rust/WASM crate — end-to-end encryption for text and video, built on [MLS (RFC 9420)](https://datatracker.ietf.org/doc/html/rfc9420) via [OpenMLS](https://github.com/openmls/openmls). |
+| `web-portal/mls-crypto/` | Rust/WASM crate — end-to-end encryption (text, video, and voice), built on [MLS (RFC 9420)](https://datatracker.ietf.org/doc/html/rfc9420) via [OpenMLS](https://github.com/openmls/openmls). |
 | `services/identity-node/` | Node/TypeScript API — auth, orgs, messaging, billing, push notifications. |
-| `services/media-rust/` | Rust media pipeline — audio/video relay and mixing. |
+| `services/media-rust/` | Rust media pipeline — a content-blind relay for video and (on migrated channels) voice; falls back to server-side mixing for voice channels not yet on the new relay path. |
 | `packages/shared-web/` | Shared frontend code/API client used by both `web-portal` and `website`. |
 | `website/` | Marketing/landing site (React). |
+| `proto/` | Shared protobuf definitions (`AudioFrame`, `VideoFrame`, moderation messages) used by both the client and `services/media-rust`. |
 
 ## Stack
 
 - **Desktop client:** Tauri 2, Rust, React, Vite
 - **Backend:** Node.js, TypeScript, Express
 - **Media:** Rust (custom SFU/relay), FFmpeg
-- **End-to-end encryption:** MLS (RFC 9420) via OpenMLS, compiled to WASM — DMs, org channels, and video are E2E encrypted per-device (multi-device aware), with forward secrecy and post-compromise security. Voice stays TLS-only: the media relay mixes audio server-side for priority ducking (so a squad lead's voice cuts through), which is fundamentally incompatible with E2E without dropping that feature.
+- **End-to-end encryption:** MLS (RFC 9420) via OpenMLS, compiled to WASM — DMs, org channels, video, and (on channels running the new relay path) voice are E2E encrypted per-device (multi-device aware), with forward secrecy and post-compromise security. Voice used to be TLS-only because priority ducking (a squad lead's voice cutting through background chatter) needed the server to mix audio in plaintext. That's been replaced with a per-sender relay — the server forwards each speaker's still-encrypted audio without ever decoding it, and ducking is now a client-side playback decision driven by packet-arrival metadata (who's authorized to duck, are they currently transmitting) instead of content inspection. A priority speaker's voice reaching listeners in other channels ("cascade") is decrypted with a second, event-scoped MLS group, since the cascade's recipients aren't members of the speaker's own channel group. This is rolling out channel-by-channel; a channel not yet migrated still runs the previous TLS-only server-mixed path.
 - **Frontend tooling:** Tailwind, Vite
 
 ## Trust model
 
-- Text, direct messages, org channels, and video are MLS end-to-end encrypted — servers store and relay ciphertext they cannot decrypt.
-- Voice is encrypted in transit (TLS) but decrypted server-side by the media relay so it can mix audio for priority ducking. This is a deliberate tradeoff, not an oversight — see the encryption note above.
+- Text, direct messages, org channels, video, and voice (on channels running the new relay path) are MLS end-to-end encrypted — servers store and relay ciphertext they cannot decrypt.
+- Voice channels not yet migrated to the relay path are still encrypted in transit (TLS) but decrypted server-side so the media relay can mix audio for priority ducking — the same tradeoff described above, being phased out channel-by-channel.
+- A priority speaker's audio reaching other channels (cascade) uses a separate MLS group scoped to the event rather than the channel, since cascade recipients aren't in the speaker's own channel's group — membership is every accepted participant across the event, not just the specific frequency/group a listener happens to be in.
 - Auth tokens and account data are handled by `services/identity-node/`; nothing in that path has access to MLS group keys.
 
 ## Status

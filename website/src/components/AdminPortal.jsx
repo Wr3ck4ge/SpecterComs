@@ -638,6 +638,282 @@ function SectionHwidBans({ token, onError }) {
   );
 }
 
+// ─── Section: Voice Reports ───────────────────────────────────────────────────
+
+// Decodes a report clip — see the matching encoder, frameReportClip in
+// web-portal's CommLink.jsx. Both sides are this app's own code, so this
+// framing has no external spec to match.
+//
+// Two formats exist:
+//   - New (4B magic "SEV2" prefix): repeated [8B ts u64 LE][4B ssrc u32 LE]
+//     [4B opus_len u32 LE][opus bytes] — ssrc lets a segment be attributed to
+//     a real speaker (via the report's speaker_map) once the source channel
+//     ran the E2E voice relay instead of server-side mixing.
+//   - Legacy (no magic prefix — every report submitted before this existed):
+//     repeated [8B ts u64 LE][4B opus_len u32 LE][opus bytes], one blended
+//     stream, ssrc implicitly 0 throughout.
+// The magic tag is checked first so old, already-stored reports stay
+// decodable without a data migration.
+const REPORT_CLIP_MAGIC = 0x53455632; // "SEV2" as a big-endian u32
+
+async function decodeReportClip(arrayBuffer) {
+  const { OpusDecoder } = await import('opus-decoder');
+  const dec = new OpusDecoder();
+  await dec.ready;
+
+  const buf = new Uint8Array(arrayBuffer);
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let offset = 0;
+  const chunks = [];
+  let sampleRate = 48000;
+
+  const hasSsrc = buf.length >= 4 && view.getUint32(0, false) === REPORT_CLIP_MAGIC;
+  if (hasSsrc) offset = 4;
+  const headerLen = hasSsrc ? 16 : 12;
+
+  while (offset + headerLen <= buf.length) {
+    const tsLow = view.getUint32(offset, true);
+    const tsHigh = view.getUint32(offset + 4, true);
+    const ts = tsHigh * 4294967296 + tsLow;
+    let ssrc = 0;
+    let lenOffset = offset + 8;
+    if (hasSsrc) {
+      ssrc = view.getUint32(offset + 8, true);
+      lenOffset = offset + 12;
+    }
+    const len = view.getUint32(lenOffset, true);
+    offset = lenOffset + 4;
+    if (len < 0 || offset + len > buf.length) break;
+    const opusBytes = buf.subarray(offset, offset + len);
+    offset += len;
+    try {
+      const { channelData, samplesDecoded, sampleRate: sr } = dec.decodeFrame(opusBytes);
+      if (samplesDecoded) {
+        chunks.push({ ts, ssrc, samples: channelData[0].slice(0, samplesDecoded) });
+        if (sr) sampleRate = sr;
+      }
+    } catch {
+      // One malformed frame shouldn't sink the whole clip — skip and keep going.
+    }
+  }
+  if (dec.free) dec.free();
+
+  const totalSamples = chunks.reduce((sum, c) => sum + c.samples.length, 0);
+  const samples = new Float32Array(totalSamples);
+  let o = 0;
+  for (const c of chunks) { samples.set(c.samples, o); o += c.samples.length; }
+  const speakerSsrcs = [...new Set(chunks.map(c => c.ssrc))];
+  return { samples, sampleRate, firstTs: chunks[0]?.ts ?? null, speakerSsrcs };
+}
+
+const STATUS_STYLES = {
+  pending:   'bg-yellow-50 border-yellow-300 text-yellow-700',
+  reviewed:  'bg-blue-50 border-blue-300 text-blue-700',
+  dismissed: 'bg-gray-100 border-gray-300 text-gray-500',
+  actioned:  'bg-red-50 border-red-300 text-red-700',
+};
+
+const StatusPill = ({ status }) => (
+  <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium border ${STATUS_STYLES[status] || STATUS_STYLES.pending}`}>
+    {status}
+  </span>
+);
+
+function SectionVoiceReports({ token, onError }) {
+  const [reports, setReports]         = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [statusFilter, setStatusFilter] = useState('pending');
+  const [msg, setMsg]                 = useState(null);
+  const [expandedId, setExpandedId]   = useState(null);
+  const [notesDraft, setNotesDraft]   = useState({});
+  const [audioBusyId, setAudioBusyId] = useState(null);
+  // report id -> array of user_ids attributed to segments of the clip last
+  // played for that report (via speaker_map + the clip's own ssrcs). Only
+  // populated on play, not on list-load, since it requires decoding the clip.
+  const [clipSpeakers, setClipSpeakers] = useState({});
+  const audioCtxRef = React.useRef(null);
+
+  const loadReports = () => {
+    setLoading(true);
+    api.adminGetVoiceReports(token, statusFilter === 'all' ? null : statusFilter).then(({ data, error }) => {
+      setLoading(false);
+      if (error) onError(error);
+      else setReports(data.reports || []);
+    });
+  };
+
+  useEffect(() => { loadReports(); }, [token, statusFilter]);
+
+  const handleToggleExpand = (id, currentNotes) => {
+    setExpandedId(expandedId === id ? null : id);
+    setNotesDraft(prev => (prev[id] !== undefined ? prev : { ...prev, [id]: currentNotes || '' }));
+  };
+
+  const handleUpdateStatus = async (id, status) => {
+    const { error } = await api.adminUpdateVoiceReport(token, id, status, notesDraft[id] ?? null);
+    if (error) { onError(error); return; }
+    setMsg(`Report marked ${status}.`);
+    loadReports();
+  };
+
+  const handlePlayAudio = async (id) => {
+    setAudioBusyId(id);
+    try {
+      const res = await fetch(api.adminGetVoiceReportAudioUrl(id), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error(`Audio fetch failed (${res.status})`);
+      const raw = await res.arrayBuffer();
+      const { samples, sampleRate, speakerSsrcs } = await decodeReportClip(raw);
+      if (samples.length === 0) throw new Error('Clip decoded to zero samples');
+
+      // Resolve this clip's ssrcs to user_ids via the report's own speaker_map
+      // (sent by the reporter's client — see submitVoiceReport in CommLink.jsx).
+      // Empty for a clip from a still mixed-mode channel, where every frame is
+      // ssrc=0 and there's nothing per-speaker to attribute.
+      const report = reports.find(r => r.id === id);
+      const speakerMap = report?.speaker_map || {};
+      const speakerIds = [...new Set(
+        (speakerSsrcs || [])
+          .map(ssrc => speakerMap[String(ssrc)])
+          .filter(Boolean)
+      )];
+      setClipSpeakers(prev => ({ ...prev, [id]: speakerIds }));
+
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') await ctx.resume().catch(() => {});
+      const buffer = ctx.createBuffer(1, samples.length, sampleRate);
+      buffer.getChannelData(0).set(samples);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start();
+    } catch (err) {
+      onError(err?.message || String(err));
+    } finally {
+      setAudioBusyId(null);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {msg && <Alert type="success" onDismiss={() => setMsg(null)}>{msg}</Alert>}
+      <div className="flex justify-between items-center">
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-600 font-medium">Voice Misconduct Reports</span>
+          <select
+            className="bg-white border border-gray-300 rounded text-sm px-2 py-1 text-gray-700"
+            value={statusFilter}
+            onChange={e => setStatusFilter(e.target.value)}
+          >
+            <option value="pending">Pending</option>
+            <option value="reviewed">Reviewed</option>
+            <option value="dismissed">Dismissed</option>
+            <option value="actioned">Actioned</option>
+            <option value="all">All</option>
+          </select>
+        </div>
+        <RBtn small onClick={loadReports}>Refresh</RBtn>
+      </div>
+      <div className="border border-gray-200 bg-white rounded-lg shadow-sm overflow-hidden">
+        <Table cols={['Reporter', 'Accused', 'Reported', 'Status', 'Actions']} empty="No voice reports on record.">
+          {loading
+            ? <tr><td colSpan={5} className="px-4 py-6 text-center text-gray-400 text-sm">Loading...</td></tr>
+            : reports.map((r) => (
+              <React.Fragment key={r.id}>
+                <tr className="border-b border-gray-100 hover:bg-gray-50">
+                  <td className="px-4 py-3 text-gray-700 text-sm">{r.reporter_callsign || '—'}</td>
+                  <td className="px-4 py-3 text-gray-700 text-sm">{r.accused_callsign || '—'}</td>
+                  <td className="px-4 py-3 text-gray-400 text-sm">{new Date(r.reported_at).toLocaleString()}</td>
+                  <td className="px-4 py-3"><StatusPill status={r.status} /></td>
+                  <td className="px-4 py-3 text-right">
+                    <RBtn small onClick={() => handleToggleExpand(r.id, r.admin_notes)}>
+                      {expandedId === r.id ? 'Hide' : 'Review'}
+                    </RBtn>
+                  </td>
+                </tr>
+                {expandedId === r.id && (
+                  <tr className="border-b border-gray-100 bg-gray-50">
+                    <td colSpan={5} className="px-4 py-4">
+                      <div className="space-y-3">
+                        {r.reporter_note && (
+                          <div>
+                            <div className="text-xs uppercase tracking-wider text-gray-400 mb-1">Reporter Note</div>
+                            <div className="text-sm text-gray-700">{r.reporter_note}</div>
+                          </div>
+                        )}
+                        <div>
+                          <div className="text-xs uppercase tracking-wider text-gray-400 mb-1">Speaking Activity (window)</div>
+                          {(r.speaking_history || []).length === 0
+                            ? <div className="text-sm text-gray-400">No speaking-activity data attached.</div>
+                            : (
+                              <div className="flex flex-wrap gap-1">
+                                {[...new Set((r.speaking_history || []).map(e => e.callsign))].map(cs => (
+                                  <span key={cs} className="px-2 py-0.5 rounded bg-gray-200 text-gray-600 text-xs">{cs}</span>
+                                ))}
+                              </div>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <RBtn small onClick={() => handlePlayAudio(r.id)} disabled={audioBusyId === r.id}>
+                            {audioBusyId === r.id ? 'Loading…' : '▶ Play Clip'}
+                          </RBtn>
+                          <span className="text-xs text-gray-400">Decrypted server-side on request; never stored in the browser.</span>
+                        </div>
+                        {clipSpeakers[r.id] !== undefined && (
+                          <div>
+                            <div className="text-xs uppercase tracking-wider text-gray-400 mb-1">Clip Attribution</div>
+                            {clipSpeakers[r.id].length === 0
+                              ? <div className="text-sm text-gray-400">No per-speaker attribution available for this clip (blended/mixed-mode audio, or no relay-mode speakers recognized).</div>
+                              : (
+                                <div className="flex flex-wrap gap-1">
+                                  {clipSpeakers[r.id].map(uid => {
+                                    // Best-effort label: the only two callsigns this list
+                                    // response carries are the reporter's and accused's —
+                                    // any other attributed speaker shows as a raw user_id
+                                    // (cross-reference via the Users section if needed).
+                                    const label =
+                                      uid === r.reporter_id ? `${r.reporter_callsign || uid} (reporter)`
+                                      : uid === r.accused_id ? `${r.accused_callsign || uid} (accused)`
+                                      : uid;
+                                    return (
+                                      <span key={uid} className="px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-xs">{label}</span>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                          </div>
+                        )}
+                        <div>
+                          <div className="text-xs uppercase tracking-wider text-gray-400 mb-1">Admin Notes</div>
+                          <textarea
+                            className="w-full border border-gray-300 rounded text-sm px-2 py-1 text-gray-700"
+                            rows={2}
+                            value={notesDraft[r.id] ?? ''}
+                            onChange={e => setNotesDraft(prev => ({ ...prev, [r.id]: e.target.value }))}
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <RBtn small variant="default" onClick={() => handleUpdateStatus(r.id, 'reviewed')}>Mark Reviewed</RBtn>
+                          <RBtn small variant="default" onClick={() => handleUpdateStatus(r.id, 'dismissed')}>Dismiss</RBtn>
+                          <RBtn small variant="danger" onClick={() => handleUpdateStatus(r.id, 'actioned')}>Mark Actioned</RBtn>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))
+          }
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 // ─── Section: System ──────────────────────────────────────────────────────────
 
 function SectionSystem({ token, onError, onLogout }) {
@@ -688,6 +964,7 @@ const NAV = [
   { id: 'users',      label: 'Users'         },
   { id: 'orgs',       label: 'Organizations' },
   { id: 'hwid',       label: 'HWID Bans'     },
+  { id: 'voiceReports', label: 'Voice Reports' },
   { id: 'servers',    label: 'Servers'       },
   { id: 'system',     label: 'System'        },
 ];
@@ -809,6 +1086,7 @@ const AdminPortal = ({ onExit }) => {
           {activeSection === 'users'     && <SectionUsers     token={adminToken} onError={setError} />}
           {activeSection === 'orgs'      && <SectionOrgs      token={adminToken} onError={setError} />}
           {activeSection === 'hwid'      && <SectionHwidBans  token={adminToken} onError={setError} />}
+          {activeSection === 'voiceReports' && <SectionVoiceReports token={adminToken} onError={setError} />}
           {activeSection === 'servers'   && <SectionServers   token={adminToken} onError={setError} />}
           {activeSection === 'system'    && <SectionSystem    token={adminToken} onError={setError} onLogout={handleLogout} />}
         </main>

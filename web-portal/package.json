@@ -1,7 +1,7 @@
 {
   "name": "specter-web-portal",
   "private": true,
-  "version": "1.9.62",
+  "version": "1.10.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

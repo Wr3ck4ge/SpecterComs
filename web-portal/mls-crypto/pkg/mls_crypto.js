@@ -477,6 +477,23 @@ export function join_from_welcome(device_state, welcome_bytes) {
 }
 
 /**
+ * This device's own Ed25519 public key, for distribution to other devices.
+ * @param {Uint8Array} device_state
+ * @returns {Uint8Array}
+ */
+export function own_public_key(device_state) {
+    const ptr0 = passArray8ToWasm0(device_state, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.own_public_key(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * Applies an incoming Commit (an add or remove authored by another
  * member's device) to this device's copy of the group.
  * @param {Uint8Array} device_state
@@ -521,6 +538,44 @@ export function remove_member(device_state, group_id, device_labels) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return JsAddMemberResult.__wrap(ret[0]);
+}
+
+/**
+ * Signs `message` with this device's Ed25519 MLS signature key.
+ * @param {Uint8Array} device_state
+ * @param {Uint8Array} message
+ * @returns {Uint8Array}
+ */
+export function sign_bytes(device_state, message) {
+    const ptr0 = passArray8ToWasm0(device_state, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.sign_bytes(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * Verifies a sign_bytes signature against a claimed sender's public key.
+ * @param {Uint8Array} public_key
+ * @param {Uint8Array} message
+ * @param {Uint8Array} signature
+ * @returns {boolean}
+ */
+export function verify_bytes(public_key, message, signature) {
+    const ptr0 = passArray8ToWasm0(public_key, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(signature, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.verify_bytes(ptr0, len0, ptr1, len1, ptr2, len2);
+    return ret !== 0;
 }
 function __wbg_get_imports() {
     const import0 = {

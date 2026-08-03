@@ -23,6 +23,8 @@ export default function UserProfileModal({
   onKickFromChannel,
   onKickFromServer,
   onBan,
+  onReportVoice,
+  canReportVoice,
 }) {
   // Close on Escape key
   useEffect(() => {
@@ -212,6 +214,15 @@ export default function UserProfileModal({
             {canMute && (
               <button style={btnBase} onClick={onGlobalMute}>
                 🔇 MUTE (GLOBAL)
+              </button>
+            )}
+
+            {/* Available to any user, not just mods — reporting is what
+                surfaces misconduct in the first place, it shouldn't require
+                permissions someone might not have. */}
+            {canReportVoice && (
+              <button style={{ ...btnDanger, marginTop: 4 }} onClick={onReportVoice} title="Attach the last minute of call audio to a report">
+                ⚠ REPORT (VOICE)
               </button>
             )}
 

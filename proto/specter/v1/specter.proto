@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package specter.v1;
+
+option go_package = "github.com/zapie/project-spectercoms/proto";
+
+// --- CORE ROLES & PERMISSIONS ---
+
+enum CommsTier {
+  TIER_UNSPECIFIED = 0;
+  TIER_COMMANDER = 1; // Global override/ducking
+  TIER_OFFICER = 2;   // Channel-wide override
+  TIER_OPERATIVE = 3; // Standard voice
+}
+
+enum PriorityLevel {
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_GLOBAL_ADMIN = 1;   // Overrides entire Org (-MAX dB)
+  PRIORITY_GROUP_LEADER = 2;   // Overrides specific channels (-20dB)
+  PRIORITY_MEMBER = 3;         // Standard voice
+  PRIORITY_LISTENER = 4;       // Listen-only usually
+}
+
+message ShipSession {
+  string ship_id = 1;
+  string fleet_id = 2;
+  CommsTier user_tier = 3;
+}
+
+message MissionEvent {
+  string event_id = 1;
+  int64 start_time = 2;
+  int64 end_time = 3;
+}
+
+// --- SESSION MANAGEMENT ---
+
+message UserSession {
+  string user_id = 1;
+  string session_id = 2; // Ephemeral
+  PriorityLevel priority = 3;
+  string current_channel_id = 4;
+  bool is_muted = 5;      // Mic disabled (Voluntary or Forced)
+  bool is_deafened = 6;   // Output disabled (Silence Mode)
+  int32 ssrc = 7;         // Negotiated RTP SSRC (Integer ID) for audio
+}
+
+message ChannelRoster {
+   // The "Rosetta Stone" mapping Blind SSRCs to User Identities
+   // Sent via Secure Control Plane (WebTransport Stream), NOT Media Plane
+   map<uint32, string> ssrc_to_user_id = 1;
+}
+
+// --- MEDIA PLANE ---
+
+message AudioFrame {
+  // SFrame Encrypted Payload (Opus)
+  bytes encrypted_payload = 1; 
+  // Metadata for Blind Routing (NO PII HERE)
+  uint32 ssrc = 2; // Ephemeral Integer ID
+  int32 sequence = 3;
+  bool is_global_broadcast = 4; 
+  bytes sender_signature = 5; // Ed25519 Signature for Panopticon Verification
+}
+
+message VideoFrame {
+  // SFrame Encrypted Payload (VP9/AV1)
+  bytes encrypted_payload = 1;
+  uint32 ssrc = 2; // Ephemeral Integer ID
+  int32 sequence = 3;
+  bool is_keyframe = 4; // Critical for new subscribers
+  int32 width = 5;      // Metadata for layout, not content
+  int32 height = 6;
+  bool is_screenshare = 7; // Prioritize readability over framerate
+}
+
+// --- MODERATION ---
+
+message ModerationAction {
+  string admin_id = 1;
+  string target_id = 2;
+  string org_id = 3;
+  enum ActionType {
+     KICK = 0;
+     BAN = 1;
+     MUTE = 2;
+     MOVE = 3;
+  }
+  ActionType action = 4;
+  string reason = 5;
+  string target_channel_id = 6; // Required for MOVE
+}

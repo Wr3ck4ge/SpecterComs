@@ -81,6 +81,25 @@ pub enum RosterMessage {
     Leave(String),
     Move(String), // new_channel_id
     Speaking { callsign: String, level: u8 },
+    /// ssrc -> user_id for every current room member, computed via canonical_ssrc.
+    /// Sent as an initial snapshot on join and re-broadcast whenever membership
+    /// changes, since a client can't independently recompute another user's ssrc
+    /// (it only knows their callsign, not their true user_id) — this is the
+    /// authoritative mapping relay-mode clients use to attribute an incoming
+    /// lane's ssrc to a real speaker (UI labeling, per-lane mute, evidence-clip
+    /// attribution). Carries no effect in mixed-mode rooms, where every audio
+    /// datagram is still server-mixed to ssrc=0 regardless.
+    SsrcMap(HashMap<u32, String>),
+    /// Relay-mode ducking signal (see the "Priority ducking" section of the
+    /// audio datagram relay path below) — server can no longer scale ciphertext
+    /// gain itself once it never decodes audio, so it tells clients who's
+    /// active and at what tier and each client applies the duck locally to
+    /// every lane except the active speaker's own. `ssrc` lets a client
+    /// identify "is this me" without a user_id round-trip. `level` mirrors the
+    /// proto's PriorityLevel tiers (1 = PRIORITY_GLOBAL_ADMIN/-MAX dB, 2 =
+    /// PRIORITY_GROUP_LEADER/-20dB) for differentiated duck depth.
+    Duck { ssrc: u32, level: u8 },
+    DuckRelease,
 }
 
 // ── Room state ─────────────────────────────────────────────────────────────────
@@ -102,12 +121,23 @@ pub struct RoomState {
     /// so it has no effect on what anyone else hears. Set via a SET_LOCAL_MUTE (0x06)
     /// control datagram from the listener's own session.
     pub local_mutes: HashMap<String, HashSet<String>>,
-    /// Users whose role grants priority (Commander-tier) — set on join.
-    pub priority_users: HashSet<String>,
+    /// Users whose role grants priority (Commander/Squad-Leader-tier) -> their
+    /// tier (1 or 2), set on join from the JWT's priority_level claim. Widened
+    /// from a HashSet<String> (a bare "is this user priority" flag) so relay-mode
+    /// ducking can drive differentiated duck depth per the proto's PriorityLevel
+    /// tiers (PRIORITY_GLOBAL_ADMIN vs PRIORITY_GROUP_LEADER) instead of treating
+    /// every priority speaker the same.
+    pub priority_levels: HashMap<String, u8>,
     /// user_id of the currently active priority speaker (if any).
     pub priority_speaker: Option<String>,
     /// Instant at which ducking should be released.
     pub priority_release_at: Option<Instant>,
+    /// Relay-mode only: last time an audio datagram arrived from each priority
+    /// user — the packet-arrival "are they still talking" signal that replaces
+    /// mixer_task's RMS-based is_speaking() check, which requires plaintext PCM
+    /// the relay path never has. Not used/populated for Mixed rooms, which keep
+    /// mixer_task's existing RMS-based detection unchanged.
+    pub last_priority_packet_at: HashMap<String, Instant>,
     /// Sender half of the PCM ingress channel — cloned per user session.
     /// Dropped when RoomState is dropped, causing the mixer task to exit.
     pub pcm_tx: mpsc::Sender<(String, Vec<i16>)>,
@@ -174,6 +204,16 @@ pub struct RoomState {
     /// evicting a user's session in an unrelated org that happens to share this
     /// same node/room registry.
     pub member_orgs: HashMap<String, String>,
+    /// Decided once from the first joiner's `voice_relay` JWT claim (identity-node's
+    /// getOrgToken, itself sourced from channels.voice_relay_mode — see migration
+    /// 000059) and fixed for the room's lifetime: every later joiner's own claim must
+    /// agree or their connection is rejected (see the check at room-join, mirroring
+    /// the existing token_channel_id check). false = today's server-mixed TLS-only
+    /// voice (mixer_task). true = per-sender SFrame-encrypted relay — audio datagrams
+    /// are forwarded opaquely (ssrc rewritten from the authenticated session, never
+    /// decoded) instead of being decoded/mixed/re-encoded, and no mixer_task is
+    /// spawned for this room at all.
+    pub voice_relay_mode: bool,
 }
 
 // ── Registry type aliases ──────────────────────────────────────────────────────
@@ -233,6 +273,49 @@ fn compute_level(pcm: &[i16]) -> u8 {
     ((rms / 8000.0 * 100.0).min(100.0)) as u8
 }
 
+/// Bit-exact port of CommLink.jsx's `hashUserId` (a standard 32-bit string hash,
+/// `hash = hash*31 + charCode` done via shift-sub, JS-int32-wrapped each step,
+/// then `Math.abs(...) >>> 0`). Used in relay mode to rewrite a client's
+/// self-asserted `ssrc` to a value derived from their *authenticated* user_id
+/// before forwarding — see the audio relay path below — so a legitimate
+/// client's own value passes through unchanged (client and server compute the
+/// same hash) while a spoofed one gets corrected. Assumes user_id is ASCII
+/// (true for this app's UUIDs): JS iterates UTF-16 code units, Rust iterates
+/// Unicode scalar values, and those coincide for ASCII input.
+fn canonical_ssrc(user_id: &str) -> u32 {
+    let mut hash: i32 = 0;
+    for c in user_id.chars() {
+        hash = hash.wrapping_shl(5).wrapping_sub(hash).wrapping_add(c as i32);
+    }
+    hash.unsigned_abs()
+}
+
+/// Relay-mode counterpart to mixer_task's per-tick release check: since a
+/// relay-mode room has no mixer loop to piggyback on, this is a standalone
+/// task (one per relay-mode room, spawned alongside room creation) that just
+/// checks whether the active priority speaker's 1500ms hangover has elapsed.
+/// Self-terminates once the room is gone from the registry (members.is_empty()
+/// cleanup removes the whole RoomState — see the session cleanup block).
+async fn duck_release_sweeper(room_id: String, rooms: RoomRegistry) {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    loop {
+        interval.tick().await;
+        let mut rooms_lock = rooms.write().await;
+        let state = match rooms_lock.get_mut(&room_id) {
+            Some(s) => s,
+            None => break,
+        };
+        if let Some(release_at) = state.priority_release_at {
+            if Instant::now() >= release_at {
+                state.priority_speaker = None;
+                state.priority_release_at = None;
+                let msg = serde_json::to_string(&RosterMessage::DuckRelease).unwrap();
+                let _ = state.roster_tx.send(msg);
+            }
+        }
+    }
+}
+
 // ── Per-room mixer task ────────────────────────────────────────────────────────
 async fn mixer_task(
     room_id: String,
@@ -289,7 +372,7 @@ async fn mixer_task(
         let needs_ducking_work = {
             let rooms_lock = rooms.read().await;
             match rooms_lock.get(&room_id) {
-                Some(state) => !state.priority_users.is_empty() || state.priority_speaker.is_some(),
+                Some(state) => !state.priority_levels.is_empty() || state.priority_speaker.is_some(),
                 None => break,
             }
         };
@@ -303,7 +386,7 @@ async fn mixer_task(
             };
 
             let mut found_speaker: Option<String> = None;
-            for uid in &state.priority_users {
+            for uid in state.priority_levels.keys() {
                 if let Some(pcm) = pcm_buffers.get(uid) {
                     if is_speaking(pcm, 500.0) { found_speaker = Some(uid.clone()); break; }
                 }
@@ -314,7 +397,7 @@ async fn mixer_task(
                 state.priority_speaker = Some(speaker_id.clone());
                 state.priority_release_at = Some(Instant::now() + Duration::from_millis(1500));
 
-                let priority_snap = state.priority_users.clone();
+                let priority_snap: HashSet<String> = state.priority_levels.keys().cloned().collect();
                 for (uid, gain) in state.user_gains.iter_mut() {
                     if !priority_snap.contains(uid) && *gain > 0.0 { *gain = 0.1; }
                 }
@@ -1071,16 +1154,21 @@ async fn handle_voice_connection(
         return;
     }
 
-    let is_priority = {
-        // Priority tiers 1 and 2 (Commander / Squad Leader equivalent) cause ducking.
-        // Falls back to the legacy Commander role check for tokens that pre-date the
-        // priority_level claim (e.g. existing sessions during a rolling deploy).
-        let level = claims.get("priority_level").and_then(|v| v.as_i64()).unwrap_or(5);
-        let legacy = role == "Commander"
-            && claims.get("is_priority_channel").and_then(|v| v.as_bool()).unwrap_or(false);
-        level <= 2 || legacy
-    };
-    info!("JWT OK — user={}, org={}, channel={}, priority={}", user_id, org_id, channel_id, is_priority);
+    // Priority tiers 1 and 2 (Commander / Squad Leader equivalent) cause ducking.
+    // Falls back to the legacy Commander role check (mapped to tier 1, matching
+    // orgController.ts's "event commander gets priority_level = 1") for tokens
+    // that pre-date the priority_level claim (e.g. existing sessions during a
+    // rolling deploy). priority_tier is only meaningful when is_priority is true.
+    let claimed_level = claims.get("priority_level").and_then(|v| v.as_i64()).unwrap_or(5);
+    let legacy_commander = role == "Commander"
+        && claims.get("is_priority_channel").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_priority = claimed_level <= 2 || legacy_commander;
+    let priority_tier: u8 = if legacy_commander && claimed_level > 2 { 1 } else { claimed_level.clamp(1, 2) as u8 };
+    // E2E voice relay cutover — see RoomState::voice_relay_mode's doc comment.
+    // Absent on tokens minted before this claim existed, which correctly
+    // defaults them to false (today's mixed-mode behavior).
+    let voice_relay = claims.get("voice_relay").and_then(|v| v.as_bool()).unwrap_or(false);
+    info!("JWT OK — user={}, org={}, channel={}, priority={}, voice_relay={}", user_id, org_id, channel_id, is_priority, voice_relay);
 
     // ── Billing counters ──────────────────────────────────────────────────────
     let session_start     = Instant::now();
@@ -1133,6 +1221,9 @@ async fn handle_voice_connection(
         mpsc::Receiver<(String, Vec<i16>)>,
         Arc<RwLock<HashMap<String, mpsc::Sender<Box<[u8]>>>>>,
     )> = None;
+    // Set when a brand-new relay-mode room was created this call — see
+    // duck_release_sweeper.
+    let mut spawn_duck_sweeper = false;
 
     // Nonce assigned inside the rooms write-lock below; used later in cleanup.
     let mut join_nonce: usize = 0;
@@ -1141,7 +1232,7 @@ async fn handle_voice_connection(
     // whether this connection just created a brand-new room.
     let mut is_new_room = false;
 
-    let (pcm_tx, uos_arc, _roster_tx_clone, roster_rx, video_ctrl_tx, video_ctrl_rx, _video_vc, video_sharers_arc, _video_headers_arc, _video_keyframes_arc, snapshot) = {
+    let (pcm_tx, uos_arc, _roster_tx_clone, roster_rx, video_ctrl_tx, video_ctrl_rx, _video_vc, video_sharers_arc, _video_headers_arc, _video_keyframes_arc, snapshot, ssrc_map) = {
         let mut room_registry = rooms.write().await;
         let is_new = !room_registry.contains_key(&channel_id);
         is_new_room = is_new;
@@ -1155,9 +1246,10 @@ async fn handle_voice_connection(
                 user_gains:          HashMap::new(),
                 user_audio_thresholds: HashMap::new(),
                 local_mutes:         HashMap::new(),
-                priority_users:      HashSet::new(),
+                priority_levels:     HashMap::new(),
                 priority_speaker:    None,
                 priority_release_at: None,
+                last_priority_packet_at: HashMap::new(),
                 pcm_tx:              new_pcm_tx,
                 user_output_senders: new_uos_clone,
                 video_ctrl_tx:          new_video_ctrl_tx,
@@ -1173,17 +1265,44 @@ async fn handle_voice_connection(
                 session_nonces:              HashMap::new(),
                 video_publish_nonces:        Arc::new(RwLock::new(HashMap::new())),
                 member_orgs:                 HashMap::new(),
+                voice_relay_mode:            voice_relay,
             });
-            spawn_mixer = Some((new_pcm_rx, new_uos));
+            // A brand-new E2eRelay room has nothing for mixer_task to do — it
+            // never decodes audio, so there's no PCM to mix. It needs the
+            // release sweeper instead (see duck_release_sweeper), since it has
+            // no per-tick mixer loop to check priority_release_at from.
+            if !voice_relay {
+                spawn_mixer = Some((new_pcm_rx, new_uos));
+            } else {
+                spawn_duck_sweeper = true;
+            }
         }
 
         let state = room_registry.get_mut(&channel_id).unwrap();
+
+        // A room's wire semantics (server-mixed vs. per-sender relay) are fixed
+        // at creation and can't be mixed within one room — reject a joiner whose
+        // own token disagrees with whatever this room already established,
+        // mirroring the token_channel_id check above. This can only happen for
+        // an *existing* room (a brand-new one always matches its own creator's
+        // claim), so voice_relay_mode was just set from `voice_relay` a few
+        // lines up in that case and this comparison is trivially true there.
+        if state.voice_relay_mode != voice_relay {
+            warn!(
+                "Connection rejected: voice_relay ({}) does not match room {}'s established mode ({})",
+                voice_relay, channel_id, state.voice_relay_mode
+            );
+            sessions.write().await.remove(&session_key);
+            move_senders.write().await.remove(&session_key);
+            return;
+        }
+
         state.members.insert(user_id.clone());
         state.callsigns.insert(user_id.clone(), callsign.clone());
         state.user_gains.insert(user_id.clone(), 1.0);
         state.user_audio_thresholds.insert(user_id.clone(), 150.0);
         state.member_orgs.insert(user_id.clone(), org_id.clone());
-        if is_priority { state.priority_users.insert(user_id.clone()); }
+        if is_priority { state.priority_levels.insert(user_id.clone(), priority_tier); }
 
         // Record a unique nonce for this join so that cleanup can detect
         // whether a newer session has already re-claimed this user's slot.
@@ -1193,8 +1312,15 @@ async fn handle_voice_connection(
         let snap: Vec<String> = state.members.iter()
             .map(|uid| state.callsigns.get(uid).cloned().unwrap_or_else(|| uid.clone()))
             .collect();
+        let ssrc_map: HashMap<u32, String> = state.members.iter()
+            .map(|uid| (canonical_ssrc(uid), uid.clone()))
+            .collect();
         let join = serde_json::to_string(&RosterMessage::Join(callsign.clone())).unwrap();
         let _ = state.roster_tx.send(join);
+        // Re-broadcast the updated map so already-connected members learn this
+        // joiner's ssrc too — the initial snapshot below only reaches the joiner.
+        let ssrc_map_msg = serde_json::to_string(&RosterMessage::SsrcMap(ssrc_map.clone())).unwrap();
+        let _ = state.roster_tx.send(ssrc_map_msg);
 
         (
             state.pcm_tx.clone(),
@@ -1208,12 +1334,16 @@ async fn handle_voice_connection(
             state.video_headers.clone(),
             state.video_keyframes.clone(),
             snap,
+            ssrc_map,
         )
     };
 
     // Spawn mixer after lock release to avoid deadlocks.
     if let Some((pcm_rx, uos)) = spawn_mixer {
         tokio::spawn(mixer_task(channel_id.clone(), rooms.clone(), pcm_rx, uos, nats.clone(), channel_tree.clone()));
+    }
+    if spawn_duck_sweeper {
+        tokio::spawn(duck_release_sweeper(channel_id.clone(), rooms.clone()));
     }
 
     // ── Retroactive leader dual-subscribe for a newly-created parent room ──────
@@ -1302,6 +1432,17 @@ async fn handle_voice_connection(
         }
     }
 
+    // ssrc -> user_id for every current member — see RosterMessage::SsrcMap's
+    // doc comment. Sent unconditionally (cheap, small); only relay-mode clients
+    // act on it.
+    if roster_write_ok {
+        let ssrc_map_json = serde_json::to_string(&RosterMessage::SsrcMap(ssrc_map)).unwrap();
+        if let Err(e) = roster_stream.write_all(format!("{}\n", ssrc_map_json).as_bytes()).await {
+            error!("Failed to send ssrc map to {}: {}", user_id, e);
+            roster_write_ok = false;
+        }
+    }
+
     // Send current share state to new joiner on the reliable uni stream (not datagrams)
     if roster_write_ok {
         let sharers = video_sharers_arc.read().await;
@@ -1322,6 +1463,7 @@ async fn handle_voice_connection(
             bytes_out_counter.clone(),
             video_ctrl_rx, video_ctrl_tx,
             rooms.clone(), channel_id.clone(),
+            voice_relay, channel_tree.clone(), nats.clone(),
         ).await
     } else {
         warn!("Session {} aborting before entering session loop — initial roster snapshot failed to send", user_id);
@@ -1374,7 +1516,8 @@ async fn handle_voice_connection(
                     state.user_gains.remove(&user_id);
                     state.user_audio_thresholds.remove(&user_id);
                     state.local_mutes.remove(&user_id);
-                    state.priority_users.remove(&user_id);
+                    state.priority_levels.remove(&user_id);
+                    state.last_priority_packet_at.remove(&user_id);
                     state.member_orgs.remove(&user_id);
 
                     if state.priority_speaker.as_deref() == Some(user_id.as_str()) {
@@ -1429,6 +1572,9 @@ async fn run_session_loop(
     video_ctrl_tx: broadcast::Sender<bytes::Bytes>,
     rooms: RoomRegistry,
     channel_id: String,
+    voice_relay: bool,
+    channel_tree: ChannelTreeRegistry,
+    nats: Option<async_nats::Client>,
 ) -> bool {
     let mut was_killed = false;
     let mut opus_decoder = match audiopus::coder::Decoder::new(
@@ -1561,8 +1707,172 @@ async fn run_session_loop(
                         // ── Audio datagram (proto3 AudioFrame) ─────────────
                         debug!("{} audio datagram: {} bytes", user_id, payload.len());
                         match proto::specter::v1::AudioFrame::decode(payload.as_ref()) {
+                        Ok(frame) if voice_relay && frame.is_global_broadcast => {
+                            // Cascade copy: a priority speaker's client sends this SECOND,
+                            // separately-encrypted frame (event-scoped cascade key, see
+                            // mlsSession.js's ensureEventGroup) alongside their normal
+                            // in-channel one whenever they hold a priority role in an event
+                            // channel — the server can't re-encrypt the normal frame for
+                            // descendant-channel recipients itself (different MLS group), so
+                            // it only ever forwards this pre-encrypted copy, and only while
+                            // this sender is the room's currently-locked active priority
+                            // speaker (see the ducking block below) — otherwise there's no
+                            // descendant channel that should be hearing it right now, so it's
+                            // simply dropped rather than relayed anywhere.
+                            if !frame.encrypted_payload.is_empty() {
+                                let is_active_speaker = {
+                                    let rooms_lock = rooms.read().await;
+                                    rooms_lock.get(&channel_id)
+                                        .map(|s| s.priority_speaker.as_deref() == Some(user_id.as_str()))
+                                        .unwrap_or(false)
+                                };
+                                if is_active_speaker {
+                                    let mut relay_frame = frame;
+                                    relay_frame.ssrc = canonical_ssrc(&user_id);
+                                    let frame_bytes: Box<[u8]> = relay_frame.encode_to_vec().into_boxed_slice();
+
+                                    let tree = channel_tree.read().await;
+                                    let descendants = get_descendants(&tree, &channel_id);
+                                    drop(tree);
+
+                                    let rooms_lock = rooms.read().await;
+                                    for desc_id in &descendants {
+                                        if let Some(desc_room) = rooms_lock.get(desc_id) {
+                                            let desc_senders = desc_room.user_output_senders.read().await;
+                                            for (_, tx) in desc_senders.iter() {
+                                                let _ = tx.try_send(frame_bytes.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Ok(frame) if voice_relay => {
+                            // Relay mode: never decode. Forward the still-(eventually-)
+                            // encrypted payload byte-for-byte to every other room member,
+                            // respecting per-listener local_mutes exactly like the mixer's
+                            // per-recipient loop does — the only content this server ever
+                            // touches is the ssrc field, rewritten from this session's
+                            // authenticated identity so a client can't announce its frames
+                            // under another user's ssrc (see canonical_ssrc's doc comment).
+                            if !frame.encrypted_payload.is_empty() {
+                                let mut relay_frame = frame;
+                                relay_frame.ssrc = canonical_ssrc(&user_id);
+                                let frame_bytes: Box<[u8]> = relay_frame.encode_to_vec().into_boxed_slice();
+
+                                let (senders_arc, local_mutes_snapshot, priority_level) = {
+                                    let rooms_lock = rooms.read().await;
+                                    match rooms_lock.get(&channel_id) {
+                                        Some(state) => (
+                                            state.user_output_senders.clone(),
+                                            state.local_mutes.clone(),
+                                            state.priority_levels.get(&user_id).copied(),
+                                        ),
+                                        None => continue,
+                                    }
+                                };
+                                let senders = senders_arc.read().await;
+                                for (recipient_id, tx) in senders.iter() {
+                                    if recipient_id == &user_id { continue; }
+                                    if local_mutes_snapshot.get(recipient_id).map(|s| s.contains(&user_id)).unwrap_or(false) {
+                                        continue;
+                                    }
+                                    let _ = tx.try_send(frame_bytes.clone());
+                                }
+                                drop(senders);
+
+                                // ── Priority ducking: packet arrival replaces mixer_task's
+                                // RMS-based is_speaking() check, which needs plaintext PCM the
+                                // relay path never has. "First past the post, locked until
+                                // release" — a second priority user talking while another is
+                                // already the active speaker doesn't preempt them (avoids
+                                // flickering between simultaneously-talking priority speakers).
+                                if let Some(level) = priority_level {
+                                    // Pre-compute descendants before taking the rooms write lock —
+                                    // avoids holding channel_tree's lock and rooms' lock at the same
+                                    // time (mirrors the discipline in mixer_task's cascade code).
+                                    // Descendant channels' listeners are on a different roster
+                                    // stream (this room's roster_tx only reaches this room's
+                                    // members), so the duck state/signal has to be cascaded to them
+                                    // explicitly rather than relying on their own detection — they
+                                    // never receive this speaker's audio at all outside the cascade
+                                    // AudioFrame path, only the duck/UI effect of it.
+                                    let tree = channel_tree.read().await;
+                                    let descendants = get_descendants(&tree, &channel_id);
+                                    drop(tree);
+
+                                    let mut rooms_lock = rooms.write().await;
+
+                                    // Scoped so `state`'s mutable borrow of rooms_lock ends before
+                                    // the descendant loop below needs its own — the borrow checker
+                                    // can't tell channel_id and desc_id are different HashMap keys.
+                                    let (should_propagate, duck_msg) = {
+                                        match rooms_lock.get_mut(&channel_id) {
+                                            Some(state) => {
+                                                let is_free = state.priority_speaker.is_none();
+                                                let is_current_speaker = state.priority_speaker.as_deref() == Some(user_id.as_str());
+                                                if is_free || is_current_speaker {
+                                                    state.last_priority_packet_at.insert(user_id.clone(), Instant::now());
+                                                    state.priority_speaker = Some(user_id.clone());
+                                                    state.priority_release_at = Some(Instant::now() + Duration::from_millis(1500));
+                                                    let msg = if is_free {
+                                                        let m = serde_json::to_string(&RosterMessage::Duck {
+                                                            ssrc: canonical_ssrc(&user_id),
+                                                            level,
+                                                        }).unwrap();
+                                                        let _ = state.roster_tx.send(m.clone());
+                                                        Some(m)
+                                                    } else {
+                                                        None
+                                                    };
+                                                    (true, msg)
+                                                } else {
+                                                    (false, None)
+                                                }
+                                            }
+                                            None => (false, None),
+                                        }
+                                    };
+
+                                    if should_propagate {
+                                        // Refresh descendants' release timer on every qualifying
+                                        // frame (not just at duck-start) — otherwise their ducking
+                                        // would flicker released every 1.5s during sustained speech
+                                        // while the source room's stays correctly extended. Each
+                                        // descendant's own duck_release_sweeper (if it's also
+                                        // relay-mode — see the "flip a whole event's channels
+                                        // together" rollout note) independently detects and
+                                        // announces expiry from this same priority_release_at value,
+                                        // so no cross-room release propagation is needed beyond this
+                                        // continuous refresh.
+                                        for desc_id in &descendants {
+                                            if let Some(desc_state) = rooms_lock.get_mut(desc_id) {
+                                                desc_state.priority_speaker = Some(user_id.clone());
+                                                desc_state.priority_release_at = Some(Instant::now() + Duration::from_millis(1500));
+                                                if let Some(ref m) = duck_msg {
+                                                    let _ = desc_state.roster_tx.send(m.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if duck_msg.is_some() {
+                                        if let Some(ref n) = nats {
+                                            let duck_payload = format!(
+                                                r#"{{"channel_id":"{}","priority_user":"{}","action":"duck"}}"#,
+                                                channel_id, user_id
+                                            );
+                                            let _ = n.publish(
+                                                format!("specter.cmd.duck.{}", channel_id),
+                                                bytes::Bytes::from(duck_payload),
+                                            ).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Ok(frame) => {
-                            let opus = &frame.encrypted_payload; 
+                            let opus = &frame.encrypted_payload;
                             if !opus.is_empty() {
                                 let decode_result = match audiopus::packet::Packet::try_from(opus.as_slice()) {
                                     Ok(packet) => {

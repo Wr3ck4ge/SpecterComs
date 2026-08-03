@@ -44,6 +44,26 @@ class OverlayErrorBoundary extends React.Component {
   }
 }
 
+function renderBootError(message, stack = '') {
+  if (!bootEl) return;
+  bootEl.textContent = '';
+  bootEl.style.display = 'block';
+
+  const title = document.createElement('b');
+  title.style.color = '#f87171';
+  title.textContent = message;
+  bootEl.appendChild(title);
+
+  if (stack) {
+    const pre = document.createElement('pre');
+    pre.style.color = '#fcd34d';
+    pre.style.fontSize = '9px';
+    pre.style.whiteSpace = 'pre-wrap';
+    pre.textContent = stack;
+    bootEl.appendChild(pre);
+  }
+}
+
 // Update the boot-status bar injected by overlay.html inline script
 const bootEl = document.getElementById('overlay-boot-status');
 if (bootEl) {
@@ -55,10 +75,7 @@ if (bootEl) {
 try {
   const rootElement = document.getElementById('overlay-root');
   if (!rootElement) {
-    if (bootEl) {
-      bootEl.innerHTML = '<b style="color:#f87171">FATAL: #overlay-root not found</b>';
-      bootEl.style.display = 'block';
-    }
+    renderBootError('FATAL: #overlay-root not found');
   } else {
     ReactDOM.createRoot(rootElement).render(
       React.createElement(React.StrictMode, null,
@@ -74,10 +91,6 @@ try {
     if (bootEl) setTimeout(() => { bootEl.style.display = 'none'; }, 1500);
   }
 } catch (err) {
-  if (bootEl) {
-    bootEl.innerHTML = '<b style="color:#f87171">RENDER ERROR: ' + err.message + '</b><pre style="color:#fcd34d;font-size:9px;white-space:pre-wrap">' + (err.stack || '') + '</pre>';
-    bootEl.style.color = '#f87171';
-    bootEl.style.display = 'block';
-  }
+  renderBootError('RENDER ERROR: ' + (err?.message || String(err)), err?.stack || '');
 }
 

@@ -24,6 +24,15 @@ const hashEmail = (email: string): string => {
   return crypto.createHash('sha256').update(email.toLowerCase().trim()).digest('hex');
 };
 
+// Reset tokens are 256 bits of crypto.randomBytes entropy, not a low-entropy
+// user-chosen secret — a plain SHA-256 over the raw token is enough to keep
+// the stored value useless to anyone who reads the row directly (DB dump,
+// backup, admin query), while the raw token only ever exists in the emailed
+// link and the requester's browser.
+const hashResetToken = (token: string): string => {
+  return crypto.createHash('sha256').update(token).digest('hex');
+};
+
 export const register = async (req: Request, res: Response) => {
   const { callsign, email, password, global_tag, hwid, timezone } = req.body as RegisterInput;
 
@@ -188,7 +197,7 @@ export const forgotPassword = async (req: Request, res: Response) => {
 
     await pool.query(
       'UPDATE users SET password_reset_token = $1, password_reset_token_expires = $2 WHERE id = $3',
-      [resetToken, expires, user.id]
+      [hashResetToken(resetToken), expires, user.id]
     );
 
     const actualEmail = decryptEmail(user.email_encrypted);
@@ -209,7 +218,7 @@ export const resetPassword = async (req: Request, res: Response) => {
   try {
     const result = await pool.query(
       'SELECT id FROM users WHERE password_reset_token = $1 AND password_reset_token_expires > NOW()',
-      [token]
+      [hashResetToken(token)]
     );
 
     if (result.rows.length === 0) {

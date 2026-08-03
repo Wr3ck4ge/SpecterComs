@@ -3,10 +3,48 @@ import { z } from 'zod';
 import { pool } from '../config/db.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 
+// Auto-revoke devices nobody has (re-)registered in a long time, rather than
+// letting last_seen_at sit as an indefinitely-retained per-device activity
+// trail. Mirrors channelController's stale-presence sweeper, just on a much
+// longer horizon since a device going quiet for a few weeks (vacation, spare
+// machine) is normal and shouldn't cost it its MLS group membership.
+const STALE_DEVICE_DAYS = 90;
+const DEVICE_SWEEP_INTERVAL_MS = 24 * 60 * 60_000;
+let deviceSweepStarted = false;
+
+const startStaleDeviceSweeper = () => {
+  if (deviceSweepStarted) return;
+  deviceSweepStarted = true;
+
+  setInterval(async () => {
+    try {
+      const revoked = await pool.query(
+        `UPDATE user_devices SET revoked_at = CURRENT_TIMESTAMP
+         WHERE revoked_at IS NULL
+           AND last_seen_at < NOW() - ($1::int * INTERVAL '1 day')`,
+        [STALE_DEVICE_DAYS],
+      );
+      if (revoked.rowCount) {
+        console.log(`[deviceController] Auto-revoked ${revoked.rowCount} device(s) inactive for over ${STALE_DEVICE_DAYS} days.`);
+      }
+    } catch (err) {
+      console.error('[deviceController] stale device sweeper error:', err);
+    }
+  }, DEVICE_SWEEP_INTERVAL_MS);
+};
+
+startStaleDeviceSweeper();
+
 const registerDeviceSchema = z.object({
   device_id: z.string().uuid(),
   key_package: z.string().max(20000), // base64-encoded MLS KeyPackage bytes
   credential: z.string().max(2000),   // base64-encoded MLS Credential bytes
+  // base64-encoded raw Ed25519 public key (mls-crypto's own_public_key) — same
+  // key embedded in key_package, distributed separately so a verifier doesn't
+  // need to parse the TLS-serialized KeyPackage structure just to check an
+  // AudioFrame.sender_signature. Optional/nullable for backward compat with
+  // clients that pre-date signing (see migration 000061).
+  public_key: z.string().max(500).nullable().optional(),
 });
 
 /**
@@ -29,7 +67,7 @@ export const registerDevice = async (req: AuthRequest, res: Response) => {
       errors: parsed.error.errors.map(e => ({ field: e.path.join('.'), message: e.message })),
     });
   }
-  const { device_id, key_package, credential } = parsed.data;
+  const { device_id, key_package, credential, public_key } = parsed.data;
 
   // The credential is a BasicCredential — MLS's own protocol only checks
   // that a leaf's messages are signed by that leaf's key, never that the
@@ -58,16 +96,18 @@ export const registerDevice = async (req: AuthRequest, res: Response) => {
     // happen with a fresh client-generated UUID, but this is the boundary
     // that matters) silently leaves that row untouched rather than
     // overwriting someone else's device registration.
+    const publicKeyBuf = public_key ? Buffer.from(public_key, 'base64') : null;
     await pool.query(
-      `INSERT INTO user_devices (id, user_id, key_package, credential, last_seen_at, revoked_at)
-       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP, NULL)
+      `INSERT INTO user_devices (id, user_id, key_package, credential, signing_public_key, last_seen_at, revoked_at)
+       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, NULL)
        ON CONFLICT (id) DO UPDATE SET
          key_package = EXCLUDED.key_package,
          credential = EXCLUDED.credential,
+         signing_public_key = EXCLUDED.signing_public_key,
          last_seen_at = CURRENT_TIMESTAMP,
          revoked_at = NULL
        WHERE user_devices.user_id = $2`,
-      [device_id, userId, Buffer.from(key_package, 'base64'), Buffer.from(credential, 'base64')],
+      [device_id, userId, Buffer.from(key_package, 'base64'), Buffer.from(credential, 'base64'), publicKeyBuf],
     );
     res.status(201).json({ ok: true });
   } catch (err) {
@@ -93,7 +133,7 @@ export const getUserDeviceKeyPackages = async (req: AuthRequest, res: Response) 
 
   try {
     const result = await pool.query(
-      `SELECT id, key_package FROM user_devices
+      `SELECT id, key_package, signing_public_key FROM user_devices
        WHERE user_id = $1 AND revoked_at IS NULL
        ORDER BY created_at ASC`,
       [userId],
@@ -102,6 +142,7 @@ export const getUserDeviceKeyPackages = async (req: AuthRequest, res: Response) 
       devices: result.rows.map(row => ({
         device_id: row.id,
         key_package: (row.key_package as Buffer).toString('base64'),
+        public_key: row.signing_public_key ? (row.signing_public_key as Buffer).toString('base64') : null,
       })),
     });
   } catch (err) {

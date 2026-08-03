@@ -2,6 +2,7 @@ use openmls::prelude::*;
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::signatures::Signer;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -454,6 +455,37 @@ fn export_secret_impl(
         .map_err(|e| e.to_string())
 }
 
+/// Signs arbitrary bytes with this device's Ed25519 MLS signature key — used
+/// to authenticate voice frames end-to-end (see AudioFrame.sender_signature
+/// in the proto) as coming from this specific device, independent of and in
+/// addition to SFrame's AEAD confidentiality/integrity (which alone proves
+/// "encrypted with the right group key," not "this specific device sent it").
+/// Doesn't touch any group's ratchet state, so device_state is unchanged —
+/// unlike encrypt/decrypt/commit, there's no updated state to persist.
+fn sign_bytes_impl(device_state: &[u8], message: &[u8]) -> Result<Vec<u8>, String> {
+    let state = load_device_state(device_state)?;
+    let signer = state.signer.as_ref().ok_or("no signer in device state")?;
+    signer.sign(message).map_err(|e| format!("{:?}", e))
+}
+
+/// This device's own Ed25519 public key (the counterpart to sign_bytes) —
+/// distributed to other devices (e.g. alongside the existing KeyPackage
+/// exchange) so they can verify frames this device signs.
+fn own_public_key_impl(device_state: &[u8]) -> Result<Vec<u8>, String> {
+    let state = load_device_state(device_state)?;
+    let signer = state.signer.as_ref().ok_or("no signer in device state")?;
+    Ok(signer.public().to_vec())
+}
+
+/// Verifies a signature produced by sign_bytes against a known public key.
+/// Pure function of its arguments — the verifier doesn't need their own MLS
+/// device state to check someone else's signature, just the claimed sender's
+/// public key (see own_public_key_impl).
+fn verify_bytes_impl(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    let provider = OpenMlsRustCrypto::default();
+    provider.crypto().verify_signature(SIGNATURE_SCHEME, message, public_key, signature).is_ok()
+}
+
 // ── wasm-bindgen boundary: thin wrappers converting String errors to JsValue ──
 
 #[wasm_bindgen(getter_with_clone)]
@@ -616,6 +648,24 @@ pub fn decrypt(device_state: &[u8], group_id: &[u8], ciphertext: &[u8]) -> Resul
 #[wasm_bindgen]
 pub fn export_secret(device_state: &[u8], group_id: &[u8], label: &str, length: usize) -> Result<Vec<u8>, JsValue> {
     export_secret_impl(device_state, group_id, label, length).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Signs `message` with this device's Ed25519 MLS signature key.
+#[wasm_bindgen]
+pub fn sign_bytes(device_state: &[u8], message: &[u8]) -> Result<Vec<u8>, JsValue> {
+    sign_bytes_impl(device_state, message).map_err(|e| JsValue::from_str(&e))
+}
+
+/// This device's own Ed25519 public key, for distribution to other devices.
+#[wasm_bindgen]
+pub fn own_public_key(device_state: &[u8]) -> Result<Vec<u8>, JsValue> {
+    own_public_key_impl(device_state).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Verifies a sign_bytes signature against a claimed sender's public key.
+#[wasm_bindgen]
+pub fn verify_bytes(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    verify_bytes_impl(public_key, message, signature)
 }
 
 #[cfg(test)]

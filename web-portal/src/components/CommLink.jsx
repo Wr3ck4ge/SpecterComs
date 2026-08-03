@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { api } from '../api';
 import initWasm, { SFrameCrypto } from 'wasm-crypto';
 import { saveChannelMessage, getChannelMessages } from '../messageStore';
-import { ensureChannelGroup, exportGroupSecret } from '../mlsSession';
+import { ensureChannelGroup, exportGroupSecret, ensureEventGroup, signBytes, verifySignature } from '../mlsSession';
 
 // ── Diagnostic trace logging (debrief/reconnect-storm investigation) ────────
 // See WarRoom.jsx's traceLog for the full rationale — same mechanism (writes
@@ -30,7 +30,7 @@ function writeVarint(buf, value) {
   buf.push(value & 0x7f);
 }
 
-function encodeAudioFrameProto(ssrc, seqNum, opusBytes) {
+function encodeAudioFrameProto(ssrc, seqNum, opusBytes, isGlobalBroadcast = false, senderSignature = null) {
   const parts = [];
   // Field 1: encrypted_payload (bytes) — tag 0x0A
   parts.push(0x0a);
@@ -42,6 +42,24 @@ function encodeAudioFrameProto(ssrc, seqNum, opusBytes) {
   // Field 3: sequence (int32) — tag 0x18
   parts.push(0x18);
   writeVarint(parts, seqNum >>> 0);
+  // Field 4: is_global_broadcast (bool) — tag 0x20. Only written when true
+  // (proto3 default is false either way, omitting keeps the common-case frame
+  // a few bytes smaller). Marks a priority speaker's cascade-encrypted copy —
+  // see media-rust's relay path.
+  if (isGlobalBroadcast) {
+    parts.push(0x20);
+    writeVarint(parts, 1);
+  }
+  // Field 5: sender_signature (bytes) — tag 0x2A. Ed25519 signature over
+  // encrypted_payload (see mlsSession.js's signBytes) — proves this exact
+  // ciphertext came from this specific device, on top of (not instead of)
+  // SFrame's own AEAD confidentiality/integrity. Only written when relay mode
+  // has a signature ready (see voiceRelayModeRef gating at the call site).
+  if (senderSignature && senderSignature.length > 0) {
+    parts.push(0x2a);
+    writeVarint(parts, senderSignature.length);
+    for (let i = 0; i < senderSignature.length; i++) parts.push(senderSignature[i]);
+  }
   return new Uint8Array(parts);
 }
 
@@ -51,6 +69,7 @@ function decodeAudioFrameProto(bytes) {
   let ssrc = 0;
   let sequence = 0;
   let isGlobalBroadcast = false;
+  let senderSignature = null;
   while (pos < bytes.length) {
     let tag = 0, shift = 0;
     while (pos < bytes.length) {
@@ -83,11 +102,12 @@ function decodeAudioFrameProto(bytes) {
       const data = bytes.slice(pos, pos + len);
       pos += len;
       if (fieldNumber === 1) opusBytes = data;
+      else if (fieldNumber === 5) senderSignature = data;
     } else {
       break;
     }
   }
-  return { opusBytes, ssrc, sequence, isGlobalBroadcast };
+  return { opusBytes, ssrc, sequence, isGlobalBroadcast, senderSignature };
 }
 
 function hashUserId(id) {
@@ -642,6 +662,74 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
   // Instance of our Rust WASM Cryptography bindings
   const cryptoRef = useRef(null);
+  // Same primitive, independent 'audio'-labeled MLS export — derived and kept
+  // fresh alongside cryptoRef/refreshVideoKey below, but not yet wired into the
+  // actual audio send/receive path: media-rust still mixes voice server-side
+  // (see voiceEncryptionEnabled above), so encrypting frames now would just
+  // break playback against a mixer expecting plain Opus. This ref exists so the
+  // key is ready and rotating correctly before the relay path that consumes it
+  // ships.
+  const cryptoAudioRef = useRef(null);
+  // Event-scoped cascade key (see mlsSession.js's ensureEventGroup) — only
+  // derived when this channel belongs to an event (channel.event_id set).
+  // Used for the priority-speaker cross-channel cascade path (Track B), not
+  // this channel's own audio.
+  const cryptoAudioCascadeRef = useRef(null);
+  // ssrc (number) -> user_id, from the server's RosterMessage::SsrcMap — the
+  // authoritative mapping for attributing an incoming relay-mode audio lane to
+  // a real speaker (a client can't independently recompute another user's
+  // hashUserId, since it only knows their callsign, not their true user_id).
+  // Unused until the per-lane playback refactor consumes it; harmless to keep
+  // populated in mixed-mode rooms too, where every audio datagram is still
+  // server-mixed to ssrc=0 regardless.
+  const ssrcToUserIdRef = useRef(new Map());
+  // Whether the CURRENT channel's media-rust room is running the E2E relay
+  // path (per-sender SFrame-encrypted, see media-rust's RoomState::voice_relay_mode)
+  // vs. today's server-mixed TLS-only voice. Set from the org-token response
+  // (data.voice_relay) at the top of connect(), before any audio is sent —
+  // encrypting into a still-mixed-mode room would break voice for everyone in
+  // it, so every encrypt-on-send/decrypt-on-receive call below is gated on this.
+  const voiceRelayModeRef = useRef(false);
+  // Relay-mode ducking state, driven by the server's RosterMessage::Duck /
+  // DuckRelease (see main.rs's relay-mode ducking block) — replaces the old
+  // "server scales PCM gain" approach, which is impossible once the server
+  // never decodes audio. Every lane except the active speaker's own gets
+  // attenuated; see applyDuckState below for where this is actually consumed
+  // by both playback paths.
+  const duckStateRef = useRef({ active: false, activeSsrc: null, level: 0 });
+  // Matches the proto's PriorityLevel comment (specter.proto): tier 1
+  // ("-MAX dB") is near-silence, tier 2 ("-20dB") mirrors the legacy 0.1 gain
+  // already used elsewhere in this file for the old single-bus duck.
+  const duckGainForLevel = (level) => (level <= 1 ? 0.05 : 0.1);
+  // user_id -> Uint8Array[] (one per registered device) — lazily fetched and
+  // cached the first time a frame from that sender needs verifying. A user
+  // can have multiple devices/keys; verification tries each until one
+  // matches, since an incoming frame only identifies its sender by ssrc/user,
+  // not which specific device captured the mic.
+  const senderPublicKeysRef = useRef(new Map());
+  const getSenderPublicKeys = async (userId) => {
+    if (senderPublicKeysRef.current.has(userId)) return senderPublicKeysRef.current.get(userId);
+    let keys = [];
+    try {
+      const { data } = await api.getUserDeviceKeyPackages(userId);
+      keys = (data?.devices ?? [])
+        .filter(d => d.public_key)
+        .map(d => Uint8Array.from(atob(d.public_key), c => c.charCodeAt(0)));
+    } catch (e) {
+      console.warn('[Audio] failed to fetch sender public keys for', userId, e);
+    }
+    senderPublicKeysRef.current.set(userId, keys);
+    return keys;
+  };
+  // Every composite `${channelId}:${ssrc}` native stream_id play_frame has been
+  // called with this session, so channel-leave can clear_stream all of them —
+  // clear_stream historically only knew about the bare channel id, which now
+  // matches nothing and would leak a decoder+queue per distinct sender heard
+  // this session. Per-sender-leave/idle cleanup (freeing a lane as soon as
+  // that speaker leaves rather than waiting for the whole channel to be left)
+  // is not yet implemented — every lane lives for the channel session's
+  // duration.
+  const activeNativeLaneIdsRef = useRef(new Set());
 
   // ── Join sound: cache<callsign → url|null> so we don't re-fetch on every join ──
   const introSoundCacheRef = useRef(new Map());
@@ -749,6 +837,20 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         await ensureChannelGroup(api, currentUserId, org.id, channelRef.current.id);
         const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
         cryptoRef.current = new SFrameCrypto(videoKey);
+        // Independent key, same group/epoch, 'audio' label — see cryptoAudioRef's
+        // doc comment for why this isn't used to encrypt anything yet.
+        const audioKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'audio', 32);
+        cryptoAudioRef.current = new SFrameCrypto(audioKey);
+        // Event-scoped cascade key — only relevant for event channels (priority
+        // ducking/cascade doesn't exist for casual channels, see orgController.ts's
+        // getOrgToken). Best-effort: a casual channel or a brand-new event whose
+        // group hasn't reconciled yet just leaves this null, same non-fatal
+        // pattern as the rest of this block.
+        if (channel?.event_id) {
+          await ensureEventGroup(api, currentUserId, org.id, channel.event_id);
+          const cascadeKey = await exportGroupSecret(api, currentUserId, channel.event_id, 'audio-cascade', 32);
+          cryptoAudioCascadeRef.current = new SFrameCrypto(cascadeKey);
+        }
         addMsg('WASM Cryptography Engine Initialized (ChaCha20Poly1305, MLS-derived key)');
       } catch (err) {
         console.warn('WASM SFrame init failed (non-fatal, video E2E is disabled):', err);
@@ -782,6 +884,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       const token = data.token;
       const mediaUrl = data.media_url || 'https://localhost:4434';
       mediaUrlRef.current = mediaUrl;
+      voiceRelayModeRef.current = data.voice_relay === true;
       
       addMsg('Token acquired: ' + token.substring(0, 10) + '...');
 
@@ -889,6 +992,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
               // happened concurrently (e.g. another client's commit landed) —
               // a no-op key-for-key if it didn't.
               refreshVideoKey();
+              refreshAudioKey();
               return updated;
           });
       } else if (msg.type === 'Move') {
@@ -909,7 +1013,48 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           setTimeout(() => connect(), 600);
       } else if (msg.type === 'Speaking') {
           const { callsign, level } = msg.data;
-          setRemoteLevels(prev => ({ ...prev, [callsign]: { level, ts: Date.now() } }));
+          const now = Date.now();
+          setRemoteLevels(prev => ({ ...prev, [callsign]: { level, ts: now } }));
+          const log = speakingHistoryRef.current;
+          log.push({ callsign, level, ts: now });
+          const cutoff = now - SPEAKING_HISTORY_WINDOW_MS;
+          while (log.length > 0 && log[0].ts < cutoff) log.shift();
+      } else if (msg.type === 'SsrcMap') {
+          // { "12345": "user-uuid", ... } — JSON object keys are always strings,
+          // even though the server's map is keyed by a numeric ssrc.
+          const next = new Map();
+          for (const [ssrcStr, userId] of Object.entries(msg.data || {})) {
+              next.set(Number(ssrcStr), userId);
+          }
+          ssrcToUserIdRef.current = next;
+      } else if (msg.type === 'Duck') {
+          duckStateRef.current = { active: true, activeSsrc: msg.data?.ssrc >>> 0, level: msg.data?.level ?? 2 };
+          setIsDucking(true);
+          applyDuckStateToLanes();
+      } else if (msg.type === 'DuckRelease') {
+          duckStateRef.current = { active: false, activeSsrc: null, level: 0 };
+          setIsDucking(false);
+          applyDuckStateToLanes();
+      }
+  };
+
+  // Browser-path only — applies duckStateRef to every currently-known lane's
+  // GainNode except the active speaker's own (see duckStateRef's doc
+  // comment). Called on every Duck/DuckRelease transition, and also
+  // consulted when a lane is first created (getOrCreateAudioLane) so a lane
+  // that appears mid-duck starts at the right gain instead of a beat of full
+  // volume. The Tauri native path doesn't need an equivalent — its volume is
+  // computed per-frame at send time in readDatagrams instead, since play_frame
+  // takes volume as a per-call argument rather than a persistent node.
+  const applyDuckStateToLanes = () => {
+      const ctx = audioCtxRef.current;
+      if (!ctx) return;
+      const { active, activeSsrc, level } = duckStateRef.current;
+      const targetGain = active ? duckGainForLevel(level) : 1.0;
+      const fadeSeconds = active ? 0.1 : 0.5; // matches the legacy single-bus triggerDucking's fade timings
+      for (const [ssrc, lane] of audioLanesRef.current) {
+          const gain = (active && ssrc !== activeSsrc) ? targetGain : 1.0;
+          lane.gainNode.gain.setTargetAtTime(gain, ctx.currentTime, fadeSeconds);
       }
   };
 
@@ -921,6 +1066,105 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       } catch (err) {
           console.error("Video key refresh failed", err);
       }
+  };
+
+  // Same opportunistic re-derive as refreshVideoKey, kept separate since it's
+  // a different label/key — see cryptoAudioRef's doc comment.
+  const refreshAudioKey = async () => {
+      try {
+          const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+          const audioKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'audio', 32);
+          cryptoAudioRef.current = new SFrameCrypto(audioKey);
+      } catch (err) {
+          console.error("Audio key refresh failed", err);
+      }
+  };
+
+  // Encodes the snipped frames as a 4B magic tag ("SEV2") followed by repeated
+  // [8B ts u64 LE][4B ssrc u32 LE][4B opus_len u32 LE][opus bytes] — see the
+  // matching decoder in AdminPortal's voice report review UI. Kept in lockstep
+  // with that decoder; both sides are this app's own code, there's no external
+  // format to match. The magic tag lets the decoder tell this format apart
+  // from the older (pre-attribution) framing without an ssrc field, so
+  // already-submitted reports stay decodable.
+  const REPORT_CLIP_MAGIC = 0x53455632; // "SEV2" as a big-endian u32
+  const frameReportClip = (frames) => {
+    const decoded = frames.map(([ts, ssrc, b64]) => {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return { ts, ssrc: ssrc >>> 0, bytes };
+    });
+    let totalLen = 4;
+    for (const f of decoded) totalLen += 8 + 4 + 4 + f.bytes.length;
+    const buf = new Uint8Array(totalLen);
+    const view = new DataView(buf.buffer);
+    let offset = 0;
+    view.setUint32(offset, REPORT_CLIP_MAGIC, false);
+    offset += 4;
+    for (const f of decoded) {
+      view.setUint32(offset, f.ts >>> 0, true);
+      view.setUint32(offset + 4, Math.floor(f.ts / 4294967296), true);
+      offset += 8;
+      view.setUint32(offset, f.ssrc, true);
+      offset += 4;
+      view.setUint32(offset, f.bytes.length, true);
+      offset += 4;
+      buf.set(f.bytes, offset);
+      offset += f.bytes.length;
+    }
+    let bin = '';
+    for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+    return btoa(bin);
+  };
+
+  /**
+   * Reports `accusedUserId` for misconduct heard during this call, attaching
+   * the last `clipDurationMs` of actual call audio (the mixed stream this
+   * client received — see submitReportFrame above) plus the real,
+   * server-computed speaking-activity log for that window. Built for
+   * exactly the case where "someone said this" needs to be actionable, not
+   * just alleged — e.g. CSAM/CSE and similar bad-actor behavior that needs
+   * a real evidence trail to ban on.
+   */
+  const submitVoiceReport = async (accusedUserId, note, orgId, clipDurationMs = 60_000) => {
+    try {
+      const frames = await api.snipReportClip(clipDurationMs);
+      if (!frames || frames.length === 0) {
+        return { ok: false, error: 'No recent call audio available to attach.' };
+      }
+      const audioClipB64 = frameReportClip(frames);
+
+      const cutoff = Date.now() - clipDurationMs;
+      const speakingHistory = speakingHistoryRef.current.filter((e) => e.ts >= cutoff);
+
+      // ssrc (string key — JSON object keys are always strings) -> user_id,
+      // scoped to only the ssrcs actually present in this clip. In a still
+      // mixed-mode channel this is empty (every frame is ssrc=0, nothing
+      // meaningful to attribute); the server treats a missing/empty map the
+      // same way.
+      const clipSsrcs = new Set(frames.map(([, ssrc]) => ssrc >>> 0));
+      const speakerMap = {};
+      for (const [ssrc, userId] of ssrcToUserIdRef.current) {
+        if (clipSsrcs.has(ssrc)) speakerMap[String(ssrc)] = userId;
+      }
+
+      const { error } = await api.sendVoiceReport({
+        accused_id: accusedUserId,
+        org_id: orgId ?? null,
+        channel_id: channelRef.current?.id ?? null,
+        reported_at: new Date().toISOString(),
+        reporter_note: note || null,
+        audio_clip: audioClipB64,
+        speaking_history: speakingHistory,
+        speaker_map: speakerMap,
+      });
+      if (error) return { ok: false, error };
+      return { ok: true };
+    } catch (err) {
+      console.error('[report] submitVoiceReport failed:', err);
+      return { ok: false, error: err?.message || String(err) };
+    }
   };
 
   const isExpectedTransportClose = (err) => {
@@ -1335,6 +1579,13 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const [comsFilterEnabled, setComsFilterEnabled] = useState(localStorage.getItem('specter_audio_coms_filter') === 'true');
   const [localLevel, setLocalLevel] = useState(0); // 0-100 mic amplitude
   const [remoteLevels, setRemoteLevels] = useState({}); // { [callsign]: { level: 0-100, ts: number } }
+  // Rolling log of 'Speaking' events (not just the latest snapshot like
+  // remoteLevels above) — feeds voice misconduct reports with a real,
+  // server-computed "who was actually talking, and when" timeline. Bounded
+  // to the same ~15-minute window as the native MisconductReportBuffer;
+  // see submitVoiceReport below for how it's consumed.
+  const speakingHistoryRef = useRef([]); // [{ callsign, level, ts }]
+  const SPEAKING_HISTORY_WINDOW_MS = 15 * 60 * 1000;
   const [micRms, setMicRms] = useState(0); // raw PCM RMS (0-32767ish scale) from the Rust capture callback
   // Server mixer activation threshold (raw PCM RMS, same scale as micRms). Below this,
   // the mixer drops the sender's audio — this is what actually gates "do I get heard."
@@ -1396,18 +1647,23 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const playFrameInFlightRef = useRef(0);
   const playFrameDroppedRef = useRef(0);
   const outputFallbackAttemptedRef = useRef(false);
-  // Browser-path Opus decoder (opus-decoder npm package), initialised lazily.
-  const opusDecoderRef = useRef(null);
-  // Jitter buffer: queue of decoded AudioBuffers waiting to be scheduled.
-  const jitterQueueRef = useRef([]);
-  // Whether the jitter pre-buffer threshold (3 frames) has been reached.
-  const jitterActiveRef = useRef(false);
-  // Web Audio clock: the scheduled end-time of the last enqueued frame.
-  const nextPlayTimeRef = useRef(0);
+  // Browser-path (non-Tauri) playback: one independent lane per incoming ssrc,
+  // keyed exactly like seenSequencesRef below (the pre-existing per-ssrc
+  // dedup map this mirrors). Each lane owns its own Opus decoder (Opus decode
+  // state is stream-specific — one decoder cannot safely interleave frames
+  // from different senders), its own jitter queue + gapless-scheduling clock,
+  // and its own GainNode for independent per-speaker volume/ducking — all N
+  // lanes' GainNodes feed into the single shared duckingGainRef bus below, so
+  // the existing radio-effect chain downstream of it is never duplicated.
+  // In mixed-mode rooms (or the cross-channel priority broadcast path, which
+  // always carries ssrc=0 regardless of mode) every frame arrives on ssrc=0,
+  // which collapses this back to exactly one lane — identical to today's
+  // single-stream behavior.
+  //   Map<ssrc, { decoder, queue: AudioBuffer[], jitterActive, isDraining,
+  //               nextPlayTime, gainNode }>
+  const audioLanesRef = useRef(new Map());
   // Sequence deduplication: tracks last 64 sequence numbers per SSRC to drop duplicate datagrams.
   const seenSequencesRef = useRef(new Map()); // Map<ssrc, { set: Set<number>, queue: number[] }>
-  // Re-entrancy guard for drainJitterQueue (called from async datagram loop).
-  const isDrainingRef = useRef(false);
 
   // Audio Mixer Refs
   const audioCtxRef = useRef(null);
@@ -1602,72 +1858,98 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       }
   };
 
-  // Drain all pending AudioBuffers from the jitter queue using gapless clock scheduling.
-  const drainJitterQueue = () => {
-    if (isDrainingRef.current) return; // prevent re-entrant calls from the async datagram loop
+  // Lazily creates a lane's decoder + GainNode (feeding the shared ducking bus)
+  // the first time a given ssrc is heard; returns the existing one otherwise.
+  const getOrCreateAudioLane = async (ssrc) => {
+    let lane = audioLanesRef.current.get(ssrc);
+    if (lane) return lane;
+    const { OpusDecoder } = await import('opus-decoder');
+    const decoder = new OpusDecoder();
+    await decoder.ready;
+    const gainNode = audioCtxRef.current.createGain();
+    // Start at the currently-active duck gain rather than always 1.0, so a
+    // lane that first appears mid-duck (e.g. a new non-priority speaker keys
+    // up while someone else is already the locked active speaker) doesn't
+    // get a beat of full volume before the next Duck/DuckRelease transition
+    // corrects it.
+    const { active, activeSsrc, level } = duckStateRef.current;
+    gainNode.gain.value = (active && ssrc !== activeSsrc) ? duckGainForLevel(level) : 1.0;
+    gainNode.connect(duckingGainRef.current);
+    lane = { decoder, gainNode, queue: [], jitterActive: false, isDraining: false, nextPlayTime: 0 };
+    audioLanesRef.current.set(ssrc, lane);
+    return lane;
+  };
+
+  // Disconnects and forgets a lane's GainNode/decoder/queue — called on full
+  // disconnect for every lane heard this session (see disconnect()). As with
+  // the Tauri native path's activeNativeLaneIdsRef, per-sender-leave/idle
+  // cleanup (freeing a lane as soon as that speaker leaves, rather than
+  // waiting for the whole channel to be left) is not yet implemented.
+  const clearAudioLane = (ssrc, lane) => {
+    try { lane.gainNode.disconnect(); } catch {}
+    audioLanesRef.current.delete(ssrc);
+  };
+
+  // Drain one lane's pending AudioBuffers using gapless clock scheduling.
+  const drainJitterQueue = (lane) => {
+    if (lane.isDraining) return; // prevent re-entrant calls from the async datagram loop
     const ctx = audioCtxRef.current;
-    if (!ctx || !duckingGainRef.current) return;
+    if (!ctx) return;
     const LOOKAHEAD = 0.005;       // 5 ms minimum look-ahead
     const RESET_THRESHOLD = 0.15;  // 150 ms: if the clock has fallen this far behind, reset
     const now = ctx.currentTime;
     // Check for a transmission gap BEFORE draining. If the scheduled clock is stale,
     // discard all buffered frames and force re-pre-buffering on the next burst.
     // This prevents late frames from playing in the wrong time slot and avoids
-    // running the drain loop with jitterActiveRef=false mid-iteration.
-    if (nextPlayTimeRef.current !== 0 && nextPlayTimeRef.current < now - RESET_THRESHOLD) {
-      nextPlayTimeRef.current = 0;       // invalidate clock; will re-init from `now` on next drain
-      jitterActiveRef.current = false;   // force re-pre-buffer on next transmission burst
-      jitterQueueRef.current = [];       // discard stale frames from before the gap
+    // running the drain loop with jitterActive=false mid-iteration.
+    if (lane.nextPlayTime !== 0 && lane.nextPlayTime < now - RESET_THRESHOLD) {
+      lane.nextPlayTime = 0;       // invalidate clock; will re-init from `now` on next drain
+      lane.jitterActive = false;   // force re-pre-buffer on next transmission burst
+      lane.queue = [];             // discard stale frames from before the gap
       return;
     }
-    isDrainingRef.current = true;
-    while (jitterQueueRef.current.length > 0) {
-      const audioBuffer = jitterQueueRef.current.shift();
+    lane.isDraining = true;
+    while (lane.queue.length > 0) {
+      const audioBuffer = lane.queue.shift();
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(duckingGainRef.current);
-      // If nextPlayTimeRef is 0 (fresh start after a gap), anchor to now.
-      const startTime = Math.max(nextPlayTimeRef.current || now, now + LOOKAHEAD);
+      source.connect(lane.gainNode);
+      // If nextPlayTime is 0 (fresh start after a gap), anchor to now.
+      const startTime = Math.max(lane.nextPlayTime || now, now + LOOKAHEAD);
       source.start(startTime);
-      nextPlayTimeRef.current = startTime + audioBuffer.duration;
+      lane.nextPlayTime = startTime + audioBuffer.duration;
     }
-    isDrainingRef.current = false;
+    lane.isDraining = false;
   };
 
-  const playOpusFrame = async (opusBytes) => {
+  const playOpusFrame = async (opusBytes, ssrc) => {
     if (!audioCtxRef.current) return;
     if (audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume().catch(() => {});
     }
-    // Lazy-init the browser-side Opus decoder (only used when !window.__TAURI__).
-    if (!opusDecoderRef.current) {
-      try {
-        const { OpusDecoder } = await import('opus-decoder');
-        const dec = new OpusDecoder();
-        await dec.ready;
-        opusDecoderRef.current = dec;
-      } catch (e) {
-        console.warn('Failed to init opus-decoder:', e);
-        return;
-      }
+    let lane;
+    try {
+      lane = await getOrCreateAudioLane(ssrc);
+    } catch (e) {
+      console.warn('Failed to init opus-decoder:', e);
+      return;
     }
     try {
-      const { channelData, samplesDecoded, sampleRate } = opusDecoderRef.current.decodeFrame(opusBytes);
+      const { channelData, samplesDecoded, sampleRate } = lane.decoder.decodeFrame(opusBytes);
       if (!samplesDecoded) return;
       const audioBuffer = audioCtxRef.current.createBuffer(1, samplesDecoded, sampleRate || 48_000);
       audioBuffer.getChannelData(0).set(channelData[0]);
 
-      const queue = jitterQueueRef.current;
       // Fix 3: cap queue depth at 6 frames (120 ms) to prevent latency growth.
-      if (queue.length >= 6) queue.shift();
-      queue.push(audioBuffer);
+      if (lane.queue.length >= 6) lane.queue.shift();
+      lane.queue.push(audioBuffer);
 
       // Fix 3: pre-buffer 3 frames (60 ms at 20 ms/frame) before starting playback to absorb initial jitter.
-      if (!jitterActiveRef.current && queue.length >= 3) {
-        jitterActiveRef.current = true;
+      if (!lane.jitterActive && lane.queue.length >= 3) {
+        lane.jitterActive = true;
       }
-      if (jitterActiveRef.current) {
-        drainJitterQueue();
+      if (lane.jitterActive) {
+        drainJitterQueue(lane);
       }
     } catch (_e) {
       // Silently skip malformed frames.
@@ -1722,6 +2004,49 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
         if (!frame.opusBytes || frame.opusBytes.length === 0) continue;
 
+        // Best-effort Ed25519 verification (see signBytes at the send site) —
+        // signed over the still-encrypted payload, so this runs before decrypt.
+        // Deliberately does NOT drop the frame on a missing/failed signature:
+        // SFrame's AEAD already gives confidentiality+integrity against a
+        // passive/compromised-but-not-actively-forging relay, so signing is
+        // defense-in-depth, not the primary guarantee — failing open here
+        // avoids breaking legitimate audio during a key-distribution race
+        // (e.g. this sender's public key hasn't finished fetching yet) or for
+        // a device that registered before this feature existed.
+        if (voiceRelayModeRef.current && frame.senderSignature) {
+          const senderUserId = ssrcToUserIdRef.current.get(frame.ssrc >>> 0);
+          if (senderUserId) {
+            try {
+              const keys = await getSenderPublicKeys(senderUserId);
+              const verified = keys.some(pk => verifySignature(pk, frame.opusBytes, frame.senderSignature));
+              if (!verified && keys.length > 0) {
+                console.warn('[Audio] signature verification failed for ssrc', frame.ssrc, '— playing anyway (defense-in-depth, not a hard gate)');
+              }
+            } catch (e) {
+              console.warn('[Audio] signature verification error:', e);
+            }
+          }
+        }
+
+        // Mirror of the send-path's encrypt gate — see voiceRelayModeRef's doc
+        // comment. A decrypt failure (wrong/stale key mid-rotation, or a stray
+        // frame from before this session's key was ready) drops just this one
+        // frame rather than feeding ciphertext to the Opus decoder as if it
+        // were audio.
+        // A cascade frame (priority speaker reaching a descendant channel) was
+        // encrypted with the event-scoped cascade key, not this channel's own —
+        // see cryptoAudioCascadeRef's doc comment and main.rs's relay-mode
+        // cascade-forwarding block.
+        const decryptKey = frame.isGlobalBroadcast ? cryptoAudioCascadeRef.current : cryptoAudioRef.current;
+        if (voiceRelayModeRef.current && decryptKey) {
+          try {
+            frame.opusBytes = decryptKey.decrypt(frame.opusBytes);
+          } catch (e) {
+            console.warn('[Audio] decrypt failed, dropping frame:', e);
+            continue;
+          }
+        }
+
         // Sequence deduplication: drop frames with a sequence number we've seen recently
         // (rolling window of last 64 per SSRC). Guards against double-play from multi-path.
         {
@@ -1740,8 +2065,13 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           }
         }
 
-        // Trigger ducking UI when a priority/global-broadcast frame arrives
-        if (frame.isGlobalBroadcast) triggerDucking();
+        // Mixed-mode cross-channel broadcast still ducks via this per-frame
+        // heuristic (mixer_task is unchanged — see main.rs). Relay-mode rooms
+        // use the precise RosterMessage::Duck/DuckRelease signal instead (see
+        // duckStateRef); calling both would double-duck (this fires on every
+        // cascade frame, not just the transition) and race two different
+        // release timers against each other.
+        if (frame.isGlobalBroadcast && !voiceRelayModeRef.current) triggerDucking();
 
         rxAudioCount++;
         if (rxAudioCount % 250 === 1) {
@@ -1760,7 +2090,30 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           }
 
           const b64 = btoa(String.fromCharCode(...frame.opusBytes));
-          const vol = channelVolumeRef.current;
+          // Feed the native rolling misconduct-report buffer (see
+          // web-portal/src-tauri/src/lib.rs's MisconductReportBuffer) — this
+          // is the *mixed* stream actually being played (media-rust's mixer
+          // always sends ssrc=0, see main.rs), same audio a report submits
+          // via snip_report_clip. Fire-and-forget: a dropped frame here just
+          // means a tiny gap in report evidence, never worth blocking or
+          // retrying playback for.
+          api.submitReportFrame(Date.now(), frame.ssrc >>> 0, b64);
+          // Native path has no persistent per-lane gain node (play_frame takes
+          // volume as a per-call argument, see lib.rs) — apply the duck
+          // multiplier here instead, computed fresh per frame from
+          // duckStateRef (see its doc comment / applyDuckStateToLanes, the
+          // browser-path equivalent of this same state).
+          const { active: duckActive, activeSsrc: duckActiveSsrc, level: duckLevel } = duckStateRef.current;
+          const isDuckedLane = duckActive && (frame.ssrc >>> 0) !== duckActiveSsrc;
+          const vol = channelVolumeRef.current * (isDuckedLane ? duckGainForLevel(duckLevel) : 1.0);
+          // Composite id gives each sender their own native decoder+jitter queue —
+          // the cpal output callback already sums every currently-registered
+          // stream_id (see playback.rs), so this is all that's needed to play
+          // multiple concurrent speakers correctly. In mixed-mode rooms every
+          // packet is still ssrc=0, so this collapses back to one lane per
+          // channel, identical to today's behavior.
+          const laneStreamId = `${channelRef.current.id}:${frame.ssrc >>> 0}`;
+          activeNativeLaneIdsRef.current.add(laneStreamId);
           playFrameInFlightRef.current += 1;
           ensureTauriInvoke().then(async (invoke) => {
             if (rxAudioCount % 100 === 0) {
@@ -1768,10 +2121,10 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
                 opusLen: frame.opusBytes?.length,
                 b64Len: b64.length,
                 vol,
-                streamId: channelRef.current.id,
+                streamId: laneStreamId,
               });
             }
-            await invoke('plugin:specter-audio|play_frame', { data: b64, volume: vol, streamId: channelRef.current.id });
+            await invoke('plugin:specter-audio|play_frame', { data: b64, volume: vol, streamId: laneStreamId });
           }).catch(async (e) => {
             console.error('[Audio dbg] play_frame err:', e);
             const msg = String(e?.message || e || '');
@@ -1791,7 +2144,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
             playFrameInFlightRef.current = Math.max(0, playFrameInFlightRef.current - 1);
           });
         } else {
-          playOpusFrame(frame.opusBytes);
+          playOpusFrame(frame.opusBytes, frame.ssrc >>> 0);
         }
       }
     } catch (err) {
@@ -1925,25 +2278,31 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     }
     if (window.__TAURI__) {
       import('@tauri-apps/api/core').then(({ invoke }) => {
-        // Drop the native per-channel Opus decoder — without this it lives
-        // forever keyed by channel id, and a much-later reconnect resumes
-        // decoding on a stale decoder instead of a fresh one (see clear_stream
-        // doc comment in the Rust plugin for the distortion failure mode).
-        // This is the incoming-playback decoder, unrelated to keepMicWarm
-        // (which only concerns our own outgoing mic capture), so it always runs.
+        // Drop every native per-lane Opus decoder registered this session —
+        // without this each one lives forever keyed by its composite stream_id,
+        // and a much-later reconnect resumes decoding on a stale decoder
+        // instead of a fresh one (see clear_stream doc comment in the Rust
+        // plugin for the distortion failure mode). This is the
+        // incoming-playback decoder, unrelated to keepMicWarm (which only
+        // concerns our own outgoing mic capture), so it always runs.
+        for (const laneId of activeNativeLaneIdsRef.current) {
+          invoke('plugin:specter-audio|clear_stream', { streamId: laneId }).catch(() => {});
+        }
+        activeNativeLaneIdsRef.current.clear();
+        // Legacy bare-channel-id form, harmless no-op once nothing is ever
+        // registered under it, kept during rollout in case any lingering
+        // mixed-mode session still used the old single-lane key.
         if (channelRef.current?.id) {
           invoke('plugin:specter-audio|clear_stream', { streamId: channelRef.current.id }).catch(() => {});
         }
       });
     }
-    if (opusDecoderRef.current) {
-      opusDecoderRef.current.free?.();
-      opusDecoderRef.current = null;
+    // Tear down every browser-path lane (decoder + GainNode + jitter state) so a
+    // fresh connection starts clean, mirroring the native-path cleanup above.
+    for (const [ssrc, lane] of audioLanesRef.current) {
+      lane.decoder.free?.();
+      clearAudioLane(ssrc, lane);
     }
-    // Reset jitter buffer state so a fresh connection starts clean.
-    jitterQueueRef.current = [];
-    jitterActiveRef.current = false;
-    nextPlayTimeRef.current = 0;
     seenSequencesRef.current = new Map();
   };
 
@@ -1966,6 +2325,15 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     setMicThreshold(value);
     localStorage.setItem('specter_audio_threshold', String(value));
     sendAudioThreshold(value);
+    // Keep the native capture plugin's own send-gate (which now decides whether a
+    // window is transmitted at all, not just how the server mixer treats it — see
+    // capture.rs's should_send) in sync with the same value. Best-effort: no native
+    // plugin on the browser path, so a missing/failed invoke is expected there.
+    if (window.__TAURI__) {
+      ensureTauriInvoke()
+        .then(invoke => invoke('plugin:specter-audio|set_send_threshold', { value }))
+        .catch(() => {});
+    }
   };
 
   // SET_LOCAL_MUTE (0x06): [muted(0/1), target_user_id_utf8...]. Listener-only
@@ -2900,6 +3268,11 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         const deviceId = localStorage.getItem('specter_audio_in');
         console.log('[toggleMic] calling start_capture, deviceId=', deviceId);
         const requestedDevice = deviceId && deviceId !== 'default' ? deviceId : null;
+        // Seed the native send-gate with this session's current threshold before
+        // capture starts — AudioState's default (150) may not match a value the
+        // user previously set (persisted in localStorage/React state, not on the
+        // Rust side) if the slider hasn't been touched yet this app launch.
+        invoke('plugin:specter-audio|set_send_threshold', { value: micThresholdRef.current }).catch(() => {});
         try {
           await invoke('plugin:specter-audio|start_capture', {
             deviceId: requestedDevice,
@@ -2918,11 +3291,66 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         const ssrc = hashUserId(userId);
 
         let audioFrameCount = 0;
-        const unlisten = await listen('specter://audio-frame', (event) => {
+        const unlisten = await listen('specter://audio-frame', async (event) => {
           const { data } = event.payload;
           const opusBytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
           const seq = sequenceRef.current++;
-          const frameProto = encodeAudioFrameProto(ssrc, seq, opusBytes);
+          // Only encrypt when the server actually relays instead of mixing —
+          // see voiceRelayModeRef's doc comment. Falls back to plain Opus
+          // (today's behavior) if encryption fails, same non-fatal pattern
+          // used for video's cryptoRef.
+          let payload = opusBytes;
+          if (voiceRelayModeRef.current && cryptoAudioRef.current) {
+            try {
+              payload = cryptoAudioRef.current.encrypt(opusBytes);
+            } catch (e) {
+              console.warn('[Audio] encrypt failed, sending unencrypted:', e);
+            }
+          }
+          // Signs the ciphertext actually being sent, not the raw Opus — proves
+          // this exact frame came from this device, on top of (not instead of)
+          // SFrame's own AEAD confidentiality/integrity. Best-effort: a signing
+          // failure still sends the frame unsigned rather than dropping it, same
+          // non-fatal philosophy as encryption above.
+          let signature = null;
+          if (voiceRelayModeRef.current) {
+            try {
+              const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+              signature = await signBytes(api, currentUserId, payload);
+            } catch (e) {
+              console.warn('[Audio] sign failed, sending unsigned:', e);
+            }
+          }
+          const frameProto = encodeAudioFrameProto(ssrc, seq, payload, false, signature);
+
+          // Priority-cascade copy: a second, separately-encrypted frame (the
+          // event-scoped cascade key, only derived when this channel belongs to
+          // an event — see cryptoAudioCascadeRef's doc comment) tagged
+          // is_global_broadcast so media-rust knows to forward it to descendant
+          // channels instead of this channel's own members, and only while the
+          // server currently has this sender locked as the active priority
+          // speaker (see main.rs's relay-mode ducking block — a non-priority or
+          // not-currently-active sender's cascade copy is simply dropped
+          // server-side, so sending it unconditionally here is wasteful but not
+          // incorrect; gating it client-side on "am I the active speaker" isn't
+          // done because the client has no low-latency way to know that without
+          // waiting for the same Duck signal this frame's arrival would trigger).
+          if (voiceRelayModeRef.current && cryptoAudioCascadeRef.current) {
+            try {
+              const cascadePayload = cryptoAudioCascadeRef.current.encrypt(opusBytes);
+              const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+              let cascadeSignature = null;
+              try {
+                cascadeSignature = await signBytes(api, currentUserId, cascadePayload);
+              } catch (e) {
+                console.warn('[Audio] cascade sign failed, sending unsigned:', e);
+              }
+              const cascadeProto = encodeAudioFrameProto(ssrc, seq, cascadePayload, true, cascadeSignature);
+              datagramWriterRef.current?.write(cascadeProto).catch(() => {});
+            } catch (e) {
+              console.warn('[Audio] cascade encrypt failed, skipping this frame\'s cascade copy:', e);
+            }
+          }
 
           if (audioFrameCount === 0) {
             console.log('[Audio] FIRST frame received from Rust. opusBytes=', opusBytes.length, 'datagramWriter=', datagramWriterRef.current ? 'READY' : 'NULL (not connected!)');
@@ -3074,6 +3502,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       startScreenShare,
       stopScreenShare,
       changeShareSource,
+      submitVoiceReport,
       setVideoFrameCallback: (fn) => { videoFrameCallbackRef.current = fn; },
       get isMuted() { return isMuted; },
       get isSharing() { return isSharing; },

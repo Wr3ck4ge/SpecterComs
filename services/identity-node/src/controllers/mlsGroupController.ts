@@ -134,6 +134,104 @@ const submitChannelCommitSchema = z.object({
  * every connected client is always subscribed to regardless of channel
  * membership timing.
  */
+const submitEventGroupCommitSchema = z.object({
+  epoch: z.number().int().positive(),
+  commit: z.string().max(500000), // base64
+  welcome: z.string().max(2000000).nullable().optional(), // base64
+  welcomed_user_ids: z.array(z.string().uuid()).max(200).optional(),
+});
+
+/**
+ * POST /orgs/:orgId/events/:eventId/mls/commit
+ * Event counterpart to submitDmCommit/submitChannelCommit — group_id is the
+ * event's own UUID. This group exists so a priority speaker's voice-cascade
+ * audio (see media-rust's cross-channel duck broadcast) can be decrypted by
+ * every event participant, not just members of the speaker's own channel:
+ * "every currently-accepted event_group_members row across the event's
+ * groups" is used as the membership set rather than trying to track each
+ * frequency's narrower role-based grant — frequency access is always a
+ * subset of group membership (event_frequency_roles grants specific
+ * event_group_roles rows, and holding one requires being an accepted member
+ * of that role's group), so this set is a safe superset for every possible
+ * cascade recipient.
+ *
+ * Unlike a channel, no single existing NATS subject spans every event
+ * participant (they're scattered across many channels/groups) — mirrors the
+ * DM pattern instead, relaying both the Commit and any Welcome individually
+ * to each current participant's `specter.event.user.{id}` subject.
+ */
+export const submitEventGroupCommit = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const { orgId, eventId } = req.params;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  const parsed = submitEventGroupCommitSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      message: 'Validation failed',
+      errors: parsed.error.errors.map(e => ({ field: e.path.join('.'), message: e.message })),
+    });
+  }
+  const { epoch, commit, welcome, welcomed_user_ids } = parsed.data;
+
+  try {
+    const eventCheck = await pool.query(
+      'SELECT 1 FROM events WHERE id = $1 AND org_id = $2',
+      [eventId, orgId],
+    );
+    if (eventCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+
+    // Only a current participant (any group, accepted) or a planner may touch
+    // this group — same spirit as the channel check's org-membership gate.
+    const participantCheck = await pool.query(
+      `SELECT 1 FROM event_group_members egm
+       JOIN event_groups eg ON egm.group_id = eg.id
+       WHERE eg.event_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
+       UNION
+       SELECT 1 FROM event_planners WHERE event_id = $1 AND user_id = $2`,
+      [eventId, userId],
+    );
+    if (participantCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Not a participant of this event' });
+    }
+
+    if (!(await bumpGroupEpoch(eventId as string, epoch))) {
+      return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
+    }
+
+    const participants = await pool.query(
+      `SELECT DISTINCT egm.user_id FROM event_group_members egm
+       JOIN event_groups eg ON egm.group_id = eg.id
+       WHERE eg.event_id = $1 AND egm.status = 'accepted'`,
+      [eventId],
+    );
+    for (const row of participants.rows) {
+      await publishEvent(`specter.event.user.${row.user_id}`, {
+        type: 'mls_commit',
+        event_group_id: eventId,
+        commit,
+      });
+    }
+
+    if (welcome && welcomed_user_ids?.length) {
+      for (const recipientId of welcomed_user_ids) {
+        await publishEvent(`specter.event.user.${recipientId}`, {
+          type: 'mls_welcome',
+          event_group_id: eventId,
+          welcome,
+        });
+      }
+    }
+
+    res.status(202).json({ ok: true, epoch });
+  } catch (err) {
+    console.error('submitEventGroupCommit error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 export const submitChannelCommit = async (req: AuthRequest, res: Response) => {
   const userId = req.user?.id;
   const { orgId, chanId } = req.params;
