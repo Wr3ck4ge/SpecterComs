@@ -246,9 +246,10 @@ function SectionUsers({ token, onError }) {
   const [page, setPage]             = useState(1);
   const [q, setQ]                   = useState('');
   const [loading, setLoading]       = useState(true);
-  const [banTarget, setBanTarget]   = useState(null);
-  const [detailId, setDetailId]     = useState(null);
-  const [msg, setMsg]               = useState(null);
+  const [banTarget, setBanTarget]     = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [detailId, setDetailId]       = useState(null);
+  const [msg, setMsg]                 = useState(null);
   const searchTimer                 = React.useRef(null);
 
   const fetchUsers = useCallback((query, pg) => {
@@ -278,6 +279,14 @@ function SectionUsers({ token, onError }) {
     fetchUsers(q, page);
   };
 
+  const handleDelete = async (userId) => {
+    const { error } = await api.adminDeleteUser(token, userId);
+    if (error) { onError(error); return; }
+    setMsg('User deleted.');
+    setDeleteTarget(null);
+    fetchUsers(q, page);
+  };
+
   const totalPages = Math.ceil(total / 50);
 
   return (
@@ -290,16 +299,14 @@ function SectionUsers({ token, onError }) {
       </div>
 
       <div className="border border-gray-200 bg-white rounded-lg shadow-sm overflow-hidden">
-        <Table cols={['UUID', 'Callsign', 'Tag', 'Tier', 'Joined', 'Status', 'Actions']}>
+        <Table cols={['Callsign', 'Tier', 'Joined', 'Status', 'Actions']}>
           {loading
-            ? <tr><td colSpan={7} className="px-4 py-6 text-center text-gray-400 text-sm">Loading users...</td></tr>
+            ? <tr><td colSpan={5} className="px-4 py-6 text-center text-gray-400 text-sm">Loading users...</td></tr>
             : users.map(u => (
               <tr key={u.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                <td className="px-4 py-3 text-gray-400 text-xs font-mono">{u.id.split('-')[0]}…</td>
                 <td className="px-4 py-3">
                   <button onClick={() => setDetailId(u.id)} className="font-semibold text-gray-800 hover:text-blue-600 text-sm">{u.callsign}</button>
                 </td>
-                <td className="px-4 py-3 text-gray-500 text-sm">{u.global_tag || '—'}</td>
                 <td className="px-4 py-3 text-gray-500 text-sm">{u.subscription_tier}</td>
                 <td className="px-4 py-3 text-gray-400 text-sm">{new Date(u.created_at).toLocaleDateString()}</td>
                 <td className="px-4 py-3">
@@ -308,10 +315,11 @@ function SectionUsers({ token, onError }) {
                     : <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-medium">Active</span>
                   }
                 </td>
-                <td className="px-4 py-3 text-right">
+                <td className="px-4 py-3 text-right space-x-1">
                   <RBtn small variant={u.is_banned ? 'success' : 'danger'} onClick={() => setBanTarget(u)}>
                     {u.is_banned ? 'Unban' : 'Ban'}
                   </RBtn>
+                  <RBtn small variant="danger" onClick={() => setDeleteTarget(u)}>Delete</RBtn>
                 </td>
               </tr>
             ))
@@ -327,8 +335,23 @@ function SectionUsers({ token, onError }) {
         </div>
       )}
 
-      {banTarget && <BanModal user={banTarget} onClose={() => setBanTarget(null)} onConfirm={handleBan} />}
-      {detailId  && <UserDetailModal token={token} userId={detailId} onClose={() => setDetailId(null)} />}
+      {banTarget    && <BanModal user={banTarget} onClose={() => setBanTarget(null)} onConfirm={handleBan} />}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setDeleteTarget(null)}>
+          <div className="border border-gray-200 bg-white rounded-lg shadow-xl w-full max-w-sm p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="text-base font-semibold text-gray-800">Delete Account</div>
+            <p className="text-sm text-gray-600">
+              Permanently delete <strong>{deleteTarget.callsign}</strong> and all associated data.
+              This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <RBtn onClick={() => setDeleteTarget(null)}>Cancel</RBtn>
+              <RBtn variant="danger" onClick={() => handleDelete(deleteTarget.id)}>Delete Permanently</RBtn>
+            </div>
+          </div>
+        </div>
+      )}
+      {detailId    && <UserDetailModal token={token} userId={detailId} onClose={() => setDetailId(null)} />}
     </div>
   );
 }
@@ -920,7 +943,7 @@ function SectionSystem({ token, onError, onLogout }) {
   const [health, setHealth] = useState(null);
 
   useEffect(() => {
-    window.fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8082'}/health`)
+    window.fetch(`${import.meta.env.VITE_API_URL || '/api'}/health`)
       .then(r => r.json())
       .then(d => setHealth(d))
       .catch(() => setHealth({ status: 'unreachable' }));

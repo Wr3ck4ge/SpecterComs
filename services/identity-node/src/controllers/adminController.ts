@@ -201,6 +201,21 @@ export const getUserDetail = async (req: AdminRequest, res: Response) => {
   }
 };
 
+export const deleteUser = async (req: AdminRequest, res: Response) => {
+  const { userId } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM users WHERE id = $1 RETURNING id, callsign',
+      [userId]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'User not found' });
+    res.json({ message: `User ${result.rows[0].callsign} deleted`, user: result.rows[0] });
+  } catch (err) {
+    console.error('Delete user error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 export const listOrgs = async (req: AdminRequest, res: Response) => {
   const q      = (req.query.q as string || '').trim();
   const page   = Math.max(1, parseInt(req.query.page as string || '1'));

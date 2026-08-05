@@ -103,10 +103,25 @@ const GROUP_BUILDER_DATA = {
 // docs/PRICING_MODEL_2026_05_28.md and services/identity-node/src/utils/orgTiers.ts
 // for the current figures when it's time to re-add a pricing section.
 
-const ONBOARDING_STEPS = [
-  { id: '01', title: 'Create Account' },
-  { id: '02', title: 'Join a Server' },
-  { id: '03', title: 'Download App' },
+const ONBOARDING_CARDS = [
+  {
+    id: '01', color: 'text-specter-primary-cyan', border: 'rgba(6,182,212,0.4)',
+    title: 'Create Account',
+    body: 'Sign up at spectercoms.net — no download required. Create your callsign, verify your email, and you\'re on the Discover page ready to find a server.',
+    cta: 'enter',
+  },
+  {
+    id: '02', color: 'text-specter-primary-neon', border: 'rgba(163,230,53,0.4)',
+    title: 'Join a Server',
+    body: 'Browse public servers in Discover, or accept an invite link from your group. Once inside you can view channels, members, and scheduled operations from your browser.',
+  },
+  {
+    id: '03', color: 'text-amber-400', border: 'rgba(245,158,11,0.4)',
+    title: 'Download App',
+    body: 'Install the desktop client for voice, in-game overlay, and operations tooling. The installer requests only what it needs — nothing is collected silently.',
+    permissions: true,
+    cta: 'download',
+  },
 ];
 
 const FEATURES = [
@@ -305,49 +320,71 @@ const LandingPage = ({ onEnter }) => {
                   className="h-[320px] sm:h-[416px] w-auto drop-shadow-[0_0_30px_rgba(6,182,212,0.5)]"
                 />
             </div>
-            <p className="max-w-3xl mx-auto text-base sm:text-lg text-specter-text-muted leading-relaxed">
-              SpecterComs is built to keep large in-game teams organized — command priority, an in-game overlay, and scheduled operations in one client. Create your account, discover servers, and join your team. Once you're in a server, install the desktop client for voice, overlay, and operations tooling.
-            </p>
         </div>
 
-          <div className="w-full max-w-md mx-auto bg-black/50 border border-specter-primary-dim/30 rounded-xl px-6 py-4 backdrop-blur-sm">
-            <div className="flex items-center justify-between">
-              {ONBOARDING_STEPS.map((step, i) => (
-                <React.Fragment key={step.id}>
-                  <div className="flex flex-col items-center gap-1.5">
-                    <div className="w-7 h-7 rounded-full border border-specter-primary-cyan text-specter-primary-cyan flex items-center justify-center text-[11px] font-bold flex-shrink-0">
-                      {step.id}
-                    </div>
-                    <div className="text-[10px] text-specter-text-main uppercase tracking-wide whitespace-nowrap">{step.title}</div>
-                  </div>
-                  {i < ONBOARDING_STEPS.length - 1 && <div className="flex-1 h-px bg-specter-primary-dim/40 mx-2 mb-4" />}
-                </React.Fragment>
-              ))}
-            </div>
-            <p className="text-center text-[10px] text-zinc-500 mt-3 italic leading-relaxed">
-              Server cost scales with the data routed, not with you — a one-person project with zero interest in making your data a payday.
-            </p>
-          </div>
-
-        <div className="flex flex-col sm:flex-row gap-6 w-full justify-center mt-4">
+        {/* Buttons (left) + description (right) on wide screens; stacked, text-first, on mobile */}
+        <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-10 w-full max-w-4xl mx-auto">
+          <div className="order-2 sm:order-1 flex flex-col gap-3 w-full sm:w-60 flex-shrink-0">
             <button
-                onClick={onEnter}
-                className="px-10 py-4 bg-specter-primary-cyan text-black hover:bg-white transition-all uppercase tracking-widest text-lg font-bold shadow-[0_0_20px_rgba(6,182,212,0.4)]"
+              onClick={onEnter}
+              className="w-full px-8 py-3 bg-specter-primary-cyan text-black hover:bg-white transition-all uppercase tracking-widest text-sm font-bold shadow-[0_0_20px_rgba(6,182,212,0.4)]"
             >
               Create Account / Sign In
             </button>
             <button
-                    onClick={handleDownload}
-                    className="px-10 py-4 border border-specter-primary-dim text-specter-text-muted hover:text-white hover:border-specter-primary-cyan transition-colors uppercase tracking-widest text-lg font-bold flex justify-center items-center gap-3"
-                >
-                Already Joined? Download Client
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-                </button>
+              onClick={handleDownload}
+              className="w-full px-8 py-3 border border-specter-primary-dim text-specter-text-muted hover:text-white hover:border-specter-primary-cyan transition-colors uppercase tracking-widest text-sm font-bold flex justify-center items-center gap-2"
+            >
+              Already Joined? Download Client
+              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+            </button>
+            {downloadError && <p className="text-specter-state-error text-xs font-mono">{downloadError}</p>}
+          </div>
+          <p className="order-1 sm:order-2 flex-1 text-base sm:text-lg text-specter-text-muted leading-relaxed text-center sm:text-left">
+            SpecterComs is built to keep large in-game teams organized — command priority, an in-game overlay, and scheduled operations in one client. Create your account, discover servers, and join your team. Once you're in a server, install the desktop client for voice, overlay, and operations tooling.
+          </p>
         </div>
-          <p className="text-xs text-specter-text-muted mt-[-8px]">New users should create an account first to access Discover and join a server.</p>
-        {downloadError && (
-            <p className="text-specter-state-error text-sm font-mono mt-2">{downloadError}</p>
-        )}
+
+        {/* Onboarding step cards — accordion style matching the feature section */}
+        <style>{`
+          .onboard-row { display: flex; gap: 6px; height: 300px; width: 100%; }
+          .onboard-item { position: relative; flex: 1; overflow: hidden; cursor: default; transition: flex 0.5s cubic-bezier(0.4,0.2,0.2,1); border: 1px solid rgba(63,63,70,0.7); background: rgba(0,0,0,0.5); }
+          .onboard-item:hover { flex: 3.5; }
+          .onboard-tab { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; writing-mode: vertical-rl; transform: rotate(180deg); letter-spacing: 0.25em; font-size: 11px; font-weight: bold; text-transform: uppercase; transition: opacity 0.25s; white-space: nowrap; }
+          .onboard-item:hover .onboard-tab { opacity: 0; }
+          .onboard-detail { position: absolute; inset: 0; padding: 18px; display: flex; flex-direction: column; justify-content: flex-start; opacity: 0; transform: translateX(10px); transition: opacity 0.35s ease 0.08s, transform 0.35s ease 0.08s; overflow-y: auto; }
+          .onboard-item:hover .onboard-detail { opacity: 1; transform: translateX(0); }
+        `}</style>
+        <div className="onboard-row w-full text-left">
+          {ONBOARDING_CARDS.map((c) => (
+            <div key={c.id} className="onboard-item" style={{ borderColor: c.border }}>
+              <div className={`onboard-tab ${c.color}`}>{c.id} // {c.title}</div>
+              <div className="onboard-detail">
+                <div className={`${c.color} font-bold text-sm tracking-widest uppercase mb-2`}>{c.title}</div>
+                <p className="text-xs text-zinc-300 leading-relaxed mb-3">{c.body}</p>
+                {c.permissions && (
+                  <ul className="text-[11px] text-zinc-400 leading-5 list-disc pl-4 space-y-0.5 mb-3">
+                    <li>Microphone for voice</li>
+                    <li>Screen capture when sharing</li>
+                    <li>Global hotkeys (PTT &amp; overlay)</li>
+                    <li>Overlay window (always-on-top, click-through)</li>
+                    <li>Network for auth, voice &amp; signed updates</li>
+                  </ul>
+                )}
+                {c.cta === 'enter' && (
+                  <button onClick={onEnter} className={`mt-auto self-start text-[11px] px-3 py-1.5 border font-bold uppercase tracking-widest transition-colors hover:bg-white/5 ${c.color}`} style={{ borderColor: c.border }}>
+                    Create Account / Sign In
+                  </button>
+                )}
+                {c.cta === 'download' && (
+                  <button onClick={handleDownload} className={`mt-auto self-start text-[11px] px-3 py-1.5 border font-bold uppercase tracking-widest transition-colors hover:bg-white/5 ${c.color}`} style={{ borderColor: c.border }}>
+                    Download Client
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
 
         {/* Overlay Showcase — mockup built to match the real in-game HUD pixel-for-pixel
             (see GameOverlayWindow.jsx) since the overlay can't be screenshotted from
@@ -361,7 +398,7 @@ const LandingPage = ({ onEnter }) => {
             child is enough — no extra left/transform offset, which double-centers
             and pushes the frame off-screen on one side. */}
         <div className="relative w-screen">
-        <div className="max-w-[1700px] mx-auto px-4 sm:px-10">
+        <div className="mx-auto px-4 sm:px-10" style={{ maxWidth: 'min(1700px, calc((93.5vh - 56px) * 16 / 9))' }}>
 
           <style>{`
             @keyframes overlay-drag-hint {
@@ -621,8 +658,8 @@ const LandingPage = ({ onEnter }) => {
                     padding: '6px 9px', boxShadow: '0 0 12px rgba(0,0,0,0.5)',
                   }}
                 >
-                  <div className="text-[11px] font-bold uppercase tracking-widest text-cyan-300 leading-tight">{c.label}</div>
-                  <div className="text-[10px] text-zinc-300 leading-tight mt-1">{c.body}</div>
+                  <div className="text-[12px] font-bold uppercase tracking-widest text-cyan-200 leading-tight">{c.label}</div>
+                  <div className="text-[11px] text-white leading-tight mt-1">{c.body}</div>
                 </div>
               ))}
             </div>
@@ -946,8 +983,22 @@ const LandingPage = ({ onEnter }) => {
 
       </main>
 
-      <footer className="text-center p-6 text-zinc-600 text-xs border-t border-zinc-900 mt-auto z-10 relative">
-        &copy; 2026 SpecterComs. End-to-End Encrypted. Data-Broker Free.
+      <footer className="text-center p-6 text-zinc-600 text-xs border-t border-zinc-900 mt-auto z-10 relative space-y-3">
+        <div className="max-w-md mx-auto space-y-1.5">
+          <a
+            href="https://github.com/Wr3ck4ge/SpecterComs"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 text-zinc-400 hover:text-specter-primary-cyan transition-colors tracking-widest uppercase text-[11px] font-bold"
+          >
+            <svg className="w-3.5 h-3.5 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            github.com/Wr3ck4ge/SpecterComs
+          </a>
+          <p className="text-zinc-600 text-[11px] leading-relaxed">
+            A public snapshot of the app's code — client, backend, and voice encryption — kept in sync with what's actually running in production. Deployment secrets, API keys, and infra config are stripped before each export.
+          </p>
+        </div>
+        <p>&copy; 2026 SpecterComs. End-to-End Encrypted. Data-Broker Free.</p>
       </footer>
     </div>
   );

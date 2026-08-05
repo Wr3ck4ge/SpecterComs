@@ -86,6 +86,11 @@ export function createApi(API_BASE_URL) {
     redeemInvite: (code)   => fetchWithAuth(`/orgs/invite/${code}/redeem`,    { method: "POST" }),
     joinOrg:      (orgId)  => fetchWithAuth(`/orgs/${orgId}/join`,             { method: "POST", body: {} }),
     getOrgToken:  (orgId, channelId)  => fetchWithAuth(`/orgs/${orgId}/token`,  { method: "POST", body: { channel_id: channelId } }),
+    getOrgMediaTicket: (orgId, channelId, kind, sharer = null) =>
+      fetchWithAuth(`/orgs/${orgId}/media-ticket`, {
+        method: 'POST',
+        body: { channel_id: channelId, kind, sharer },
+      }),
     updateOrgProfile: (orgId, body) => fetchWithAuth(`/orgs/${orgId}/profile`, { method: "PUT", body: body }),
     updateOrgSettings: (orgId, body) => fetchWithAuth(`/orgs/${orgId}/settings`, { method: "PUT", body: body }),
     updateOrgLanding: (orgId, data) => fetchWithAuth(`/orgs/${orgId}/landing`, { method: "PUT", body: data }),
@@ -257,6 +262,7 @@ export function createApi(API_BASE_URL) {
     adminGetUsers:    (token, q = '', page = 1)     => fetchWithAuth(`/admin/users?q=${encodeURIComponent(q)}&page=${page}`, {}, token),
     adminGetUser:     (token, id)                   => fetchWithAuth(`/admin/users/${id}`, {}, token),
     adminBanUser:     (token, id, ban, reason = '') => fetchWithAuth(`/admin/users/${id}/ban`, { method: "POST", body: { ban, reason } }, token),
+    adminDeleteUser:  (token, id)                   => fetchWithAuth(`/admin/users/${id}`, { method: "DELETE" }, token),
     adminGetOrgs:     (token, q = '', page = 1)     => fetchWithAuth(`/admin/orgs?q=${encodeURIComponent(q)}&page=${page}`, {}, token),
     adminDissolveOrg: (token, orgId)                => fetchWithAuth(`/admin/orgs/${orgId}`, { method: "DELETE" }, token),
     adminGetHwidBans: (token)                       => fetchWithAuth("/admin/hwid-bans", {}, token),

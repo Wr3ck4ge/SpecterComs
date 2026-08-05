@@ -12,6 +12,7 @@ import {
   createOrgInvoice,
   listNodeAlertEvents,
   dissolveOrg,
+  deleteUser,
   listHwidBans,
   removeHwidBan,
   getSystemOverview,
@@ -61,7 +62,8 @@ router.get('/overview', getSystemOverview);
 // Users
 router.get('/users',              listUsersExtended);
 router.get('/users/:userId',      getUserDetail);
-router.post('/users/:userId/ban', banGlobalUser);
+router.post('/users/:userId/ban',    banGlobalUser);
+router.delete('/users/:userId',       deleteUser);
 
 // Organizations
 router.get('/orgs',           listOrgs);
