@@ -2,7 +2,7 @@
 
 SpecterComs is a voice/text comms client built to keep large in-game teams organized — command priority (so when a leader speaks, background chatter steps aside automatically), an in-game overlay, mission/event scheduling, and server discovery in one client. It's aimed at large squads and orgs (built with games like Star Citizen in mind) who've outgrown a flat Discord server.
 
-This repo is a public snapshot of the app code for anyone who wants to see how it's built. It's exported from a private working repo, so history starts fresh here rather than showing every commit since day one — the code itself reflects the current production codebase. Deployment secrets, API keys, certificates, and internal infrastructure config are stripped before export; nothing here should be treated as live credentials.
+This isn't open source — there's no license here for reuse or redistribution. It's published so anyone can verify what the app actually does rather than take our word for it: how data is handled, what's actually encrypted, what the server can and can't see. It's exported from a private working repo, so history starts fresh here rather than showing every commit since day one — the code itself reflects the current production codebase. Deployment secrets, API keys, certificates, and internal infrastructure config are stripped before export; nothing here should be treated as live credentials.
 
 ## What's in here
 
@@ -33,7 +33,7 @@ This repo is a public snapshot of the app code for anyone who wants to see how i
 
 ## Status
 
-This is a real, actively developed product, not a demo — this snapshot reflects the current production codebase. No license is attached; this repo is for transparency, not for reuse/redistribution.
+This is a real, actively developed product, not a demo — this snapshot reflects the current production codebase.
 
 ## Reporting a vulnerability
 
