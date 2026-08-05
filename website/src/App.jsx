@@ -121,7 +121,7 @@ function JoinPage() {
 
   if (!user) {
     return (
-      <div className="min-h-screen bg-specter-bg-deep flex flex-col items-center justify-center gap-6 bg-grid-pattern bg-[size:40px_40px]">
+      <div className="min-h-screen bg-specter-bg-deep flex flex-col items-center justify-center gap-6 bg-[url('/SpecterBG.png')] bg-cover bg-center">
         <div className="text-center space-y-1">
           <div className="text-specter-primary-cyan font-mono text-3xl font-bold tracking-[0.3em]">SPECTERCOMS</div>
           <div className="text-specter-text-muted font-mono text-sm">You've been invited to join a server.</div>
@@ -135,7 +135,7 @@ function JoinPage() {
   }
 
   return (
-    <div className="min-h-screen bg-specter-bg-deep flex items-center justify-center">
+    <div className="min-h-screen bg-specter-bg-deep bg-[url('/SpecterBG.png')] bg-cover bg-center flex items-center justify-center">
       <Card className="w-full max-w-sm space-y-4">
         <div className="text-specter-primary-cyan font-mono text-xs uppercase tracking-widest text-center">Server Invite</div>
         {joining && <div className="text-specter-text-muted text-sm font-mono text-center">Joining server...</div>}
@@ -219,7 +219,7 @@ function AuthScreen({ onLogin, isModal = false }) {
 
   if (mode === 'forgot') {
     return (
-      <div className={isModal ? '' : 'min-h-screen bg-specter-bg-deep flex items-center justify-center bg-grid-pattern bg-[size:40px_40px]'}>
+      <div className={isModal ? '' : "min-h-screen bg-specter-bg-deep flex items-center justify-center bg-[url('/SpecterBG.png')] bg-cover bg-center"}>
         <div className="w-full max-w-sm space-y-6">
           <div className="text-center space-y-1">
             <div className="text-specter-primary-cyan font-mono text-3xl font-bold tracking-[0.3em]">SPECTERCOMS</div>
@@ -253,7 +253,7 @@ function AuthScreen({ onLogin, isModal = false }) {
   }
 
   return (
-    <div className={isModal ? '' : 'min-h-screen bg-specter-bg-deep flex items-center justify-center bg-grid-pattern bg-[size:40px_40px]'}>
+    <div className={isModal ? '' : "min-h-screen bg-specter-bg-deep flex items-center justify-center bg-[url('/SpecterBG.png')] bg-cover bg-center"}>
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-1">
           <div className="text-specter-primary-cyan font-mono text-3xl font-bold tracking-[0.3em]">SPECTERCOMS</div>
@@ -350,7 +350,7 @@ function ResetPasswordScreen() {
   };
 
   return (
-    <div className="min-h-screen bg-specter-bg-deep flex items-center justify-center bg-grid-pattern bg-[size:40px_40px]">
+    <div className="min-h-screen bg-specter-bg-deep flex items-center justify-center bg-[url('/SpecterBG.png')] bg-cover bg-center">
       <div className="w-full max-w-sm space-y-6">
         <div className="text-center space-y-1">
           <div className="text-specter-primary-cyan font-mono text-3xl font-bold tracking-[0.3em]">SPECTERCOMS</div>

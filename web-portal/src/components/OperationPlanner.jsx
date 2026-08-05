@@ -1202,7 +1202,7 @@ function NodeEditorPanel({ idx, groups, members, updateGroup, setGroups, linkCol
                 {/* Liaison channels for this role — multi-select via role_refs */}
                 {canEdit && !isLaunched && (frequencies || []).length > 0 && (
                   <div style={{ flex: '2 1 140px' }}>
-                    <span style={{ fontSize: 9, color: '#0e7490', letterSpacing: '0.15em', display: 'block', marginBottom: 3 }}>LIAISON CHANNELS</span>
+                    <span style={{ fontSize: 9, color: '#0e7490', letterSpacing: '0.15em', display: 'block', marginBottom: 3 }}>FREQUENCIES</span>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
                       {frequencies.map((f, fi) => {
                         const isOn = (f.role_refs || []).some(ref => ref.group_index === idx && ref.role_index === ri);
@@ -1861,7 +1861,7 @@ export const GroupPlanner = forwardRef(function GroupPlanner({ orgId, eventId, m
       {(canEdit || frequencies.length > 0) && (
         <div style={{ marginBottom: 16, background: '#020c18', border: '1px solid #0e2233', borderRadius: 4, padding: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span style={{ ...S.sectionLabel, marginBottom: 0, marginTop: 0 }}>LIAISON FREQUENCIES ({frequencies.length})</span>
+            <span style={{ ...S.sectionLabel, marginBottom: 0, marginTop: 0 }}>FREQUENCIES ({frequencies.length})</span>
             {canEdit && !isLaunched && (
               <button
                 onClick={() => setFrequencies(prev => [...prev, { name: `FREQ ${String.fromCharCode(65 + prev.length)}`, role_refs: [] }])}
@@ -1870,102 +1870,117 @@ export const GroupPlanner = forwardRef(function GroupPlanner({ orgId, eventId, m
             )}
           </div>
           {frequencies.length === 0 && (
-            <div style={{ fontSize: 11, color: '#0e4a5a', fontFamily: 'monospace' }}>No frequencies defined. Add one to create a liaison channel accessible via keybind during the operation.</div>
+            <div style={{ fontSize: 11, color: '#0e4a5a', fontFamily: 'monospace' }}>No frequencies defined. Add one to create a channel accessible via keybind during the operation.</div>
           )}
-          {frequencies.map((freq, fi) => (
-            <div key={fi} style={{ background: '#041018', border: '1px solid #0e2233', borderRadius: 3, padding: '8px 10px', marginBottom: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                <span style={{ fontSize: 10, color: '#0e7490', letterSpacing: '0.2em', minWidth: 32 }}>#{fi + 1}</span>
-                {canEdit && !isLaunched ? (
-                  <input
-                    value={freq.name}
-                    onChange={e => setFrequencies(prev => prev.map((f, i) => i === fi ? { ...f, name: e.target.value.toUpperCase().slice(0, 32) } : f))}
-                    style={{ ...S.input, width: 140, padding: '4px 8px', fontSize: 12, letterSpacing: '0.12em', color: '#f59e0b' }}
-                    maxLength={32}
-                  />
-                ) : (
-                  <span style={{ fontSize: 12, color: '#f59e0b', fontFamily: 'monospace', letterSpacing: '0.15em' }}>{freq.name}</span>
-                )}
-                {canEdit && !isLaunched && (
-                  <button onClick={() => setFrequencies(prev => prev.filter((_, i) => i !== fi))} style={{ ...S.btnDanger, padding: '2px 8px', fontSize: 10 }}>✕</button>
-                )}
-              </div>
+          <div style={{ display: 'flex', flexWrap: 'nowrap', gap: 10, alignItems: 'flex-start', overflowX: 'auto', paddingBottom: 6 }}>
+            {frequencies.map((freq, fi) => {
+              const allRoles = groups.flatMap((g, gi) => (g.roles || []).map((r, ri) => ({ gi, ri, g, r })));
+              const authorized = (freq.role_refs || [])
+                .map(ref => allRoles.find(x => x.gi === ref.group_index && x.ri === ref.role_index))
+                .filter(Boolean);
+              const available = allRoles.filter(x => !authorized.some(a => a.gi === x.gi && a.ri === x.ri));
+              const assigned = authorized.flatMap(({ g, r }) => {
+                if (r.assignment_mode === 'direct' && r.assigned_user_id) {
+                  const cs = r.assigned_callsign ||
+                    (members || []).find(m => m.user_id === r.assigned_user_id)?.callsign ||
+                    r.assigned_user_id;
+                  return [{ callsign: cs, via: `${g.name} › ${r.name}` }];
+                }
+                return [];
+              });
 
-              {/* Role access list — toggle which roles grant access to this frequency */}
-              <div style={{ fontSize: 10, color: '#0e7490', letterSpacing: '0.15em', marginBottom: 4 }}>
-                AUTHORIZED ROLES
-                <span style={{ color: '#0e4a5a', fontWeight: 'normal', letterSpacing: 0, marginLeft: 6 }}>
-                  — personnel assigned to these roles will have access
-                </span>
-              </div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {groups.map((g, gi) =>
-                  (g.roles || []).map((r, ri) => {
-                    const isOn = (freq.role_refs || []).some(ref => ref.group_index === gi && ref.role_index === ri);
-                    return canEdit && !isLaunched ? (
-                      <button
-                        key={`${gi}-${ri}`}
-                        onClick={() => setFrequencies(prev => prev.map((f, i) => {
-                          if (i !== fi) return f;
-                          const has = (f.role_refs || []).some(ref => ref.group_index === gi && ref.role_index === ri);
-                          const refs = has
-                            ? (f.role_refs || []).filter(ref => !(ref.group_index === gi && ref.role_index === ri))
-                            : [...(f.role_refs || []), { group_index: gi, role_index: ri }];
-                          return { ...f, role_refs: refs };
-                        }))}
-                        style={{
-                          fontSize: 10, padding: '2px 8px', borderRadius: 3, cursor: 'pointer', fontFamily: 'monospace',
-                          letterSpacing: '0.1em',
-                          background: isOn ? '#0c2a1a' : 'transparent',
-                          border: `1px solid ${isOn ? '#16a34a' : '#0e2233'}`,
-                          color: isOn ? '#4ade80' : '#6b7280',
-                        }}
-                      >
-                        {g.name} › {r.name}
-                      </button>
-                    ) : isOn ? (
-                      <span key={`${gi}-${ri}`} style={{ fontSize: 10, padding: '2px 8px', borderRadius: 3, fontFamily: 'monospace', background: '#0c2a1a', border: '1px solid #16a34a', color: '#4ade80' }}>
-                        {g.name} › {r.name}
-                      </span>
-                    ) : null;
-                  })
-                )}
-                {groups.flatMap(g => g.roles || []).length === 0 && (
-                  <span style={{ fontSize: 10, color: '#0e4a5a' }}>Define roles in groups first.</span>
-                )}
-              </div>
-              {/* Personnel with access — derived from direct role assignments */}
-              {(() => {
-                const assigned = (freq.role_refs || []).flatMap(ref => {
-                  const g = groups[ref.group_index];
-                  const r = g?.roles?.[ref.role_index];
-                  if (!r) return [];
-                  if (r.assignment_mode === 'direct' && r.assigned_user_id) {
-                    const cs = r.assigned_callsign ||
-                      (members || []).find(m => m.user_id === r.assigned_user_id)?.callsign ||
-                      r.assigned_user_id;
-                    return [{ callsign: cs, via: `${g.name} › ${r.name}` }];
-                  }
-                  return [];
-                });
-                if (assigned.length === 0) return null;
-                return (
-                  <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
-                    <span style={{ fontSize: 9, color: '#0e7490', letterSpacing: '0.12em', flexShrink: 0 }}>PERSONNEL:</span>
-                    {assigned.map((a, ai) => (
-                      <span key={ai} title={`via ${a.via}`} style={{
-                        fontSize: 10, padding: '1px 7px', borderRadius: 3, fontFamily: 'monospace',
-                        background: '#041e2e', border: '1px solid #0891b2', color: '#22d3ee',
-                        letterSpacing: '0.1em', cursor: 'default',
-                      }}>
-                        {a.callsign}
-                      </span>
-                    ))}
+              return (
+                <div key={fi} style={{
+                  width: 210, flexShrink: 0, background: '#041018', border: '1px solid #0e7490', borderRadius: 3,
+                  boxShadow: '0 0 0 1px rgba(8,145,178,0.15)',
+                  display: 'flex', flexDirection: 'column', maxHeight: 260,
+                }}>
+                  {/* Fixed header — stays put while the role list below scrolls */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 10px', borderBottom: '1px solid #0e2233', flexShrink: 0 }}>
+                    <span style={{ fontSize: 9, color: '#0e7490', letterSpacing: '0.2em', flexShrink: 0 }}>#{fi + 1}</span>
+                    {canEdit && !isLaunched ? (
+                      <input
+                        value={freq.name}
+                        onChange={e => setFrequencies(prev => prev.map((f, i) => i === fi ? { ...f, name: e.target.value.toUpperCase().slice(0, 32) } : f))}
+                        style={{ ...S.input, flex: 1, minWidth: 0, padding: '4px 6px', fontSize: 12, letterSpacing: '0.12em', color: '#f59e0b' }}
+                        maxLength={32}
+                      />
+                    ) : (
+                      <span style={{ fontSize: 12, color: '#f59e0b', fontFamily: 'monospace', letterSpacing: '0.15em', flex: 1, minWidth: 0 }}>{freq.name}</span>
+                    )}
+                    {canEdit && !isLaunched && (
+                      <button onClick={() => setFrequencies(prev => prev.filter((_, i) => i !== fi))} style={{ ...S.btnDanger, padding: '2px 7px', fontSize: 10, flexShrink: 0 }}>✕</button>
+                    )}
                   </div>
-                );
-              })()}
-            </div>
-          ))}
+
+                  {/* Scrollable role list — only roles actually authorized, not every role in the op */}
+                  <div style={{ padding: '8px 10px', overflowY: 'auto', flex: 1, minHeight: 0 }}>
+                    {authorized.length === 0 && (
+                      <div style={{ fontSize: 10, color: '#0e4a5a' }}>No roles have access yet.</div>
+                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                      {authorized.map(({ gi, ri, g, r }) => (
+                        <div key={`${gi}-${ri}`} style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4,
+                          fontSize: 10, padding: '3px 6px', borderRadius: 3, fontFamily: 'monospace',
+                          background: '#0c2a1a', border: '1px solid #16a34a', color: '#4ade80',
+                        }}>
+                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.name} › {r.name}</span>
+                          {canEdit && !isLaunched && (
+                            <button
+                              onClick={() => setFrequencies(prev => prev.map((f, i) => i !== fi ? f : {
+                                ...f, role_refs: (f.role_refs || []).filter(ref => !(ref.group_index === gi && ref.role_index === ri)),
+                              }))}
+                              style={{ color: '#4ade80', background: 'transparent', border: 'none', cursor: 'pointer', fontSize: 10, flexShrink: 0, padding: 0 }}
+                            >✕</button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {canEdit && !isLaunched && (
+                      available.length > 0 ? (
+                        <select
+                          value=""
+                          onChange={e => {
+                            const [gi, ri] = e.target.value.split('-').map(Number);
+                            setFrequencies(prev => prev.map((f, i) => i !== fi ? f : {
+                              ...f, role_refs: [...(f.role_refs || []), { group_index: gi, role_index: ri }],
+                            }));
+                          }}
+                          style={{ ...S.input, width: '100%', marginTop: 5, padding: '3px 6px', fontSize: 10, color: '#22d3ee', cursor: 'pointer' }}
+                        >
+                          <option value="">+ Add role…</option>
+                          {available.map(({ gi, ri, g, r }) => (
+                            <option key={`${gi}-${ri}`} value={`${gi}-${ri}`}>{g.name} › {r.name}</option>
+                          ))}
+                        </select>
+                      ) : allRoles.length === 0 ? (
+                        <div style={{ fontSize: 10, color: '#0e4a5a', marginTop: 5 }}>Define roles in groups first.</div>
+                      ) : null
+                    )}
+
+                    {assigned.length > 0 && (
+                      <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid #0e2233' }}>
+                        <div style={{ fontSize: 9, color: '#0e7490', letterSpacing: '0.12em', marginBottom: 3 }}>PERSONNEL</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                          {assigned.map((a, ai) => (
+                            <span key={ai} title={`via ${a.via}`} style={{
+                              fontSize: 10, padding: '1px 7px', borderRadius: 3, fontFamily: 'monospace',
+                              background: '#041e2e', border: '1px solid #0891b2', color: '#22d3ee',
+                              letterSpacing: '0.1em', cursor: 'default',
+                            }}>
+                              {a.callsign}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

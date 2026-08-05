@@ -656,7 +656,7 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
             {/* Channel Toggle Hotkey */}
             <div className="pt-2 border-t border-specter-primary-dim/30">
               <label className="block text-xs text-specter-text-muted mb-1 uppercase tracking-wider">Frequency Cycle / Channel Toggle</label>
-              <span className="text-xs text-specter-text-muted opacity-60 block mb-2">Cycles your active TX frequency during operations. Press to step through primary channel → liaison freqs → back to primary.</span>
+              <span className="text-xs text-specter-text-muted opacity-60 block mb-2">Cycles your active TX frequency during operations. Press to step through primary channel → frequencies → back to primary.</span>
               <div className="flex gap-2 items-center">
                 <div className="flex-1 bg-black border border-specter-primary-dim text-xs p-2 text-specter-text-main font-mono min-h-[32px] flex items-center">
                   {recordingKey === 'channelToggle' ? (

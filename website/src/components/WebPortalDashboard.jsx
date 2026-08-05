@@ -483,10 +483,75 @@ function ServerManagePanel({ org, onUpdated }) {
 
 // ─── My Servers Tab ────────────────────────────────────────────────────────────
 
+function CreateServerPanel({ onCreated, onCancel }) {
+  const [form, setForm] = useState({ callsign: '', description: '', is_public: false, join_method: '0' });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+
+  const handleCreate = async () => {
+    if (form.callsign.trim().length < 3) return setError('Server name must be at least 3 characters.');
+    setSaving(true); setError(null);
+    const { error } = await api.createOrg({
+      callsign: form.callsign.trim(),
+      description: form.description.trim(),
+      is_public: form.is_public,
+      join_method: Number(form.join_method),
+    });
+    setSaving(false);
+    if (error) { setError(error); return; }
+    onCreated();
+  };
+
+  return (
+    <div className="space-y-3 rounded-2xl border border-specter-primary-dim/30 bg-specter-bg-surface/80 p-4 shadow-[0_0_24px_rgba(6,182,212,0.08)]">
+      <div className="text-specter-text-muted text-xs uppercase tracking-wider">New Server</div>
+      <input
+        value={form.callsign}
+        onChange={e => setForm(p => ({ ...p, callsign: e.target.value }))}
+        className="w-full bg-black border border-specter-primary-dim rounded-xl focus:border-specter-primary-cyan focus:outline-none px-3 py-2 text-specter-text-main text-xs placeholder-specter-text-muted"
+        placeholder="Server name"
+        maxLength={64}
+      />
+      <textarea
+        value={form.description}
+        onChange={e => setForm(p => ({ ...p, description: e.target.value }))}
+        rows={2}
+        className="w-full bg-black border border-specter-primary-dim rounded-xl focus:border-specter-primary-cyan focus:outline-none px-3 py-2 text-specter-text-main text-xs resize-y placeholder-specter-text-muted"
+        placeholder="Short description (optional)"
+      />
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <select
+          value={form.join_method}
+          onChange={e => setForm(p => ({ ...p, join_method: e.target.value }))}
+          className="bg-black border border-specter-primary-dim rounded-xl focus:border-specter-primary-cyan focus:outline-none px-3 py-2 text-specter-text-main text-xs"
+        >
+          <option value="0">Open — anyone can join</option>
+          <option value="1">Application — approval required</option>
+          <option value="2">Invite Only</option>
+        </select>
+        <label className="flex items-center gap-2 text-xs text-specter-text-muted cursor-pointer select-none px-3">
+          <input
+            type="checkbox"
+            checked={form.is_public}
+            onChange={e => setForm(p => ({ ...p, is_public: e.target.checked }))}
+          />
+          List in Discover
+        </label>
+      </div>
+      {error && <div className="text-red-400 text-xs font-mono">{error}</div>}
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="secondary" onClick={onCancel} disabled={saving}>Cancel</Button>
+        <Button onClick={handleCreate} disabled={saving}>{saving ? 'Creating...' : 'Create Server'}</Button>
+      </div>
+    </div>
+  );
+}
+
 function MyServersTab({ user }) {
   const [orgs, setOrgs]             = useState([]);
   const [loading, setLoading]       = useState(true);
   const [managingId, setManagingId] = useState(null);
+  const [creating, setCreating]     = useState(false);
 
   const load = () => {
     setLoading(true);
@@ -498,15 +563,30 @@ function MyServersTab({ user }) {
   useEffect(load, []);
 
   if (loading) return <div className="text-specter-text-muted text-center py-16 text-xs font-mono">Loading...</div>;
-  if (orgs.length === 0) return (
-    <div className="text-specter-text-muted text-center py-16 text-xs font-mono">
-      You haven't joined any servers yet.<br />
-      <span className="text-specter-primary-dim">Use the Discover tab to find public servers.</span>
-    </div>
-  );
 
   return (
     <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-specter-text-muted text-xs uppercase tracking-wider">
+          {orgs.length} server{orgs.length === 1 ? '' : 's'}
+        </span>
+        {!creating && <Button onClick={() => setCreating(true)}>+ Create Server</Button>}
+      </div>
+
+      {creating && (
+        <CreateServerPanel
+          onCancel={() => setCreating(false)}
+          onCreated={() => { setCreating(false); load(); }}
+        />
+      )}
+
+      {orgs.length === 0 && !creating && (
+        <div className="text-specter-text-muted text-center py-16 text-xs font-mono">
+          You haven't joined any servers yet.<br />
+          <span className="text-specter-primary-dim">Use the Discover tab to find public servers, or create your own above.</span>
+        </div>
+      )}
+
       {orgs.map(org => {
         const isOwner  = org.owner_id === user?.id;
         const managing = managingId === org.id;
@@ -688,56 +768,63 @@ const WebPortalDashboard = ({ user, onLogout }) => {
   const [tab, setTab] = useState('servers');
 
   return (
-    <div className="min-h-screen bg-specter-bg-deep font-mono text-specter-text-main flex flex-col">
-      {/* Top bar */}
-      <header className="border-b border-specter-primary-dim bg-specter-bg-surface px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <span className="text-specter-primary-cyan font-bold tracking-widest uppercase text-sm">SPECTERCOMS</span>
-          <span className="text-specter-primary-dim text-xs opacity-60">Web Portal</span>
-        </div>
-        <div className="flex items-center gap-4">
-          <span className="text-specter-text-muted text-xs">{user?.callsign || user?.email}</span>
-          <Button variant="secondary" onClick={onLogout}>Log Out</Button>
-        </div>
-      </header>
+    <div className="min-h-screen bg-specter-bg-deep font-mono text-specter-text-main flex flex-col relative overflow-x-hidden">
+      {/* Background — same SpecterBG treatment as the homepage, for a unified feel across the app */}
+      <div
+        className="fixed inset-0 bg-cover bg-center pointer-events-none"
+        style={{ backgroundImage: "url('/SpecterBG.png')", opacity: 0.5 }}
+      />
+      <div className="relative z-10 flex flex-col flex-1">
+        {/* Top bar */}
+        <header className="border-b border-specter-primary-dim bg-specter-bg-surface/90 backdrop-blur-sm px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <span className="text-specter-primary-cyan font-bold tracking-widest uppercase text-sm">SPECTERCOMS</span>
+            <span className="text-specter-primary-dim text-xs opacity-60">Web Portal</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <span className="text-specter-text-muted text-xs">{user?.callsign || user?.email}</span>
+            <Button variant="secondary" onClick={onLogout}>Log Out</Button>
+          </div>
+        </header>
 
-      {/* Nav tabs */}
-      <nav className="border-b border-specter-primary-dim bg-specter-bg-surface px-6 flex gap-1">
-        {TABS.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`px-4 py-3 text-xs uppercase tracking-wider font-mono transition-colors border-b-2 -mb-px ${
-              tab === t.id
-                ? 'text-specter-primary-cyan border-specter-primary-cyan'
-                : 'text-specter-text-muted border-transparent hover:text-specter-text-main'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
+        {/* Nav tabs */}
+        <nav className="border-b border-specter-primary-dim bg-specter-bg-surface/90 backdrop-blur-sm px-6 flex gap-1">
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-4 py-3 text-xs uppercase tracking-wider font-mono transition-colors border-b-2 -mb-px ${
+                tab === t.id
+                  ? 'text-specter-primary-cyan border-specter-primary-cyan'
+                  : 'text-specter-text-muted border-transparent hover:text-specter-text-main'
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
 
-      {/* Content */}
-      <main className="flex-1 px-6 py-6 max-w-3xl w-full mx-auto">
-        {tab === 'servers'  && <MyServersTab user={user} />}
-        {tab === 'discover' && <DiscoverTab onJoinedOrg={() => {}} />}
-        {tab === 'account'  && <AccountTab user={user} />}
-        {tab === 'billing'  && <BillingTab />}
-      </main>
+        {/* Content */}
+        <main className="flex-1 px-6 py-6 max-w-3xl w-full mx-auto">
+          {tab === 'servers'  && <MyServersTab user={user} />}
+          {tab === 'discover' && <DiscoverTab onJoinedOrg={() => setTab('servers')} />}
+          {tab === 'account'  && <AccountTab user={user} />}
+          {tab === 'billing'  && <BillingTab />}
+        </main>
 
-      {/* Footer prompt to download app */}
-      <footer className="border-t border-specter-primary-dim/30 px-6 py-4 text-center">
-        <span className="text-specter-text-muted text-xs">
-          Voice, events, and real-time comms require the{' '}
-          <a
-            href="/api/downloads?platform=windows"
-            className="text-specter-primary-cyan hover:text-specter-primary-neon underline-offset-2 hover:underline"
-          >
-            SpecterComs desktop app
-          </a>.
-        </span>
-      </footer>
+        {/* Footer prompt to download app */}
+        <footer className="border-t border-specter-primary-dim/30 px-6 py-4 text-center">
+          <span className="text-specter-text-muted text-xs">
+            Voice, events, and real-time comms require the{' '}
+            <a
+              href="/api/downloads?platform=windows"
+              className="text-specter-primary-cyan hover:text-specter-primary-neon underline-offset-2 hover:underline"
+            >
+              SpecterComs desktop app
+            </a>.
+          </span>
+        </footer>
+      </div>
     </div>
   );
 };

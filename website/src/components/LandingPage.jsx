@@ -31,19 +31,6 @@ const OVERLAY_STREAM_OPTIONS = [
   { id: 'CAPT_NORDMEAT', label: 'CAPT_NORDMEAT', img: '/marketing/overlay-stream-squad.jpg', pos: '45% 45%' },
 ];
 
-// Frequency demo — mirrors the real primary-channel + liaison-frequency model
-// from WarRoom.jsx: index 0 is always the primary group channel (always
-// connected); everything after it is a liaison frequency the user's role
-// grants for an operation. Only one channel is ever the active TX target —
-// everything else is still audible, just passively monitored at lower volume
-// (see WarRoom.jsx's "PASSIVE FREQ RX" monitor instances).
-const FREQ_CHANNELS = [
-  { id: 0, label: 'ALPHA SQUAD', kind: 'primary' },
-  { id: 1, label: 'COMMAND', kind: 'liaison' },
-  { id: 2, label: 'BRAVO FIRETEAM', kind: 'liaison' },
-  { id: 3, label: 'RECON', kind: 'liaison' },
-];
-
 // Group builder demo — a simplified mirror of OperationPlanner.jsx's real
 // GroupPlanner: a nested tree of groups, each with roles that carry a 1-5
 // ducking priority (server-side in media-rust's mixer: priority speech drops
@@ -57,17 +44,17 @@ const GROUP_BUILDER_DATA = {
     nodes: [
       { id: 'root', parent: null, tier: 1, name: 'OPERATION ALPHA',
         roles: [
-          { name: 'Team Lead', priority: 5, commander: true },
-          { name: 'Comms Officer', priority: 3, commander: false },
+          { name: 'Team Lead', priority: 5, commander: false, slots: 1 },
+          { name: 'Comms Officer', priority: 3, commander: false, slots: 1 },
         ] },
       { id: 'assault', parent: 'root', tier: 2, name: 'ASSAULT TEAM',
         roles: [
-          { name: 'Breacher', priority: 2, commander: false },
-          { name: 'Rifleman', priority: 1, commander: false },
+          { name: 'Breacher', priority: 2, commander: false, slots: 2 },
+          { name: 'Rifleman', priority: 1, commander: false, slots: 6 },
         ] },
       { id: 'overwatch', parent: 'root', tier: 2, name: 'OVERWATCH',
         roles: [
-          { name: 'Spotter', priority: 2, commander: false },
+          { name: 'Spotter', priority: 2, commander: false, slots: 2 },
         ] },
     ],
     freqs: [
@@ -76,25 +63,26 @@ const GROUP_BUILDER_DATA = {
     ],
   },
   starcitizen: {
+    // Real ship + role data — the icon is from fleetyards.net's public API
+    // (same source our own fleetyardsSync.ts pulls from), and the role list
+    // below is the Idris-M's actual ship-slot list as it renders in the real
+    // app's builder (Captain / Pilot / Co-Pilot / Turret Gunner / Extra Crew
+    // — no invented sub-teams like a "bridge crew" or "boarding party" that
+    // don't correspond to real ship slots).
     nodes: [
       { id: 'root', parent: null, tier: 1, name: 'IDRIS WING',
+        iconUrl: 'https://api.fleetyards.net/files/blobs/redirect/eyJfcmFpbHMiOnsiZGF0YSI6IjVhZTkyZmVkLTM2ZDEtNDdiNS05YjE4LWZiZjA5ZWI2MDNjZCIsInB1ciI6ImJsb2JfaWQifX0=--1275885dcb5434b008f2044b8aac46c8c15cfe6d/side-fleetchart-2c931ce7-dd6e-48b7-a172-e8f86a687fbc.png/',
         roles: [
-          { name: 'Wing Commander', priority: 5, commander: true },
-          { name: 'XO', priority: 3, commander: false },
-        ] },
-      { id: 'bridge', parent: 'root', tier: 2, name: 'BRIDGE CREW',
-        roles: [
-          { name: 'Pilot', priority: 3, commander: false },
-          { name: 'Turret Gunner', priority: 1, commander: false },
-        ] },
-      { id: 'boarding', parent: 'root', tier: 2, name: 'BOARDING PARTY',
-        roles: [
-          { name: 'FTL Breacher', priority: 2, commander: false },
+          { name: 'Captain', priority: 5, commander: false, slots: 1 },
+          { name: 'Pilot', priority: 4, commander: false, slots: 1 },
+          { name: 'Co-Pilot', priority: 2, commander: false, slots: 1 },
+          { name: 'Turret Gunner', priority: 1, commander: false, slots: 11 },
+          { name: 'Extra Crew', priority: 1, commander: false, slots: 7 },
         ] },
     ],
     freqs: [
-      { name: 'FLEET COMMAND', authorized: ['IDRIS WING › Wing Commander', 'BRIDGE CREW › Pilot'] },
-      { name: 'BOARDING NET', authorized: ['BOARDING PARTY › FTL Breacher', 'IDRIS WING › XO'] },
+      { name: 'FLEET COMMAND', authorized: ['IDRIS WING › Captain', 'IDRIS WING › Pilot'] },
+      { name: 'GUNNERY NET', authorized: ['IDRIS WING › Turret Gunner'] },
     ],
   },
 };
@@ -107,19 +95,30 @@ const ONBOARDING_CARDS = [
   {
     id: '01', color: 'text-specter-primary-cyan', border: 'rgba(6,182,212,0.4)',
     title: 'Create Account',
-    body: 'Sign up at spectercoms.net — no download required. Create your callsign, verify your email, and you\'re on the Discover page ready to find a server.',
+    body: 'Sign up at spectercoms.net — no download required. Pick a callsign and verify your email to get started.',
+    notes: [
+      'Callsign: 3–32 characters, letters, numbers, and underscores only',
+      'Email verification required before your account is active',
+      'Your email is never shown to other users',
+    ],
     cta: 'enter',
   },
   {
     id: '02', color: 'text-specter-primary-neon', border: 'rgba(163,230,53,0.4)',
     title: 'Join a Server',
-    body: 'Browse public servers in Discover, or accept an invite link from your group. Once inside you can view channels, members, and scheduled operations from your browser.',
+    body: 'Browse public servers in Discover, or accept an invite link from your group. Want to run your own instead? Hosting has plans scaled to data volume — this platform isn\'t free to operate. Once you\'re in, the desktop app is where you actually get to work.',
   },
   {
     id: '03', color: 'text-amber-400', border: 'rgba(245,158,11,0.4)',
     title: 'Download App',
-    body: 'Install the desktop client for voice, in-game overlay, and operations tooling. The installer requests only what it needs — nothing is collected silently.',
-    permissions: true,
+    body: 'The app is where everything interactive happens — voice, the in-game overlay, and operations tooling. The installer requests only what it needs — nothing is collected silently.',
+    notes: [
+      'Microphone for voice',
+      'Screen capture when sharing',
+      'Global hotkeys (PTT & overlay)',
+      'Overlay window (always-on-top, click-through)',
+      'Network for auth, voice & signed updates',
+    ],
     cta: 'download',
   },
 ];
@@ -152,6 +151,38 @@ function detectPlatform() {
   if (ua.includes('win')) return 'windows';
   if (ua.includes('mac')) return 'macos';
   return 'linux';
+}
+
+// Scroll-snap section wrapper — each full-viewport chunk fades/slides in as it
+// snaps into view (and back out on the way past), instead of the page reading
+// as one continuous, un-paced scroll of unrelated content.
+function FadeSection({ children, className = '', more = false }) {
+  const ref = useRef(null);
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { threshold: 0.35 });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+  return (
+    <section
+      ref={ref}
+      className={`relative min-h-screen w-full max-w-5xl mx-auto px-6 flex flex-col items-center justify-center text-center snap-start snap-always transition-all duration-700 ease-out ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'} ${className}`}
+    >
+      {children}
+      {/* Scroll cue — lets the user know this snap section isn't the end of the page */}
+      {more && (
+        <div className={`absolute bottom-6 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 text-zinc-500 pointer-events-none transition-opacity duration-700 ${visible ? 'opacity-100' : 'opacity-0'}`}>
+          <span className="text-[9px] uppercase tracking-[0.3em]">More Below</span>
+          <svg className="w-4 h-4 animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+          </svg>
+        </div>
+      )}
+    </section>
+  );
 }
 
 const LandingPage = ({ onEnter }) => {
@@ -222,7 +253,10 @@ const LandingPage = ({ onEnter }) => {
   };
 
   const toggleOverlayPassthrough = () => {
-    setOverlayInteracted(true);
+    // Deliberately doesn't set overlayInteracted here — that flag is what
+    // gates the header's own drag-hint glow (line ~603), and toggling
+    // passthrough off is the exact moment we want that hint to appear, not
+    // be suppressed by "the visitor already interacted with something."
     setOverlayPickerOpen(false);
     setOverlayPassthrough((v) => !v);
   };
@@ -231,14 +265,6 @@ const LandingPage = ({ onEnter }) => {
     setOverlayInteracted(true);
     setOverlayWatching(id);
     setOverlayPickerOpen(false);
-  };
-
-  // ── Frequency demo: which channel is currently the active TX target ──────
-  const [activeFreqIdx, setActiveFreqIdx] = useState(0);
-  const [freqInteracted, setFreqInteracted] = useState(false);
-  const selectFreq = (i) => {
-    setFreqInteracted(true);
-    setActiveFreqIdx(i);
   };
 
   // ── Group builder demo: tree + selected node + editable priority/commander ──
@@ -266,8 +292,34 @@ const LandingPage = ({ onEnter }) => {
       ...n, roles: n.roles.map((r, i) => ({ ...r, commander: i === roleIdx ? !r.commander : false })),
     }));
   };
+  const addChildGroup = (parentId) => {
+    setGroupInteracted(true);
+    const parent = groupTree.find((n) => n.id === parentId);
+    const newId = `demo-${Date.now()}`;
+    const newNode = {
+      id: newId, parent: parentId, tier: (parent?.tier || 1) + 1, name: 'NEW GROUP',
+      roles: [{ name: 'Member', priority: 1, commander: false, slots: 4 }],
+    };
+    setGroupTree((prev) => [...prev, newNode]);
+    setSelectedNodeId(newId);
+  };
+  const removeGroup = (id) => {
+    setGroupInteracted(true);
+    // Cascade: drop the node and anything nested under it, same as the real tree.
+    const idsToDrop = new Set([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const n of groupTree) {
+        if (n.parent && idsToDrop.has(n.parent) && !idsToDrop.has(n.id)) { idsToDrop.add(n.id); grew = true; }
+      }
+    }
+    setGroupTree((prev) => prev.filter((n) => !idsToDrop.has(n.id)));
+    if (idsToDrop.has(selectedNodeId)) setSelectedNodeId('root');
+  };
   const selectedGroupNode = groupTree.find((n) => n.id === selectedNodeId) || groupTree[0];
   const groupFreqs = GROUP_BUILDER_DATA[groupPreset].freqs;
+  const groupTiers = [...new Set(groupTree.map((n) => n.tier))].sort((a, b) => a - b);
 
   const handleDownload = async () => {
     setDownloadError('');
@@ -284,38 +336,26 @@ const LandingPage = ({ onEnter }) => {
     }
   };
   return (
-    <div className="min-h-screen bg-specter-bg-deep text-specter-text-main flex flex-col font-mono relative overflow-x-hidden bg-grid-pattern bg-[size:40px_40px]">
-      {/* Background glow effects */}
-      <div className="absolute top-[-20%] left-[-10%] w-1/2 h-1/2 bg-specter-primary-cyan/10 blur-[120px] rounded-full pointer-events-none" />
-      <div className="absolute bottom-[-20%] right-[-10%] w-1/2 h-1/2 bg-specter-primary-neon/5 blur-[120px] rounded-full pointer-events-none" />
+    <div className="h-screen bg-specter-bg-deep text-specter-text-main flex flex-col font-mono relative overflow-x-hidden overflow-y-auto snap-y snap-mandatory scroll-smooth">
+      {/* Background — SpecterBG texture + theme-colored glow, kept subtle so it doesn't fight the content.
+          `fixed` (not absolute) so it covers the viewport at a natural scale instead of being
+          stretched thin across the whole scrollable page height. */}
+      <div
+        className="fixed inset-0 bg-cover bg-center pointer-events-none"
+        style={{ backgroundImage: "url('/SpecterBG.png')", opacity: 0.6 }}
+      />
+      <div className="fixed top-[-20%] left-[-10%] w-1/2 h-1/2 bg-specter-primary-cyan/10 blur-[120px] rounded-full pointer-events-none" />
+      <div className="fixed bottom-[-20%] right-[-10%] w-1/2 h-1/2 bg-specter-primary-neon/5 blur-[120px] rounded-full pointer-events-none" />
 
-      {/* Header */}
-      <header className="w-full flex justify-between items-center p-6 sm:p-10 relative z-10">
-        <div className="flex items-center gap-4">
-            <img
-              src="/SpecterComsLogo.png?v=20260703a"
-              alt="SpecterComs"
-              className="h-10 w-auto drop-shadow-[0_0_8px_rgba(6,182,212,0.5)]"
-            />
-            <div className="hidden sm:block text-specter-text-muted text-xs tracking-widest pt-1 border-l border-specter-primary-dim pl-4">SECURE COMMS</div>
-        </div>
-        <div>
-          <button
-            onClick={onEnter}
-            className="px-6 py-2 border border-specter-primary-cyan text-specter-primary-cyan hover:bg-specter-primary-cyan hover:text-black transition-colors uppercase tracking-widest text-sm font-bold shadow-[0_0_10px_rgba(6,182,212,0.2)]"
-          >
-            Login / Create Account
-          </button>
-        </div>
-      </header>
+      {/* Main Hero — each top-level chunk below is its own full-viewport, scroll-snapped,
+          fade-in section (see FadeSection) rather than one continuous unpaced scroll. */}
+      <main className="flex-1 flex flex-col z-10 relative">
 
-      {/* Main Hero */}
-      <main className="flex-1 flex flex-col items-center justify-center p-6 text-center z-10 max-w-5xl mx-auto space-y-10">
-
+        <FadeSection more>
         <div className="space-y-6">
             <div className="flex justify-center -mt-[120px] -mb-[64px] sm:-mb-[80px]">
                 <img
-                  src="/SpecterComsBanner.png?v=20260801b"
+                  src="/SpecterComsBannerV2.png?v=20260805a"
                   alt="SpecterComs — Built to Connect. Engineered to Perform."
                   className="h-[320px] sm:h-[416px] w-auto drop-shadow-[0_0_30px_rgba(6,182,212,0.5)]"
                 />
@@ -344,7 +384,9 @@ const LandingPage = ({ onEnter }) => {
             SpecterComs is built to keep large in-game teams organized — command priority, an in-game overlay, and scheduled operations in one client. Create your account, discover servers, and join your team. Once you're in a server, install the desktop client for voice, overlay, and operations tooling.
           </p>
         </div>
+        </FadeSection>
 
+        <FadeSection more>
         {/* Onboarding step cards — accordion style matching the feature section */}
         <style>{`
           .onboard-row { display: flex; gap: 6px; height: 300px; width: 100%; }
@@ -362,18 +404,14 @@ const LandingPage = ({ onEnter }) => {
               <div className="onboard-detail">
                 <div className={`${c.color} font-bold text-sm tracking-widest uppercase mb-2`}>{c.title}</div>
                 <p className="text-xs text-zinc-300 leading-relaxed mb-3">{c.body}</p>
-                {c.permissions && (
+                {c.notes && (
                   <ul className="text-[11px] text-zinc-400 leading-5 list-disc pl-4 space-y-0.5 mb-3">
-                    <li>Microphone for voice</li>
-                    <li>Screen capture when sharing</li>
-                    <li>Global hotkeys (PTT &amp; overlay)</li>
-                    <li>Overlay window (always-on-top, click-through)</li>
-                    <li>Network for auth, voice &amp; signed updates</li>
+                    {c.notes.map((n) => <li key={n}>{n}</li>)}
                   </ul>
                 )}
                 {c.cta === 'enter' && (
                   <button onClick={onEnter} className={`mt-auto self-start text-[11px] px-3 py-1.5 border font-bold uppercase tracking-widest transition-colors hover:bg-white/5 ${c.color}`} style={{ borderColor: c.border }}>
-                    Create Account / Sign In
+                    Create Account
                   </button>
                 )}
                 {c.cta === 'download' && (
@@ -386,6 +424,47 @@ const LandingPage = ({ onEnter }) => {
           ))}
         </div>
 
+        {/* Feature accordion — collapsed items show as vertical side tabs; hovering
+            expands that tab and fades in its detail copy while the others shrink back.
+            Second row alongside the onboarding cards above so this section reads as
+            one "getting started + why it's worth it" chunk instead of two separate ones. */}
+        <style>{`
+          .accordion-row { display: flex; gap: 6px; height: 260px; }
+          .accordion-item {
+            position: relative; flex: 1; overflow: hidden; cursor: default;
+            transition: flex 0.5s cubic-bezier(0.4, 0.2, 0.2, 1);
+            border: 1px solid rgba(63,63,70,0.7);
+          }
+          .accordion-item:hover { flex: 3.2; }
+          .accordion-tab-label {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            writing-mode: vertical-rl; transform: rotate(180deg);
+            letter-spacing: 0.25em; font-size: 11px; font-weight: bold; text-transform: uppercase;
+            transition: opacity 0.25s;
+            white-space: nowrap;
+          }
+          .accordion-item:hover .accordion-tab-label { opacity: 0; }
+          .accordion-detail {
+            position: absolute; inset: 0; padding: 20px; display: flex; flex-direction: column; justify-content: center;
+            opacity: 0; transform: translateX(10px);
+            transition: opacity 0.35s ease 0.08s, transform 0.35s ease 0.08s;
+          }
+          .accordion-item:hover .accordion-detail { opacity: 1; transform: translateX(0); }
+        `}</style>
+        <div className="accordion-row mt-6 w-full text-left">
+            {FEATURES.map((f) => (
+              <div key={f.id} className="accordion-item bg-black/50 backdrop-blur-sm" style={{ borderColor: f.border }}>
+                <div className={`accordion-tab-label ${f.color}`}>{f.id} // {f.title}</div>
+                <div className="accordion-detail">
+                  <div className={`${f.color} font-bold text-lg tracking-widest uppercase mb-2`}>{f.title}</div>
+                  <p className="text-sm text-zinc-300 leading-relaxed">{f.body}</p>
+                </div>
+              </div>
+            ))}
+        </div>
+        </FadeSection>
+
+        <FadeSection more>
         {/* Overlay Showcase — mockup built to match the real in-game HUD pixel-for-pixel
             (see GameOverlayWindow.jsx) since the overlay can't be screenshotted from
             inside a live game session for marketing use. Intro copy was dropped —
@@ -671,125 +750,9 @@ const LandingPage = ({ onEnter }) => {
         </div>
         </div>
 
-        {/* Feature accordion — collapsed items show as vertical side tabs; hovering
-            expands that tab and fades in its detail copy while the others shrink back. */}
-        <style>{`
-          .accordion-row { display: flex; gap: 6px; height: 260px; }
-          .accordion-item {
-            position: relative; flex: 1; overflow: hidden; cursor: default;
-            transition: flex 0.5s cubic-bezier(0.4, 0.2, 0.2, 1);
-            border: 1px solid rgba(63,63,70,0.7);
-          }
-          .accordion-item:hover { flex: 3.2; }
-          .accordion-tab-label {
-            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-            writing-mode: vertical-rl; transform: rotate(180deg);
-            letter-spacing: 0.25em; font-size: 11px; font-weight: bold; text-transform: uppercase;
-            transition: opacity 0.25s;
-            white-space: nowrap;
-          }
-          .accordion-item:hover .accordion-tab-label { opacity: 0; }
-          .accordion-detail {
-            position: absolute; inset: 0; padding: 20px; display: flex; flex-direction: column; justify-content: center;
-            opacity: 0; transform: translateX(10px);
-            transition: opacity 0.35s ease 0.08s, transform 0.35s ease 0.08s;
-          }
-          .accordion-item:hover .accordion-detail { opacity: 1; transform: translateX(0); }
-        `}</style>
-        <div className="accordion-row mt-16 w-full text-left">
-            {FEATURES.map((f) => (
-              <div key={f.id} className="accordion-item bg-black/50 backdrop-blur-sm" style={{ borderColor: f.border }}>
-                <div className={`accordion-tab-label ${f.color}`}>{f.id} // {f.title}</div>
-                <div className="accordion-detail">
-                  <div className={`${f.color} font-bold text-lg tracking-widest uppercase mb-2`}>{f.title}</div>
-                  <p className="text-sm text-zinc-300 leading-relaxed">{f.body}</p>
-                </div>
-              </div>
-            ))}
-        </div>
+        </FadeSection>
 
-        {/* Frequencies — same treatment as the overlay demo: a live interactive
-            widget with pinned tooltip callouts that teach the mechanic, then fade
-            once you've clicked something yourself. */}
-        <div className="w-full max-w-5xl mt-20">
-          <style>{`
-            @keyframes freq-tip-hint {
-              0%, 100% { opacity: 1; }
-              50% { opacity: 0.5; }
-            }
-            .freq-tip { animation: freq-tip-hint 2s ease-in-out infinite; }
-          `}</style>
-          <div className="text-specter-primary-cyan text-xs uppercase tracking-widest mb-2 text-center">Core Feature</div>
-          <h2 className="text-2xl sm:text-3xl font-bold text-white uppercase tracking-widest mb-8 text-center">
-            Frequencies
-          </h2>
-
-          <div className="rounded-xl border border-zinc-800 bg-black/50 backdrop-blur-sm p-6 sm:p-10">
-            <div className="flex flex-wrap justify-center gap-x-10 gap-y-16">
-              {FREQ_CHANNELS.map((ch, i) => {
-                const isActive = activeFreqIdx === i;
-                const tip = freqInteracted ? null : (
-                  i === 0 ? { label: 'PRIMARY · ACTIVE TX', body: "Always connected — right now it's also where you're transmitting" } :
-                  i === 1 ? { label: 'FREQUENCY', body: 'Extra channel your role grants for this operation' } :
-                  i === 2 ? { label: 'PASSIVE MONITOR', body: "You still hear this, just quieter, until you switch to it" } :
-                  null
-                );
-                return (
-                  <div key={ch.id} className="relative">
-                    {tip && (
-                      <div
-                        className="freq-tip absolute left-1/2"
-                        style={{
-                          bottom: '100%', transform: 'translateX(-50%)', marginBottom: 16, width: 190,
-                          background: 'rgba(3,10,19,0.92)', border: '1px solid rgba(103,232,249,0.5)',
-                          borderRadius: 6, padding: '7px 10px', boxShadow: '0 0 12px rgba(0,0,0,0.5)',
-                        }}
-                      >
-                        <div className="text-[10px] font-bold uppercase tracking-widest text-cyan-300 leading-tight">{tip.label}</div>
-                        <div className="text-[9px] text-zinc-300 leading-tight mt-1">{tip.body}</div>
-                        <div style={{
-                          position: 'absolute', top: '100%', left: '50%', transform: 'translateX(-50%)',
-                          width: 0, height: 0, borderLeft: '6px solid transparent', borderRight: '6px solid transparent',
-                          borderTop: '6px solid rgba(103,232,249,0.5)',
-                        }} />
-                      </div>
-                    )}
-                    <button
-                      onClick={() => selectFreq(i)}
-                      className="flex flex-col items-center gap-2 px-5 py-4 rounded-lg border transition-all"
-                      style={{
-                        minWidth: 150, cursor: 'pointer',
-                        background: isActive ? 'rgba(34,197,94,0.08)' : 'rgba(8,20,33,0.6)',
-                        borderColor: isActive ? 'rgba(34,197,94,0.5)' : 'rgba(56,189,248,0.25)',
-                      }}
-                    >
-                      <span style={{ fontSize: 9, letterSpacing: '0.2em', color: ch.kind === 'primary' ? '#0e7490' : '#475569' }}>
-                        {ch.kind === 'primary' ? 'PRIMARY CHANNEL' : 'FREQUENCY'}
-                      </span>
-                      <span style={{ fontSize: 14, fontWeight: 'bold', letterSpacing: '0.08em', color: isActive ? '#4ade80' : '#94a3b8' }}>
-                        {ch.label}
-                      </span>
-                      <span className="flex items-center gap-1.5">
-                        <span style={{
-                          width: 6, height: 6, borderRadius: 999,
-                          background: isActive ? '#22c55e' : '#0e7490',
-                          boxShadow: isActive ? '0 0 6px #22c55e' : 'none',
-                        }} />
-                        <span style={{ fontSize: 9, letterSpacing: '0.15em', color: isActive ? '#22c55e' : '#0e7490' }}>
-                          {isActive ? 'ACTIVE TX' : 'MONITORING'}
-                        </span>
-                      </span>
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="text-center text-[10px] uppercase tracking-widest text-zinc-500 mt-10">
-              Click any frequency to switch who you're transmitting to — everything else keeps playing, just quieter
-            </div>
-          </div>
-        </div>
-
+        <FadeSection>
         {/* Group Builder — simplified mirror of OperationPlanner.jsx's real
             GroupPlanner: a nested group tree, per-role ducking priority (1-5,
             server-enforced in media-rust's mixer — priority speech drops
@@ -828,41 +791,143 @@ const LandingPage = ({ onEnter }) => {
             ))}
           </div>
 
-          <div className="rounded-xl border border-zinc-800 bg-black/50 backdrop-blur-sm p-6 sm:p-8">
-            <div className="grid grid-cols-1 md:grid-cols-[220px_1fr] gap-6">
-
-              {/* Tree */}
-              <div className="flex flex-col gap-2">
-                {groupTree.map((n) => (
-                  <button
-                    key={n.id}
-                    onClick={() => selectGroupNode(n.id)}
-                    className="text-left rounded-lg border px-3 py-2 transition-colors"
-                    style={{
-                      marginLeft: n.parent ? 20 : 0, cursor: 'pointer',
-                      background: selectedNodeId === n.id ? 'rgba(34,211,238,0.1)' : 'rgba(8,20,33,0.5)',
-                      borderColor: selectedNodeId === n.id ? 'rgba(34,211,238,0.5)' : 'rgba(56,189,248,0.2)',
-                    }}
+          {/* Frequencies — positioned above the tree, matching where it actually
+              sits in OperationPlanner.jsx. These are custom channels you create
+              and grant to specific roles — reachable by keybind mid-operation,
+              so e.g. a squad lead can loop in tactical support without opening
+              that channel to the whole group. Shown here as a static reference
+              (the real builder lets you add/remove roles per frequency via a
+              dropdown), not a click-to-switch demo like the overlay above. */}
+          <div className="mb-8">
+            <p className="text-xs text-zinc-500 text-center max-w-xl mx-auto mb-4 leading-relaxed">
+              <span className="text-specter-primary-cyan uppercase tracking-widest">Frequencies</span> — custom channels you create and grant to specific roles. Anyone assigned one of the authorized roles below can reach that channel by keybind, without it being open to the whole group.
+            </p>
+            <div className="rounded-xl border border-zinc-800 bg-black/50 backdrop-blur-sm p-4 sm:p-5">
+              <div className="flex gap-3 overflow-x-auto pb-1 justify-center flex-wrap">
+                {groupFreqs.map((f) => (
+                  <div
+                    key={f.name}
+                    className="flex-shrink-0 rounded-lg overflow-hidden"
+                    style={{ width: 200, border: '1px solid #0e7490', boxShadow: '0 0 0 1px rgba(8,145,178,0.15)' }}
                   >
-                    <div className="flex items-center gap-2">
-                      <span style={{ fontSize: 8, color: '#0e7490', border: '1px solid #0e7490', borderRadius: 3, padding: '1px 4px', letterSpacing: '0.1em', flexShrink: 0 }}>
-                        TIER {n.tier}
-                      </span>
-                      <span style={{ fontSize: 12, fontWeight: 'bold', color: selectedNodeId === n.id ? '#22d3ee' : '#cbd5e1', letterSpacing: '0.05em' }}>
-                        {n.name}
-                      </span>
+                    <div style={{ padding: '7px 10px', borderBottom: '1px solid rgba(8,145,178,0.35)', background: 'rgba(2,12,20,0.7)' }}>
+                      <span style={{ fontSize: 12, color: '#f59e0b', fontFamily: 'monospace', letterSpacing: '0.1em' }}>{f.name}</span>
                     </div>
-                    <div style={{ fontSize: 9, color: '#64748b', marginTop: 3, letterSpacing: '0.08em' }}>
-                      {n.roles.length} ROLE{n.roles.length === 1 ? '' : 'S'}
+                    <div style={{ padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {f.authorized.map((a) => (
+                        <span
+                          key={a}
+                          style={{
+                            fontSize: 10, padding: '3px 7px', borderRadius: 3, fontFamily: 'monospace',
+                            background: 'rgba(12,42,26,0.6)', border: '1px solid #16a34a', color: '#4ade80',
+                          }}
+                        >
+                          {a}
+                        </span>
+                      ))}
                     </div>
-                  </button>
+                  </div>
                 ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-zinc-800 bg-black/50 backdrop-blur-sm p-6 sm:p-8">
+            <div className="flex flex-col gap-6">
+
+              {/* Tree — cards laid out by tier, connected top-down like the real group tree */}
+              <div>
+                <div className="flex items-center justify-between mb-4">
+                  <span className="text-xs uppercase tracking-widest text-zinc-500">
+                    Group Tree ({groupTree.length} group{groupTree.length === 1 ? '' : 's'})
+                  </span>
+                  <button
+                    onClick={() => addChildGroup(selectedNodeId)}
+                    className="text-[10px] px-3 py-1.5 rounded border font-bold uppercase tracking-widest transition-colors hover:bg-cyan-500/10"
+                    style={{ color: '#22d3ee', borderColor: 'rgba(34,211,238,0.4)', cursor: 'pointer' }}
+                  >
+                    + Add Group
+                  </button>
+                </div>
+                <div className="flex flex-col items-center gap-4">
+                  {groupTiers.map((tierNum, tierIdx) => (
+                    <React.Fragment key={tierNum}>
+                      {tierIdx > 0 && <div style={{ width: 1, height: 14, background: 'rgba(56,189,248,0.3)' }} />}
+                      <div className="relative flex flex-wrap justify-center gap-3 w-full">
+                        {tierIdx > 0 && (
+                          <div className="absolute top-0" style={{ left: '15%', right: '15%', height: 1, background: 'rgba(56,189,248,0.25)' }} />
+                        )}
+                        {groupTree.filter((n) => n.tier === tierNum).map((n) => {
+                          const totalSlots = n.roles.reduce((s, r) => s + (r.slots || 0), 0);
+                          return (
+                            <div key={n.id} className="relative" style={{ width: 190 }}>
+                              {tierIdx > 0 && (
+                                <div className="absolute left-1/2" style={{ top: -14, width: 1, height: 14, background: 'rgba(56,189,248,0.25)', transform: 'translateX(-50%)' }} />
+                              )}
+                              <div
+                                className="rounded-lg border px-3 py-3 flex flex-col items-center gap-1.5 text-center"
+                                style={{
+                                  background: selectedNodeId === n.id ? 'rgba(34,211,238,0.1)' : 'rgba(8,20,33,0.5)',
+                                  borderColor: selectedNodeId === n.id ? 'rgba(34,211,238,0.5)' : 'rgba(56,189,248,0.2)',
+                                }}
+                              >
+                                {n.iconUrl && (
+                                  <img src={n.iconUrl} alt={n.name} style={{ width: '100%', height: 90, objectFit: 'contain', filter: 'grayscale(0.3) brightness(1.15)' }} />
+                                )}
+                                <div style={{ fontSize: 14, fontWeight: 'bold', color: selectedNodeId === n.id ? '#22d3ee' : '#cbd5e1', letterSpacing: '0.05em' }}>
+                                  {n.name}
+                                </div>
+                                <span style={{ fontSize: 8, color: '#0e7490', border: '1px solid #0e7490', borderRadius: 3, padding: '1px 4px', letterSpacing: '0.1em' }}>
+                                  TIER {n.tier}
+                                </span>
+                                <div style={{ fontSize: 9, color: '#64748b', letterSpacing: '0.06em' }}>
+                                  {n.roles.length} role{n.roles.length === 1 ? '' : 's'}<br />
+                                  0/{totalSlots} open slots
+                                </div>
+                                <div className="flex gap-1.5 mt-0.5">
+                                  <button
+                                    onClick={() => addChildGroup(n.id)}
+                                    title="Add child group"
+                                    style={{ width: 22, height: 22, fontSize: 12, lineHeight: 1, color: '#22d3ee', border: '1px solid rgba(34,211,238,0.4)', borderRadius: 3, background: 'transparent', cursor: 'pointer' }}
+                                  >+</button>
+                                  {n.parent && (
+                                    <button
+                                      onClick={() => removeGroup(n.id)}
+                                      title="Remove group"
+                                      style={{ width: 22, height: 22, fontSize: 11, lineHeight: 1, color: '#f87171', border: '1px solid rgba(248,113,113,0.4)', borderRadius: 3, background: 'transparent', cursor: 'pointer' }}
+                                    >✕</button>
+                                  )}
+                                </div>
+                                <button
+                                  onClick={() => selectGroupNode(n.id)}
+                                  style={{
+                                    marginTop: 2, width: '100%', fontSize: 9, padding: '6px 6px', letterSpacing: '0.1em', borderRadius: 3, cursor: 'pointer',
+                                    color: selectedNodeId === n.id ? '#000' : '#22d3ee',
+                                    background: selectedNodeId === n.id ? '#22d3ee' : 'transparent',
+                                    border: '1px solid #22d3ee',
+                                  }}
+                                >
+                                  VIEW SLOTS
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </React.Fragment>
+                  ))}
+                </div>
               </div>
 
               {/* Node editor — priority + commander per role */}
               <div>
-                <div className="text-xs uppercase tracking-widest text-zinc-500 mb-3">
-                  Editing — <span className="text-cyan-300">{selectedGroupNode.name}</span>
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-xs uppercase tracking-widest text-zinc-500">
+                    Editing: <span className="text-cyan-300 font-bold">{selectedGroupNode.name}</span>
+                  </span>
+                  <span style={{ fontSize: 9, color: '#0891b2', border: '1px solid rgba(8,145,178,0.4)', borderRadius: 3, padding: '2px 8px', letterSpacing: '0.15em', background: 'rgba(2,12,20,0.6)' }}>
+                    PRIORITY TIER {selectedGroupNode.tier}
+                  </span>
                 </div>
                 <div className="flex flex-col gap-3">
                   {selectedGroupNode.roles.map((r, i) => (
@@ -980,10 +1045,11 @@ const LandingPage = ({ onEnter }) => {
             </div>
           </div>
         </div>
+        </FadeSection>
 
       </main>
 
-      <footer className="text-center p-6 text-zinc-600 text-xs border-t border-zinc-900 mt-auto z-10 relative space-y-3">
+      <footer className="text-center p-6 text-zinc-600 text-xs border-t border-zinc-900 mt-auto z-10 relative space-y-3 snap-start">
         <div className="max-w-md mx-auto space-y-1.5">
           <a
             href="https://github.com/Wr3ck4ge/SpecterComs"
@@ -995,7 +1061,7 @@ const LandingPage = ({ onEnter }) => {
             github.com/Wr3ck4ge/SpecterComs
           </a>
           <p className="text-zinc-600 text-[11px] leading-relaxed">
-            A public snapshot of the app's code — client, backend, and voice encryption — kept in sync with what's actually running in production. Deployment secrets, API keys, and infra config are stripped before each export.
+Not open source — this isn't licensed for reuse or redistribution. The repo is a snapshot of the app's actual code, published for transparency so anyone can see how it's built.
           </p>
         </div>
         <p>&copy; 2026 SpecterComs. End-to-End Encrypted. Data-Broker Free.</p>
