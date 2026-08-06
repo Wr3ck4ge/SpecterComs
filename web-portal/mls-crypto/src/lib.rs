@@ -405,7 +405,11 @@ pub struct DecryptResult {
     pub plaintext: Vec<u8>,
 }
 
-fn decrypt_impl(device_state: &[u8], group_id: &[u8], ciphertext: &[u8]) -> Result<DecryptResult, String> {
+/// pub (unlike the other *_impl helpers) so a native consumer of this crate
+/// — web-portal/src-tauri's background message-sync task — can decrypt
+/// incoming channel messages directly, without a wasm-bindgen/JS boundary.
+/// See src-tauri/src/msgcache.rs.
+pub fn decrypt_impl(device_state: &[u8], group_id: &[u8], ciphertext: &[u8]) -> Result<DecryptResult, String> {
     let mut state = load_device_state(device_state)?;
     let signer = state.signer.take().ok_or("no signer in device state")?;
     let credential = state.credential.clone().ok_or("no credential in device state")?;

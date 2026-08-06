@@ -353,11 +353,11 @@ const LandingPage = ({ onEnter }) => {
 
         <FadeSection more>
         <div className="space-y-6">
-            <div className="flex justify-center -mt-[120px] -mb-[64px] sm:-mb-[80px]">
+            <div className="flex justify-center pt-2 -mb-[96px] sm:-mb-[120px]">
                 <img
-                  src="/SpecterComsBannerV2.png?v=20260805a"
+                  src="/SpecterComsBannerV2.png?v=20260805b"
                   alt="SpecterComs — Built to Connect. Engineered to Perform."
-                  className="h-[320px] sm:h-[416px] w-auto drop-shadow-[0_0_30px_rgba(6,182,212,0.5)]"
+                  className="h-[480px] sm:h-[624px] w-auto drop-shadow-[0_0_30px_rgba(6,182,212,0.5)]"
                 />
             </div>
         </div>

@@ -15,11 +15,13 @@ import {
   avatarUpload,
 } from '../controllers/userController.js';
 import { getMyTransactions } from '../controllers/billingController.js';
+import { getMyUpcomingEvents } from '../controllers/eventsController.js';
 
 const router = Router();
 
 router.get('/me',                        authenticateTokenStrict as any, getMyProfile as any);
 router.get('/me/transactions',           authenticateTokenStrict as any, getMyTransactions as any);
+router.get('/me/upcoming-events',        authenticateTokenStrict as any, getMyUpcomingEvents as any);
 router.put('/profile',                   authenticateTokenStrict as any, updateProfile as any);
 router.get('/games',                     authenticateTokenStrict as any, getMyGames as any);
 router.put('/games',                     authenticateTokenStrict as any, updateMyGames as any);

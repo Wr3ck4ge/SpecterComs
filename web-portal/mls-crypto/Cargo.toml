@@ -8,12 +8,25 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
-getrandom = { version = "0.2", features = ["js"] }
 js-sys = "0.3"
-openmls = { version = "0.8", features = ["js"] }
 openmls_rust_crypto = "0.5"
 openmls_traits = "0.5"
 openmls_basic_credential = "0.5"
 tls_codec = "0.4"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
+
+# The core *_impl logic (see lib.rs's own comment) has zero wasm-bindgen
+# dependency and is exercised natively by this crate's own #[cfg(test)]s —
+# only randomness sourcing differs by target. wasm32 needs getrandom's "js"
+# backend (and openmls's matching "js" feature) since there's no native OS
+# entropy source inside a browser/webview; a native build (e.g. web-portal's
+# Tauri src-tauri consuming this as a path dependency for background MLS
+# decrypt) uses plain OS entropy instead.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+openmls = { version = "0.8", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "0.2"
+openmls = "0.8"

@@ -33,6 +33,32 @@ const hashResetToken = (token: string): string => {
   return crypto.createHash('sha256').update(token).digest('hex');
 };
 
+// Same reasoning as hashResetToken — refresh tokens are 256 bits of
+// crypto.randomBytes entropy, so a plain SHA-256 is enough to keep the stored
+// value useless if the refresh_tokens table is ever dumped.
+const hashRefreshToken = (token: string): string => {
+  return crypto.createHash('sha256').update(token).digest('hex');
+};
+
+const ACCESS_TOKEN_TTL = '30m';
+const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+// Issues a short-lived access JWT (unchanged shape/claims from before) plus a
+// long-lived, revocable refresh token row. Called on register/login and again
+// on every successful /auth/refresh (rotation).
+async function issueTokenPair(userId: string, callsign: string): Promise<{ accessToken: string; refreshToken: string; refreshTokenId: string }> {
+  const accessToken = jwt.sign({ id: userId, callsign }, getJwtSecret(), { expiresIn: ACCESS_TOKEN_TTL });
+
+  const refreshToken = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+  const inserted = await pool.query(
+    'INSERT INTO refresh_tokens (user_id, token_hash, expires_at) VALUES ($1, $2, $3) RETURNING id',
+    [userId, hashRefreshToken(refreshToken), expiresAt]
+  );
+
+  return { accessToken, refreshToken, refreshTokenId: inserted.rows[0].id };
+}
+
 export const register = async (req: Request, res: Response) => {
   const { callsign, email, password, global_tag, hwid, timezone } = req.body as RegisterInput;
 
@@ -81,11 +107,12 @@ export const register = async (req: Request, res: Response) => {
       await client.query('COMMIT');
 
       const user = newUser.rows[0];
-      const token = jwt.sign({ id: user.id, callsign: user.callsign }, getJwtSecret(), { expiresIn: '24h' });
+      const { accessToken, refreshToken } = await issueTokenPair(user.id, user.callsign);
 
       res.status(201).json({
         message: 'User registered successfully',
-        token,
+        token: accessToken,
+        refresh_token: refreshToken,
         user: { id: user.id, callsign: user.callsign, global_tag: user.global_tag, timezone: user.timezone }
       });
     } catch (err) {
@@ -143,8 +170,8 @@ export const login = async (req: Request, res: Response) => {
       await pool.query('UPDATE users SET hwid = $1 WHERE id = $2', [hwid, user.id]);
     }
 
-    const token = jwt.sign({ id: user.id, callsign: user.callsign }, getJwtSecret(), { expiresIn: '24h' });
-    
+    const { accessToken, refreshToken } = await issueTokenPair(user.id, user.callsign);
+
     // Publish NATS event
     try {
         await publishEvent('specter.user.login', { user_id: user.id, callsign: user.callsign });
@@ -154,7 +181,8 @@ export const login = async (req: Request, res: Response) => {
 
     res.json({
       message: 'Login successful',
-      token,
+      token: accessToken,
+      refresh_token: refreshToken,
       user: {
         id: user.id,
         callsign: user.callsign,
@@ -236,5 +264,84 @@ export const resetPassword = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Reset password error:', error);
     res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// POST /auth/refresh — trades a valid refresh token for a new access token,
+// rotating the refresh token in the same call (old one revoked, replaced_by
+// set to the new row). A client should never need to prompt for a password
+// again as long as it keeps redeeming the refresh token before it goes stale.
+export const refresh = async (req: Request, res: Response) => {
+  const { refresh_token } = req.body as { refresh_token: string };
+  const tokenHash = hashRefreshToken(refresh_token);
+
+  try {
+    const result = await pool.query(
+      `SELECT rt.id, rt.user_id, rt.expires_at, rt.revoked_at, rt.replaced_by, u.callsign
+       FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id
+       WHERE rt.token_hash = $1`,
+      [tokenHash]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ message: 'Invalid refresh token' });
+    }
+
+    const row = result.rows[0];
+
+    // A revoked-and-rotated token being redeemed again means either two
+    // clients raced on the same rotation (harmless) or the token leaked and
+    // both the legitimate holder and an attacker are using it (not harmless).
+    // Can't distinguish those cases from a single presentation, so treat it as
+    // theft: kill every refresh token this user has, forcing a real re-login
+    // everywhere rather than silently trusting a token that's already been
+    // superseded once.
+    if (row.revoked_at) {
+      if (row.replaced_by) {
+        await pool.query(
+          'UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL',
+          [row.user_id]
+        );
+      }
+      return res.status(401).json({ message: 'Refresh token has already been used' });
+    }
+
+    if (new Date(row.expires_at) < new Date()) {
+      return res.status(401).json({ message: 'Refresh token expired' });
+    }
+
+    const { accessToken, refreshToken, refreshTokenId } = await issueTokenPair(row.user_id, row.callsign);
+
+    // Mark the presented token as rotated away, chained to the new row.
+    await pool.query(
+      'UPDATE refresh_tokens SET revoked_at = NOW(), replaced_by = $1 WHERE id = $2',
+      [refreshTokenId, row.id]
+    );
+
+    res.json({ token: accessToken, refresh_token: refreshToken });
+  } catch (error) {
+    console.error('Refresh token error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// POST /auth/logout — revokes one refresh token (the device logging out).
+// Best-effort from the client's perspective (logout proceeds locally either
+// way), but this is what actually invalidates the long-lived credential
+// instead of just discarding the client's local copy of it.
+export const logout = async (req: Request, res: Response) => {
+  const { refresh_token } = req.body as { refresh_token?: string };
+  if (!refresh_token) return res.json({ message: 'Logged out' });
+
+  try {
+    await pool.query(
+      'UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 AND revoked_at IS NULL',
+      [hashRefreshToken(refresh_token)]
+    );
+    res.json({ message: 'Logged out' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    // Still succeed — the client clears its local session regardless.
+    res.json({ message: 'Logged out' });
   }
 };

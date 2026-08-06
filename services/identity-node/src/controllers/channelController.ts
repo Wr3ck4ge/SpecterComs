@@ -282,6 +282,14 @@ export const pingChannelPresence = async (req: AuthRequest, res: Response) => {
     const occupants = Array.from(channelPresence.get(channelId)?.values() ?? []);
     res.json({ ok: true, occupants });
   } catch (err: any) {
+    // 23503 = foreign_key_violation. In practice this means channelId belongs
+    // to a channel that's since been deleted (client still had a stale ref
+    // from a session that predates the delete) — a client-fixable 404, not a
+    // server fault. Logging it at full error severity every 20s forever (this
+    // is a presence heartbeat) was also just log spam for an expected case.
+    if (err?.code === '23503') {
+      return res.status(404).json({ message: 'Channel not found' });
+    }
     console.error('Error pinging channel presence:', err);
     res.status(500).json({ message: 'Server error' });
   }

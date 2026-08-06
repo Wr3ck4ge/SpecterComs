@@ -10,6 +10,7 @@ import OrgSettings from './OrgSettings';
 import OperationPlanner, { GroupPlanner } from './OperationPlanner';
 import ShipEditor from './ShipEditor';
 import ServerHome from './ServerHome';
+import OpsCalendarPanel from './OpsCalendarPanel';
 import useEventStream from '../useEventStream';
 import useMonitorChannel from '../useMonitorChannel';
 import UserProfileModal from './UserProfileModal';
@@ -642,473 +643,6 @@ function DmCabinet({ friend, onBack, currentUserId }) {
   );
 }
 
-// ── Operation Calendar ───────────────────────────────────────────────────────
-
-const MONTH_NAMES = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-const DAY_NAMES   = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
-
-// ── Event history: ended operations grouped by month, attendance on expand ──
-function EventHistoryPanel({ orgId }) {
-  const [history, setHistory] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [expandedId, setExpandedId] = useState(null);
-  const [attendanceById, setAttendanceById] = useState({});
-  const [attendanceLoading, setAttendanceLoading] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.getOrgEventHistory(orgId).then(({ data }) => {
-      if (!cancelled) { setHistory(data?.events || []); setLoading(false); }
-    });
-    return () => { cancelled = true; };
-  }, [orgId]);
-
-  const toggleExpand = async (ev) => {
-    if (expandedId === ev.id) { setExpandedId(null); return; }
-    setExpandedId(ev.id);
-    if (attendanceById[ev.id]) return;
-    setAttendanceLoading(true);
-    const { data } = await api.getEventGroups(orgId, ev.id);
-    setAttendanceLoading(false);
-    setAttendanceById(prev => ({ ...prev, [ev.id]: data?.groups || [] }));
-  };
-
-  if (loading) return <div className="text-xs text-white/30 italic py-2">Loading history…</div>;
-  if (!history || history.length === 0) return <div className="text-xs text-white/30 italic py-2">No completed operations yet</div>;
-
-  // Group by month, most recent month first (history is already ended_at DESC).
-  const months = [];
-  const byMonth = {};
-  for (const ev of history) {
-    const d = new Date(ev.ended_at);
-    const key = `${d.getFullYear()}-${d.getMonth()}`;
-    if (!byMonth[key]) { byMonth[key] = { label: `${MONTH_NAMES[d.getMonth()]} ${d.getFullYear()}`, items: [] }; months.push(key); }
-    byMonth[key].items.push(ev);
-  }
-
-  return (
-    <div className="flex flex-col gap-3">
-      {months.map(key => (
-        <div key={key}>
-          <div className="text-[11px] text-cyan-600 tracking-[0.3em] uppercase mb-1">{byMonth[key].label}</div>
-          <div className="flex flex-col gap-1">
-            {byMonth[key].items.map(ev => {
-              const attendance = attendanceById[ev.id];
-              const isExpanded = expandedId === ev.id;
-              const attendeeCount = Number(ev.attendee_count) || 0;
-              return (
-                <div key={ev.id} className="glass-card">
-                  <div
-                    className="flex items-center gap-2.5 py-2 px-2 cursor-pointer"
-                    onClick={() => toggleExpand(ev)}
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-bold text-white/80 truncate">{ev.name}</div>
-                      <div className="text-[11px] text-cyan-600">
-                        {new Date(ev.ended_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                        {' · '}{attendeeCount} attended
-                      </div>
-                    </div>
-                    <span className="text-[11px] text-white/40">{isExpanded ? '▲' : '▼'}</span>
-                  </div>
-                  {isExpanded && (
-                    <div style={{ borderTop: '1px solid #0e2233', padding: '8px 10px' }}>
-                      {attendanceLoading && !attendance && (
-                        <div className="text-[11px] text-white/30 italic">Loading attendance…</div>
-                      )}
-                      {attendance && attendance.every(g => (g.members || []).length === 0) && (
-                        <div className="text-[11px] text-white/30 italic">No attendance recorded</div>
-                      )}
-                      {attendance?.map(g => {
-                        const accepted = (g.members || []).filter(m => m.status === 'accepted');
-                        if (accepted.length === 0) return null;
-                        return (
-                          <div key={g.id} className="mb-1.5 last:mb-0">
-                            <div className="text-[10px] text-cyan-600 tracking-[0.2em] uppercase">{g.name}</div>
-                            <div className="flex flex-wrap gap-1 mt-1">
-                              {accepted.map(m => (
-                                <span key={m.user_id} className="text-[11px] text-white/70 rounded px-1.5 py-0.5" style={{ background: 'rgba(8,145,178,0.12)', border: '1px solid rgba(8,145,178,0.3)' }}>
-                                  {m.callsign}{m.role ? ` — ${m.role}` : ''}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Connection quality indicator — Discord-style signal bars, driven by
-// CommLink's rolling drop/reconnect count over the last 60s (see
-// recomputeConnectionQuality in CommLink.jsx). Purely a visibility aid: it
-// doesn't change any behavior itself, but turns "is my connection actually
-// flaky right now" into something visible at a glance, for the user and for
-// anyone helping them debug a report of choppy audio/video, instead of a
-// question that requires pulling server logs.
-const CONNECTION_QUALITY_META = {
-  excellent: { bars: 4, color: '#22c55e', label: 'Excellent connection' },
-  good:      { bars: 3, color: '#22c55e', label: 'Good connection — one recent drop' },
-  fair:      { bars: 2, color: '#eab308', label: 'Fair connection — a few recent drops' },
-  poor:      { bars: 1, color: '#ef4444', label: 'Poor connection — reconnecting frequently' },
-};
-
-function ConnectionQualityBars({ quality }) {
-  const meta = CONNECTION_QUALITY_META[quality] || CONNECTION_QUALITY_META.excellent;
-  return (
-    <div
-      title={meta.label}
-      style={{ display: 'flex', alignItems: 'flex-end', gap: 1.5, height: 10, cursor: 'default' }}
-    >
-      {[0, 1, 2, 3].map(i => (
-        <div
-          key={i}
-          style={{
-            width: 3,
-            height: 3 + i * 2.3,
-            borderRadius: 1,
-            background: i < meta.bars ? meta.color : '#1e3a5f',
-            transition: 'background 0.3s',
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-// ── Active Operations banner: events starting within 24h, plus anything
-// currently live/launched — click a card to open the signup modal. Slot
-// availability itself is enforced inside EventGroupCompModal (JOIN/FULL per
-// role), so this just needs to surface the right set of cards.
-function ActiveOperationsBanner({ events, onEventClick }) {
-  const now = new Date();
-  const in24h = new Date(now.getTime() + 24 * 3600 * 1000);
-
-  const cards = events
-    .filter(ev => {
-      const start = new Date(ev.start_time);
-      const end = ev.end_time ? new Date(ev.end_time) : null;
-      const isLive = start <= now && (!end || end >= now);
-      const startingSoon = start > now && start <= in24h;
-      return ev.launched || isLive || startingSoon;
-    })
-    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-
-  if (cards.length === 0) return null;
-
-  return (
-    <div style={{ ...GLASS_PANEL, borderRadius: 8, margin: '0 20px 12px', padding: '10px 14px', flexShrink: 0, position: 'relative', zIndex: 2 }}>
-      <div style={{ fontSize: 10, color: '#0e7490', letterSpacing: '0.3em', marginBottom: 8 }}>ACTIVE OPERATIONS</div>
-      <div className="flex gap-2 overflow-x-auto">
-        {cards.map(ev => {
-          const start = new Date(ev.start_time);
-          const end = ev.end_time ? new Date(ev.end_time) : null;
-          const isLive = start <= now && (!end || end >= now);
-          const hasSlots = Number(ev.total_slots) > 0;
-          const slotsOpen = hasSlots && Number(ev.filled_slots) < Number(ev.total_slots);
-          return (
-            <button
-              key={ev.id}
-              onClick={() => onEventClick?.(ev)}
-              className="text-left flex-shrink-0 transition-colors glass-card"
-              style={{ minWidth: 190, padding: '8px 10px', cursor: 'pointer' }}
-            >
-              <div className="flex items-center gap-1.5 mb-1">
-                {(ev.launched || isLive) && (
-                  <span className="text-[10px] rounded px-1 py-0.5 tracking-widest animate-pulse badge-live">LIVE</span>
-                )}
-                {!ev.launched && !isLive && (
-                  <span style={{ fontSize: 10, color: '#0e7490', letterSpacing: '0.15em' }}>
-                    {start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </span>
-                )}
-              </div>
-              <div className="text-xs font-bold text-white/85 truncate">{ev.name}</div>
-              {hasSlots && (
-                <div className="text-[11px] mt-0.5" style={{ color: slotsOpen ? '#4ade80' : '#94a3b8' }}>
-                  {ev.filled_slots}/{ev.total_slots} slots{slotsOpen ? ' — OPEN' : ''}
-                </div>
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function OperationCalendar({ events, orgId, onEventClick, onSchedule, onLaunchEvent, canScheduleEvents, canLaunchEvent }) {
-  const now = new Date();
-  const [view, setView] = useState({ year: now.getFullYear(), month: now.getMonth() });
-  const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState('calendar'); // 'calendar' | 'history'
-
-  const firstWeekday = new Date(view.year, view.month, 1).getDay();
-  const daysInMonth  = new Date(view.year, view.month + 1, 0).getDate();
-
-  const eventsOnDay = (day) =>
-    events.filter(e => {
-      const d = new Date(e.start_time);
-      return d.getDate() === day && d.getMonth() === view.month && d.getFullYear() === view.year;
-    });
-
-  const isToday  = (d) => d === now.getDate() && view.month === now.getMonth() && view.year === now.getFullYear();
-
-  const hasActiveOp = (day) =>
-    events.some(e => {
-      const target = new Date(view.year, view.month, day, 12);
-      return new Date(e.start_time) <= target && (!e.end_time || new Date(e.end_time) >= target);
-    });
-
-  const prevMonth = () => {
-    const d = new Date(view.year, view.month - 1, 1);
-    setView({ year: d.getFullYear(), month: d.getMonth() });
-  };
-  const nextMonth = () => {
-    const d = new Date(view.year, view.month + 1, 1);
-    setView({ year: d.getFullYear(), month: d.getMonth() });
-  };
-
-  const cells = [...Array(firstWeekday).fill(null), ...Array.from({ length: daysInMonth }, (_, i) => i + 1)];
-
-  const upcoming = events
-    .filter(e => !e.end_time || new Date(e.end_time) > now)
-    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
-
-  return (
-    <div className="flex flex-col gap-2">
-      {/* Always-visible header strip */}
-      <div className="flex items-center gap-2">
-        <button onClick={prevMonth} className="text-white/40 hover:text-white text-sm px-1 transition-colors">◀</button>
-        <span className="text-cyan-400 text-xs font-bold tracking-[0.25em]">
-          {MONTH_NAMES[view.month]} {view.year}
-        </span>
-        <button onClick={nextMonth} className="text-white/40 hover:text-white text-sm px-1 transition-colors">▶</button>
-        <div style={{ flex: 1 }} />
-        {canScheduleEvents && onSchedule && (
-          <button
-            onClick={onSchedule}
-            className="btn-tactical btn-tactical--primary"
-            style={{ fontSize: 13, borderRadius: 4, padding: '1px 8px', letterSpacing: '0.15em', cursor: 'pointer' }}
-          >
-            + SCHEDULE OP
-          </button>
-        )}
-        {upcoming.length > 0 && (
-          <span style={{ fontSize: 13, color: '#0e7490', border: '1px solid #0e7490', borderRadius: 3, padding: '1px 6px', letterSpacing: '0.15em' }}>
-            {upcoming.length} OP{upcoming.length !== 1 ? 'S' : ''}
-          </span>
-        )}
-        <button
-          onClick={() => setOpen(o => !o)}
-          className="hover:text-white transition-colors"
-          style={{ fontSize: 13, color: open ? '#22d3ee' : '#cbd5e1', letterSpacing: '0.15em' }}
-        >
-          {open ? '▲ FOLD' : '▼ OPEN'}
-        </button>
-      </div>
-
-      {/* Compact preview — shown when collapsed */}
-      {!open && (
-        <div className="flex flex-col gap-0.5">
-          {upcoming.length === 0 && (
-            <div className="text-xs text-white/30 italic py-1">No operations scheduled</div>
-          )}
-          {upcoming.slice(0, 3).map(ev => {
-            const start = new Date(ev.start_time);
-            const end   = ev.end_time ? new Date(ev.end_time) : null;
-            const live  = start <= now && (!end || end >= now);
-            const hasSlots = Number(ev.total_slots) > 0;
-            return (
-              <div
-                key={ev.id}
-                className={`flex items-center gap-2 py-1.5 px-2 cursor-pointer transition-colors glass-card ${live ? 'glass-card--active' : ''}`}
-                onClick={() => onEventClick?.(ev)}
-              >
-                <div className="w-0.5 self-stretch rounded-full flex-shrink-0"
-                  style={{ background: live ? '#06b6d4' : '#1d4a5a', boxShadow: live ? '0 0 6px #06b6d4' : 'none', minHeight: 20 }} />
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold text-white/70 truncate">{ev.name}</div>
-                  <div className="text-[11px] text-cyan-600">
-                    {start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                    {' · '}
-                    {start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  </div>
-                  {hasSlots && (
-                    <div className="text-[11px] text-white/30 mt-0.5">
-                      {ev.filled_slots}/{ev.total_slots} slots filled
-                    </div>
-                  )}
-                </div>
-                {ev.launched && (
-                  <span className="text-[11px] text-green-400 border border-green-700/50 rounded px-1 py-0.5 tracking-widest flex-shrink-0">LAUNCHED</span>
-                )}
-                {live && !ev.launched && (
-                  <span className="text-[11px] rounded px-1 py-0.5 tracking-widest animate-pulse flex-shrink-0 badge-live">LIVE</span>
-                )}
-              </div>
-            );
-          })}
-          {upcoming.length > 3 && (
-            <button onClick={() => setOpen(true)} className="text-[11px] text-white/40 hover:text-cyan-500 transition-colors text-left mt-0.5">
-              +{upcoming.length - 3} more — expand calendar
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Expanded: tab switch + calendar/history content */}
-      {open && (
-        <>
-          <div className="flex items-center gap-3 border-b border-white/10 pb-1">
-            {[['calendar', 'CALENDAR'], ['history', 'HISTORY']].map(([val, label]) => (
-              <button
-                key={val}
-                onClick={() => setTab(val)}
-                style={{
-                  fontSize: 11, letterSpacing: '0.2em', paddingBottom: 4, background: 'none', border: 'none', cursor: 'pointer',
-                  color: tab === val ? '#22d3ee' : '#64748b',
-                  borderBottom: tab === val ? '2px solid #22d3ee' : '2px solid transparent',
-                }}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-
-      {open && tab === 'history' && <EventHistoryPanel orgId={orgId} />}
-
-      {/* Expanded: full month grid + ops list */}
-      {open && tab === 'calendar' && (
-        <>
-          <div className="grid grid-cols-7 gap-px">
-            {DAY_NAMES.map(d => (
-              <div key={d} className="text-[11px] text-white/40 text-center tracking-widest py-0.5">{d}</div>
-            ))}
-            {cells.map((day, i) =>
-              day === null ? (
-                <div key={`pad-${i}`} />
-              ) : (
-                <div
-                  key={day}
-                  className="flex flex-col rounded-sm text-xs relative transition-colors"
-                  style={{
-                    minHeight: 44,
-                    padding: '3px 4px',
-                    background: isToday(day) ? '#0c3a4a' : hasActiveOp(day) ? '#071e28' : 'transparent',
-                    border: `1px solid ${isToday(day) ? '#0891b2' : hasActiveOp(day) ? '#0e3a50' : 'transparent'}`,
-                  }}
-                >
-                  <span className="self-end text-[11px] leading-none mb-1" style={{ color: isToday(day) ? '#67e8f9' : hasActiveOp(day) ? '#22d3ee' : '#9ca3af' }}>
-                    {day}
-                  </span>
-                  {eventsOnDay(day).map(ev => {
-                    const t = new Date(ev.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    const live = new Date(ev.start_time) <= now && (!ev.end_time || new Date(ev.end_time) >= now);
-                    return (
-                      <button
-                        key={ev.id}
-                        onClick={() => onEventClick?.(ev)}
-                        title={`${ev.name} — ${t}`}
-                        className="w-full text-left rounded px-1 py-0.5 mb-0.5 truncate transition-colors hover:bg-cyan-900/40"
-                        style={{
-                          fontSize: 10,
-                          background: live ? '#06b6d422' : '#0a1e2a',
-                          border: `1px solid ${live ? '#06b6d466' : '#0e3a50'}`,
-                          color: live ? '#67e8f9' : '#7dd3fc',
-                          lineHeight: 1.3,
-                        }}
-                      >
-                        <span className="opacity-60 mr-0.5">{t}</span>
-                        {ev.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              )
-            )}
-          </div>
-
-          <div className="flex flex-col gap-1 mt-2">
-            <div className="text-[11px] text-cyan-600 tracking-[0.3em] uppercase mb-1">Scheduled Operations</div>
-            {upcoming.length === 0 && (
-              <div className="text-xs text-white/30 py-2 italic">No operations scheduled</div>
-            )}
-            {upcoming.map(ev => {
-              const start = new Date(ev.start_time);
-              const end   = ev.end_time ? new Date(ev.end_time) : null;
-              const live  = start <= now && (!end || end >= now);
-              const hasSlots = Number(ev.total_slots) > 0;
-              return (
-                <div
-                  key={ev.id}
-                  className={`flex items-start gap-2.5 py-2 px-2 transition-colors glass-card ${live ? 'glass-card--active' : ''}`}
-                >
-                  <div
-                    className="w-0.5 self-stretch rounded-full flex-shrink-0 mt-0.5 cursor-pointer"
-                    style={{
-                      background: live ? '#06b6d4' : '#374151',
-                      boxShadow: live ? '0 0 6px #06b6d4' : 'none',
-                      minHeight: 28,
-                    }}
-                    onClick={() => onEventClick?.(ev)}
-                  />
-                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => onEventClick?.(ev)}>
-                    <div className="text-xs font-bold text-white/80 truncate">{ev.name}</div>
-                    <div className="text-[11px] text-cyan-600">
-                      {start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                      {' · '}
-                      {start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      {end && <>{' — '}{end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</>}
-                    </div>
-                    {hasSlots && (
-                      <div className="text-[11px] mt-0.5" style={{ color: ev.filled_slots >= ev.total_slots ? '#f59e0b' : '#0e7490' }}>
-                        {ev.filled_slots}/{ev.total_slots} slots
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                    {ev.launched && (
-                      <span className="text-[11px] text-green-400 border border-green-700/50 rounded px-1 py-0.5 tracking-widest">
-                        LAUNCHED
-                      </span>
-                    )}
-                    {live && !ev.launched && (
-                      <span className="text-[11px] rounded px-1 py-0.5 tracking-widest animate-pulse badge-live">
-                        LIVE
-                      </span>
-                    )}
-                    {canLaunchEvent?.(ev) && !ev.launched && onLaunchEvent && (
-                      <button
-                        onClick={e => { e.stopPropagation(); onLaunchEvent(ev); }}
-                        className="text-[11px] tracking-widest rounded px-1.5 py-0.5 transition-colors btn-tactical"
-                        style={{ cursor: 'pointer' }}
-                      >
-                        ⚡ LAUNCH
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 function EventGroupCompModal({ org, event, user, members, canEditEvent, canLaunchEvent, onLaunchEvent, onClose, onOpenEdit, onEventUpdated }) {
   const isOpenAccess = (event?.access_mode || 'open') === 'open';
 
@@ -1319,6 +853,7 @@ function TextChat({ orgId, channel, user }) {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState(null);
   const [expandedImg, setExpandedImg] = useState(null);
   const [reportModal, setReportModal] = useState(null); // { msg }
   const endRef = useRef(null);
@@ -1440,17 +975,32 @@ function TextChat({ orgId, channel, user }) {
     const text = input.trim();
     if (!text || !orgId || !channel?.id) return;
     setInput('');
+    setSendError(null);
     setSending(true);
     try {
       await ensureChannelGroup(api, user?.id, orgId, channel.id);
       const ciphertext = await encryptChannel(api, user?.id, channel.id, text);
       notePendingSent(channel.id, text);
-      await api.sendMessage(orgId, channel.id, ciphertext);
-    } catch {
-      // Sender receives own message back via SSE relay; silent failure is acceptable
+      const { error: sendApiError } = await api.sendMessage(orgId, channel.id, ciphertext);
+      // api.js never throws on a failed request — it always resolves to
+      // {data, error} (see fetchWithAuth) — so a failed send (expired token,
+      // network drop, etc.) would fall through here silently unless checked
+      // explicitly. Promote it to a thrown error so the catch block below
+      // restores the input and surfaces it, same as a thrown MLS error.
+      if (sendApiError) throw new Error(sendApiError);
+      // Optimistic message arrives back via SSE message_relay
+    } catch (err) {
+      // A failure here (thrown MLS error from ensureChannelGroup/encryptChannel,
+      // e.g. an epoch conflict from another client committing to the group at
+      // the same time, or the promoted api error above) means api.sendMessage
+      // never ran — there's nothing for the SSE relay to echo back, so the
+      // message would otherwise vanish with zero feedback. Restore the text
+      // so nothing typed is lost, and surface the failure.
+      console.error('[TextChat] send failed:', err);
+      setInput(text);
+      setSendError(err?.message || 'Message failed to send — try again.');
     }
     setSending(false);
-    // Optimistic message arrives back via SSE message_relay
   };
 
   const resolveImageUrl = (url) => {
@@ -1577,6 +1127,11 @@ function TextChat({ orgId, channel, user }) {
       )}
 
       {/* Input */}
+      {sendError && (
+        <div style={{ padding: '4px 16px', fontSize: 11, color: '#f87171', background: '#1a0505', borderTop: '1px solid #3b0a0a' }}>
+          {sendError}
+        </div>
+      )}
       <form
         onSubmit={handleSend}
         className="flex gap-2 px-4 py-2 flex-shrink-0 items-center"
@@ -1584,7 +1139,7 @@ function TextChat({ orgId, channel, user }) {
       >
         <input
           value={input}
-          onChange={e => setInput(e.target.value)}
+          onChange={e => { setInput(e.target.value); if (sendError) setSendError(null); }}
           placeholder={`Message #${channel.name}`}
           maxLength={4000}
           style={{
@@ -1949,6 +1504,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
   // Ref for CommLink's text chat relay (used only when CommLink renders a text channel)
   const commLinkRelayRef = useRef(null);
   const [calendarOpen,       setCalendarOpen]       = useState(false);
+  const [opsListOpen,        setOpsListOpen]        = useState(false);
   const [serverPickerOpen,   setServerPickerOpen]   = useState(false);
   const [orgBilling,         setOrgBilling]         = useState(null);
   const [billingPanelOpen,   setBillingPanelOpen]   = useState(false);
@@ -4143,7 +3699,13 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
             </div>
           )}
 
-          {/* Op header bar */}
+          {/* Op header bar — also the anchor for the Operations/Calendar toggle
+              dropdowns below, so neither one permanently eats a row of
+              vertical space when there's nothing urgent in it. */}
+          {(() => {
+            const opsCards = selectedOrg ? getActiveOpsCards(events) : [];
+            const upcomingCount = events.filter(e => !e.end_time || new Date(e.end_time) > new Date()).length;
+            return (
           <div
             className="flex items-center justify-between px-5 py-3 flex-shrink-0"
             style={{ ...GLASS_PANEL, position: 'relative', zIndex: 2 }}
@@ -4180,6 +3742,46 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
                 <span style={{ fontSize: 13, color: '#0891b2', letterSpacing: '0.15em' }}>
                   # {activeChannel.name}
                 </span>
+              )}
+              {/* Active Operations toggle — was its own always-visible banner row */}
+              {selectedOrg && opsCards.length > 0 && (
+                <button
+                  onClick={() => { setOpsListOpen(o => !o); setCalendarOpen(false); }}
+                  className="flex items-center gap-1.5"
+                  style={{
+                    fontSize: 13, padding: '3px 10px', borderRadius: 3,
+                    letterSpacing: '0.15em', cursor: 'pointer', transition: 'all 0.2s',
+                    background: opsListOpen ? '#0c1a2a' : '#0a1520',
+                    border: `1px solid ${opsListOpen ? '#22d3ee' : '#0e7490'}`,
+                    color: opsListOpen ? '#22d3ee' : '#0e7490',
+                  }}
+                >
+                  OPERATIONS
+                  <span style={{ fontSize: 10, border: '1px solid currentColor', borderRadius: 3, padding: '0 5px' }}>
+                    {opsCards.length}
+                  </span>
+                </button>
+              )}
+              {/* Calendar toggle — was its own full-width tab bar further down */}
+              {selectedOrg && !watchTarget && (
+                <button
+                  onClick={() => { setCalendarOpen(o => !o); setOpsListOpen(false); }}
+                  className="flex items-center gap-1.5"
+                  style={{
+                    fontSize: 13, padding: '3px 10px', borderRadius: 3,
+                    letterSpacing: '0.15em', cursor: 'pointer', transition: 'all 0.2s',
+                    background: calendarOpen ? '#0c1a2a' : '#0a1520',
+                    border: `1px solid ${calendarOpen ? '#22d3ee' : '#0e7490'}`,
+                    color: calendarOpen ? '#22d3ee' : '#0e7490',
+                  }}
+                >
+                  CALENDAR
+                  {upcomingCount > 0 && (
+                    <span style={{ fontSize: 10, border: '1px solid currentColor', borderRadius: 3, padding: '0 5px' }}>
+                      {upcomingCount}
+                    </span>
+                  )}
+                </button>
               )}
               {/* CA-3d: Overlay button visible whenever we're in the Tauri app (no activeChannel gate).
                   Previously required activeChannel, but overlay is useful as soon as WarRoom is open. */}
@@ -4231,10 +3833,36 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
                 </button>
               )}
             </div>
-          </div>
 
-          {selectedOrg && (
-            <ActiveOperationsBanner events={events} onEventClick={handleOpenEventComp} />
+            {/* Active Operations dropdown — anchored to this header (position: relative above) */}
+            {selectedOrg && opsListOpen && opsCards.length > 0 && (
+              <ActiveOperationsDropdown
+                cards={opsCards}
+                onEventClick={(ev) => { handleOpenEventComp(ev); setOpsListOpen(false); }}
+              />
+            )}
+
+          </div>
+            );
+          })()}
+
+          {/* Full ops calendar — pushed inline below the header (normal document
+              flow) instead of floating over the body, so opening it never covers
+              (or gets covered by) the rest of the WarRoom content. Same panel
+              ServerHome.jsx shows on the server landing page, not the old
+              cramped/collapsed dropdown variant. */}
+          {selectedOrg && calendarOpen && !watchTarget && (
+            <div className="overflow-y-auto flex-shrink-0" style={{ maxHeight: '60vh', padding: '16px 20px', borderBottom: '1px solid rgba(8,145,178,0.35)' }}>
+              <OpsCalendarPanel
+                events={events}
+                orgId={selectedOrg?.id}
+                canScheduleEvents={canScheduleEvents}
+                onSchedule={canScheduleEvents ? () => { setPlannerEvent('create'); setCalendarOpen(false); } : null}
+                onOpenEvent={handleOpenEventComp}
+                onLaunchEvent={handleLaunchFromCard}
+                canLaunchEvent={canLaunchEvent}
+              />
+            </div>
           )}
 
           {/* Body: comms / text chat / calendar */}
@@ -4335,55 +3963,8 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
                 );
               })()}
 
-              {/* Calendar header tab — hidden while actively watching a shared stream so it
-                  doesn't float above (and its dropdown doesn't nearly cover) CommLink's
-                  full-bleed video panel underneath. */}
-              {selectedOrg && !watchTarget && (
-                <button
-                  onClick={() => setCalendarOpen(o => !o)}
-                  className="flex items-center gap-2 px-4 py-1.5 flex-shrink-0 transition-colors hover:bg-white/5"
-                  style={{
-                    borderBottom: '1px solid #0e2233',
-                    background: calendarOpen ? '#0c1a2a' : '#040c17',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <span style={{ fontSize: 13, color: calendarOpen ? '#22d3ee' : '#0e7490', letterSpacing: '0.25em' }}>
-                    {calendarOpen ? '▲' : '▼'} OPERATIONS CALENDAR
-                  </span>
-                  <div style={{ flex: 1 }} />
-                  {events.filter(e => !e.end_time || new Date(e.end_time) > new Date()).length > 0 && (
-                    <span style={{ fontSize: 10, color: '#0e7490', border: '1px solid #0e7490', borderRadius: 3, padding: '0 5px', letterSpacing: '0.1em' }}>
-                      {events.filter(e => !e.end_time || new Date(e.end_time) > new Date()).length} OPS
-                    </span>
-                  )}
-                </button>
-              )}
-
-              {/* Calendar dropdown overlay — opens over channel content */}
-              {selectedOrg && calendarOpen && !watchTarget && (
-                <div
-                  className="absolute left-0 right-0 z-20 overflow-y-auto depth-floating"
-                  style={{
-                    top: 30, /* below the tab header */
-                    maxHeight: 'calc(100% - 30px)',
-                    background: '#040c17',
-                    borderBottom: '2px solid #0891b2',
-                    boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-                    padding: '16px 20px',
-                  }}
-                >
-                  <OperationCalendar
-                    events={events}
-                    orgId={selectedOrg?.id}
-                    onEventClick={handleOpenEventComp}
-                    onSchedule={canScheduleEvents ? () => { setPlannerEvent('create'); setCalendarOpen(false); } : null}
-                    onLaunchEvent={handleLaunchFromCard}
-                    canScheduleEvents={canScheduleEvents}
-                    canLaunchEvent={canLaunchEvent}
-                  />
-                </div>
-              )}
+              {/* Calendar toggle + dropdown now live in the Op header bar above (merged
+                  in per user request) instead of their own tab bar here. */}
 
               {/* Channel content */}
               {/* Text chat — shown when a text channel is selected (voice stays connected in background) */}
@@ -4442,16 +4023,16 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
                 ) : (
                   /* Default: no channel selected, not on server home — full calendar */
                   <div className="flex-1 overflow-y-auto" style={{ padding: '16px 20px' }}>
-                  <OperationCalendar
-                    events={events}
-                    orgId={selectedOrg?.id}
-                    onEventClick={handleOpenEventComp}
-                    onSchedule={() => setPlannerEvent('create')}
-                    onLaunchEvent={handleLaunchFromCard}
-                    canScheduleEvents={canScheduleEvents}
-                    canLaunchEvent={canLaunchEvent}
-                  />
-                </div>
+                    <OpsCalendarPanel
+                      events={events}
+                      orgId={selectedOrg?.id}
+                      canScheduleEvents={canScheduleEvents}
+                      onSchedule={() => setPlannerEvent('create')}
+                      onOpenEvent={handleOpenEventComp}
+                      onLaunchEvent={handleLaunchFromCard}
+                      canLaunchEvent={canLaunchEvent}
+                    />
+                  </div>
                 )
               ) : null}
             </div>
@@ -4477,7 +4058,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
         <button
           onClick={() => setShowSettings(true)}
           className="hover:text-cyan-300 transition-colors"
-          style={{ fontSize: 14, color: '#0e7490', cursor: 'pointer', lineHeight: 1 }}
+          style={{ fontSize: 20, color: '#22d3ee', cursor: 'pointer', lineHeight: 1, padding: '0 2px' }}
           title="Settings"
         >
           ⚙
@@ -4711,7 +4292,6 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
         ))}
       </div>
     )}
-    <style>{`@keyframes notif-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }`}</style>
     </>
   );
 }

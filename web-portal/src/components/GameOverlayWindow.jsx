@@ -796,36 +796,46 @@ export default function GameOverlayWindow() {
         </div>
       )}
 
-      {/* ── Stream preview (480 × 270 — 16:9) ── */}
-      {data.watchTarget && (
-        <div
-          style={{
-            ...pill,
-            borderTop: 'none',
-            borderRadius: '0 0 6px 6px',
-            overflow: 'hidden',
-            position: 'relative',
-            width: Math.round(OVERLAY_W * scale),
-            height: Math.round(STREAM_H * scale),
-            flexShrink: 0,
-          }}
-        >
-          {/* Stream preview — always decoded via VideoDecoder (self + remote same path) */}
-          <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-            <canvas
-              ref={remoteCanvasRef}
-              style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
-            />
-            {videoStatus && (
-              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <span style={{ fontSize: 9, color: '#f87171', letterSpacing: '0.1em', textAlign: 'center', lineHeight: 1.4 }}>
-                  {videoStatus}
-                </span>
-              </div>
-            )}
-          </div>
+      {/* ── Stream preview (480 × 270 — 16:9) ──
+          Always mounted (never conditionally rendered on data.watchTarget) so
+          remoteCanvasRef stays live. Self-view NAL frames start flowing as soon
+          as capture_start fires on the main window, which can arrive before the
+          overlay-stream-select round trip lands and updates data.watchTarget —
+          if the canvas weren't mounted yet, the decoder would decode straight
+          into a null ref and silently drop the frame (black screen despite a
+          real keyframe having been captured/encoded). Visibility is toggled
+          with display/size instead so no frame is ever draw-dropped. */}
+      <div
+        style={{
+          ...pill,
+          borderTop: 'none',
+          borderRadius: '0 0 6px 6px',
+          overflow: 'hidden',
+          position: 'relative',
+          width: data.watchTarget ? Math.round(OVERLAY_W * scale) : 0,
+          height: data.watchTarget ? Math.round(STREAM_H * scale) : 0,
+          border: data.watchTarget ? pill.border : 'none',
+          boxShadow: data.watchTarget ? pill.boxShadow : 'none',
+          flexShrink: 0,
+        }}
+      >
+        {/* Stream preview — always decoded via VideoDecoder (self + remote same path) */}
+        <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+          <canvas
+            ref={remoteCanvasRef}
+            style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain' }}
+          />
+          {videoStatus && (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <span style={{ fontSize: 9, color: '#f87171', letterSpacing: '0.1em', textAlign: 'center', lineHeight: 1.4 }}>
+                {videoStatus}
+              </span>
+            </div>
+          )}
+        </div>
 
-          {/* Stop-watching button (bottom-right corner of preview) */}
+        {/* Stop-watching button (bottom-right corner of preview) */}
+        {data.watchTarget && (
           <button
             onClick={() => { handleStreamSelect(null); setShowPicker(false); }}
             style={{
@@ -847,8 +857,8 @@ export default function GameOverlayWindow() {
           >
             ✕ STOP
           </button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

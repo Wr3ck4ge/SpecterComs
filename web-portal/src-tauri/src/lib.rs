@@ -1,7 +1,11 @@
+mod background_sync;
 mod capture;
+mod msgcache;
 
 use tauri::{Emitter, Manager, WebviewWindowBuilder};
 use tauri::WebviewWindow;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 use aes_gcm::{Aes256Gcm, Key, Nonce, aead::{Aead, KeyInit}};
 use rand::RngCore;
 
@@ -92,6 +96,129 @@ fn build_overlay(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
     .map_err(|e| format!("Failed to build overlay: {}", e))?;
     write_setup_error("[overlay] build_overlay: webview window built");
     Ok(win)
+}
+
+/// Attaches the CloseRequested/Destroyed handling to a "main" window —
+/// factored out of .setup() so the SAME handling applies whether "main" is
+/// the window Tauri creates automatically at launch (from tauri.conf.json)
+/// or one rebuilt later by build_main_window (after a tray_light close
+/// destroyed the original).
+fn attach_main_window_events(app: &tauri::AppHandle, win: &WebviewWindow) {
+    let handle = app.clone();
+    win.on_window_event(move |event| {
+        match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                let state = handle.state::<CloseBehaviorState>();
+                let mode = lock_ignore_poison(&state.0).clone();
+                match mode.as_str() {
+                    "tray_resident" => {
+                        // Webview stays fully alive (hidden, not destroyed) — the
+                        // existing JS/SSE session just keeps running invisibly.
+                        // Instant restore, no background task needed for this mode.
+                        api.prevent_close();
+                        if let Some(w) = handle.get_webview_window("main") {
+                            let _ = w.hide();
+                        }
+                    }
+                    "tray_light" => {
+                        // Free the WebView2 renderer's memory instead of just
+                        // hiding it — the whole point of this mode. Same
+                        // reentrancy caution as show_overlay's doc comment:
+                        // don't manipulate windows synchronously from inside
+                        // their own event callback; hop to a fresh thread and
+                        // schedule the real work on a later main-thread tick.
+                        api.prevent_close();
+                        background_sync::FOREGROUND_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+                        background_sync::ensure_started(handle.clone());
+                        let destroy_handle = handle.clone();
+                        std::thread::spawn(move || {
+                            let (tx, rx) = std::sync::mpsc::channel::<()>();
+                            let main_thread_handle = destroy_handle.clone();
+                            let scheduled = destroy_handle.run_on_main_thread(move || {
+                                if let Some(w) = main_thread_handle.get_webview_window("main") {
+                                    let _ = w.destroy();
+                                }
+                                let _ = tx.send(());
+                            });
+                            if scheduled.is_err() {
+                                write_setup_error("[main] tray_light destroy scheduling failed");
+                                return;
+                            }
+                            if rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                                write_setup_error("[main] tray_light window destroy did not complete within 5s");
+                            }
+                        });
+                    }
+                    _ => {
+                        // "quit" (or any value this build doesn't recognize) —
+                        // today's exact original behavior: full app exit.
+                        //
+                        // Drain the NVENC pipeline before exiting so NvEncDestroyEncoder
+                        // is not called while GPU frames are still queued — that raises a
+                        // Windows structured exception that bypasses Rust's panic handler.
+                        // Run the drain on a side thread and bound the wait so a stuck
+                        // capture teardown can no longer take the whole app down — see
+                        // capture::stop_capture()'s own doc notes on unbounded join().
+                        write_setup_error("[main] CloseRequested — exiting via app.exit(0)");
+                        let (drain_tx, drain_rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let _ = capture::stop_capture();
+                            let _ = drain_tx.send(());
+                        });
+                        if drain_rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
+                            write_setup_error("[main] stop_capture did not complete within 5s; exiting anyway");
+                        }
+                        handle.exit(0);
+                    }
+                }
+            }
+            tauri::WindowEvent::Destroyed => {
+                let state = handle.state::<OverlayHandle>();
+                let guard = lock_ignore_poison(&state.0);
+                if let Some(overlay) = guard.as_ref() {
+                    let _ = overlay.close();
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+/// Rebuilds the "main" window from scratch — needed after a tray_light close
+/// destroyed it. Settings mirror tauri.conf.json's static `windows[0]` entry
+/// exactly (same title/size/decorations/etc.) so a reopened window is
+/// indistinguishable from the one Tauri created automatically at launch.
+fn build_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
+    let win = WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("SpecterComs")
+        .inner_size(1280.0, 720.0)
+        .min_inner_size(900.0, 540.0)
+        .resizable(true)
+        .decorations(true)
+        .fullscreen(false)
+        .transparent(false)
+        .disable_drag_drop_handler()
+        .additional_browser_args("--disable-features=msWebOOUI,msPdfOOUI --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows")
+        .build()
+        .map_err(|e| format!("Failed to build main window: {e}"))?;
+    attach_main_window_events(app, &win);
+    Ok(win)
+}
+
+/// Shows the main window, rebuilding it first if a prior tray_light close
+/// destroyed it. Used by the tray icon's "Open" menu item.
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let win = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => build_main_window(&app)?,
+    };
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    // The foreground JS/WASM session resumes owning message decrypt + MLS
+    // state once the window is back — see background_sync::FOREGROUND_ACTIVE.
+    background_sync::FOREGROUND_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 /// Re-apply overlay window priority flags before showing.
@@ -375,23 +502,28 @@ fn capture_get_compatibility_report() -> serde_json::Value {
     capture::get_compatibility_report_json()
 }
 
-// ─── Encrypted Credentials Storage ────────────────────────────────────────────
-// Credentials are AES-256-GCM encrypted with a key held in the OS credential
+// ─── Encrypted Session Storage ────────────────────────────────────────────────
+// Session data is AES-256-GCM encrypted with a key held in the OS credential
 // store (Windows Credential Manager / macOS Keychain / Linux Secret Service).
 // The file is stored in the app data directory and is unreadable without that
 // OS-protected key, which — unlike a machine-fingerprint-derived key — can't
 // be recomputed by anyone who merely has local file read access.
 
 #[derive(serde::Serialize)]
-struct SavedCredentials {
-    email: String,
-    password: String,
+struct SavedSession {
+    token: Option<String>,
+    refresh_token: Option<String>,
+    user: Option<serde_json::Value>,
+    // Backward-compat only: allows one-time migration from older builds that
+    // persisted reusable credentials.
+    email: Option<String>,
+    password: Option<String>,
 }
 
 const CREDS_KEYRING_SERVICE: &str = "specter-coms";
 const CREDS_KEYRING_USER: &str = "creds-key";
 
-/// Get (or lazily create) the 32-byte key protecting saved login credentials,
+/// Get (or lazily create) the 32-byte key protecting saved session state,
 /// stored via the OS credential store rather than derived from anything an
 /// attacker with local file access could recompute.
 fn creds_key() -> Result<[u8; 32], String> {
@@ -418,11 +550,11 @@ fn creds_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join(".specter_creds"))
 }
 
-/// Encrypt and persist the user's login credentials to the app data directory.
-/// The file is AES-256-GCM encrypted with a machine-specific key so it cannot
-/// be used on another device.
+/// Encrypt and persist the current auth session to the app data directory.
+/// This stores a revocable session token + user snapshot, never the reusable
+/// account password.
 #[tauri::command]
-fn save_credentials(app: tauri::AppHandle, email: String, password: String) -> Result<(), String> {
+fn save_credentials(app: tauri::AppHandle, token: String, refresh_token: Option<String>, user: serde_json::Value) -> Result<(), String> {
     let key_bytes = creds_key()?;
     let key       = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher    = Aes256Gcm::new(key);
@@ -431,7 +563,7 @@ fn save_credentials(app: tauri::AppHandle, email: String, password: String) -> R
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let payload    = serde_json::json!({ "e": email, "p": password }).to_string();
+    let payload    = serde_json::json!({ "t": token, "r": refresh_token, "u": user }).to_string();
     let ciphertext = cipher.encrypt(nonce, payload.as_bytes())
         .map_err(|e| format!("encrypt error: {e}"))?;
 
@@ -445,10 +577,11 @@ fn save_credentials(app: tauri::AppHandle, email: String, password: String) -> R
     Ok(())
 }
 
-/// Load and decrypt saved credentials. Returns None if no credentials are saved,
-/// the file is corrupted, or the machine fingerprint has changed.
+/// Load and decrypt saved session data. Returns None if no data is saved or the
+/// file cannot be decrypted. Legacy e/p fields are returned when present so the
+/// JS layer can migrate old data to token-based storage.
 #[tauri::command]
-fn load_credentials(app: tauri::AppHandle) -> Option<SavedCredentials> {
+fn load_credentials(app: tauri::AppHandle) -> Option<SavedSession> {
     let path = creds_path(&app).ok()?;
     let blob = std::fs::read(&path).ok()?;
     if blob.len() < 13 { return None; }
@@ -461,9 +594,12 @@ fn load_credentials(app: tauri::AppHandle) -> Option<SavedCredentials> {
     let plaintext = cipher.decrypt(nonce, &blob[12..]).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&plaintext).ok()?;
 
-    Some(SavedCredentials {
-        email:    json.get("e")?.as_str()?.to_string(),
-        password: json.get("p")?.as_str()?.to_string(),
+    Some(SavedSession {
+        token: json.get("t").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        refresh_token: json.get("r").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        user: json.get("u").cloned(),
+        email: json.get("e").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        password: json.get("p").and_then(|v| v.as_str()).map(|s| s.to_string()),
     })
 }
 
@@ -561,6 +697,24 @@ fn mls_load_state(app: tauri::AppHandle) -> Vec<u8> {
 /// without needing to look it up by label (which can fail if Tauri internals
 /// haven't fully initialised the window registry yet).
 struct OverlayHandle(Mutex<Option<WebviewWindow>>);
+
+/// User's chosen behavior for the main window's close (X) button — mirrors
+/// the `specter_close_behavior` localStorage setting in SettingsUI.jsx.
+/// Rust can't read localStorage directly, so the frontend pushes the current
+/// value here via set_close_behavior on change and on launch. Defaults to
+/// "quit" (today's only behavior) so a build that hasn't loaded a saved
+/// setting yet — or any future value this build doesn't recognize — always
+/// falls back to the unsurprising, unambiguous choice: actually closing.
+struct CloseBehaviorState(Mutex<String>);
+
+#[tauri::command]
+fn set_close_behavior(state: tauri::State<CloseBehaviorState>, mode: String) -> Result<(), String> {
+    if !matches!(mode.as_str(), "quit" | "tray_resident" | "tray_light") {
+        return Err(format!("unknown close behavior: {mode}"));
+    }
+    *lock_ignore_poison(&state.0) = mode;
+    Ok(())
+}
 
 /// Return an overlay window, rebuilding it when the cached handle is stale or
 /// the window is missing from Tauri's registry.
@@ -841,60 +995,53 @@ pub fn run() {
   tauri::Builder::default()
     .manage(MisconductReportBuffer { frames: Mutex::new(VecDeque::new()) })
     .manage(OverlayHandle(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![get_hwid, submit_report_frame, snip_report_clip, capture_start, capture_stop, capture_list_monitors, capture_list_sources, capture_get_perf_report, capture_get_errors, capture_get_breadcrumbs, get_setup_errors, get_capture_debug_log, get_app_log, client_log, capture_get_compatibility_report, save_credentials, load_credentials, delete_credentials, mls_save_state, mls_load_state, show_overlay, hide_overlay, close_app])
+    .manage(CloseBehaviorState(Mutex::new("quit".to_string())))
+        .invoke_handler(tauri::generate_handler![get_hwid, submit_report_frame, snip_report_clip, capture_start, capture_stop, capture_list_monitors, capture_list_sources, capture_get_perf_report, capture_get_errors, capture_get_breadcrumbs, get_setup_errors, get_capture_debug_log, get_app_log, client_log, capture_get_compatibility_report, save_credentials, load_credentials, delete_credentials, mls_save_state, mls_load_state, msgcache::msgcache_append, msgcache::msgcache_read, msgcache::msgcache_read_all, msgcache::msgcache_clear_all, set_close_behavior, show_main_window, show_overlay, hide_overlay, close_app])
     .plugin(tauri_plugin_specter_audio::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_process::init())
     .plugin(tauri_plugin_updater::Builder::new().build())
     .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+    .plugin(tauri_plugin_notification::init())
     .setup(|app| {
       // CA-1a: Handle both CloseRequested and Destroyed on the main window.
       // CloseRequested: on Windows with transparent:true, WebView2 can silently swallow
       // the native X-button WM_NCLBUTTONUP — calling app.exit(0) here makes close explicit.
       // Destroyed: clean up the always-on-top overlay so it doesn't outlive the parent app.
-      let handle = app.handle().clone();
+      // Behavior now branches on CloseBehaviorState (quit/tray_resident/tray_light) —
+      // see attach_main_window_events, also reused by build_main_window when a
+      // tray_light close later needs to recreate this window from scratch.
       if let Some(main_win) = app.get_webview_window("main") {
-        main_win.on_window_event(move |event| {
-          match event {
-            tauri::WindowEvent::CloseRequested { .. } => {
-              // Drain the NVENC pipeline before exiting so NvEncDestroyEncoder
-              // is not called while GPU frames are still queued — that raises a
-              // Windows structured exception that bypasses Rust's panic handler.
-              //
-              // capture::stop_capture() joins the capture thread with no timeout
-              // (capture/mod.rs) — if a GPU/driver-level teardown call (DXGI
-              // session Close, device Release, etc.) ever hangs, that join blocks
-              // forever. Since this handler runs inline on the main thread's
-              // Win32 message loop, that would freeze the pump permanently:
-              // handle.exit(0) below never runs (app becomes unclosable), and
-              // every subsequent window operation that marshals onto the main
-              // thread (e.g. show_overlay's WebviewWindowBuilder::build()/
-              // set_position()/show()) hangs forever too, with no error surfaced
-              // anywhere. Run the drain on a side thread and bound the wait so a
-              // stuck capture teardown can no longer take the whole app down.
-              write_setup_error("[main] CloseRequested — exiting via app.exit(0)");
-              let (drain_tx, drain_rx) = std::sync::mpsc::channel();
-              std::thread::spawn(move || {
-                let _ = capture::stop_capture();
-                let _ = drain_tx.send(());
-              });
-              if drain_rx.recv_timeout(std::time::Duration::from_secs(5)).is_err() {
-                write_setup_error("[main] stop_capture did not complete within 5s; exiting anyway");
-              }
-              handle.exit(0);
-            }
-            tauri::WindowEvent::Destroyed => {
-              let state = handle.state::<OverlayHandle>();
-              let guard = lock_ignore_poison(&state.0);
-              if let Some(overlay) = guard.as_ref() {
-                let _ = overlay.close();
-              }
+        attach_main_window_events(&app.handle(), &main_win);
+      }
+
+      // System tray — Open (rebuilds the main window if a prior tray_light
+      // close destroyed it) and Quit (the real, unconditional exit path,
+      // bypassing CloseBehaviorState entirely).
+      let open_item = MenuItem::with_id(app, "open", "Open SpecterComs", true, None::<&str>)?;
+      let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+      let tray_menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+      let tray_icon = app.default_window_icon().cloned();
+      let mut tray_builder = TrayIconBuilder::new()
+        .menu(&tray_menu)
+        .show_menu_on_left_click(true)
+        .tooltip("SpecterComs")
+        .on_menu_event(|app, event| {
+          match event.id.as_ref() {
+            "open" => { let _ = show_main_window(app.clone()); }
+            "quit" => {
+              let _ = capture::stop_capture();
+              app.exit(0);
             }
             _ => {}
           }
         });
+      if let Some(icon) = tray_icon {
+        tray_builder = tray_builder.icon(icon);
       }
+      tray_builder.build(app)?;
+
       // Pre-create the hidden overlay window from a background thread. NEVER
       // build it on the main thread (neither here in setup nor in a sync
       // command): WebviewWindowBuilder::build() on the main thread runs a

@@ -1,21 +1,17 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="specter-overlay-html">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpecterComs Overlay</title>
-    <style>
-      html, body {
-        margin: 0 !important;
-        padding: 0 !important;
-        background: #030a13 !important;
-        overflow: hidden !important;
-      }
-    </style>
+    <!-- External stylesheet, not an inline <style> tag or style="" attribute —
+         Tauri's runtime CSP nonce silently blocks inline styles the app
+         authors itself (see splash.css's header comment). -->
+    <link rel="stylesheet" href="/splash.css" />
   </head>
-  <body>
+  <body class="specter-overlay-body">
     <!-- Visible before ANY JS runs. overlay.jsx hides this after React mounts. -->
-    <div id="overlay-boot-status" style="position:fixed;top:0;left:0;right:0;padding:5px 8px;background:#854d0e;color:#fef08a;font:11px/1.4 monospace;z-index:9999;white-space:pre-wrap;word-break:break-all">⬛ OVERLAY LOADING...</div>
+    <div id="overlay-boot-status" class="specter-overlay-boot-status">⬛ OVERLAY LOADING...</div>
     <div id="overlay-root"></div>
     <script>
       window.onerror = function(msg, src, line, col, err) {

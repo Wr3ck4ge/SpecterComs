@@ -30,39 +30,6 @@ function writeVarint(buf, value) {
   buf.push(value & 0x7f);
 }
 
-function encodeAudioFrameProto(ssrc, seqNum, opusBytes, isGlobalBroadcast = false, senderSignature = null) {
-  const parts = [];
-  // Field 1: encrypted_payload (bytes) — tag 0x0A
-  parts.push(0x0a);
-  writeVarint(parts, opusBytes.length);
-  for (let i = 0; i < opusBytes.length; i++) parts.push(opusBytes[i]);
-  // Field 2: ssrc (uint32) — tag 0x10
-  parts.push(0x10);
-  writeVarint(parts, ssrc >>> 0);
-  // Field 3: sequence (int32) — tag 0x18
-  parts.push(0x18);
-  writeVarint(parts, seqNum >>> 0);
-  // Field 4: is_global_broadcast (bool) — tag 0x20. Only written when true
-  // (proto3 default is false either way, omitting keeps the common-case frame
-  // a few bytes smaller). Marks a priority speaker's cascade-encrypted copy —
-  // see media-rust's relay path.
-  if (isGlobalBroadcast) {
-    parts.push(0x20);
-    writeVarint(parts, 1);
-  }
-  // Field 5: sender_signature (bytes) — tag 0x2A. Ed25519 signature over
-  // encrypted_payload (see mlsSession.js's signBytes) — proves this exact
-  // ciphertext came from this specific device, on top of (not instead of)
-  // SFrame's own AEAD confidentiality/integrity. Only written when relay mode
-  // has a signature ready (see voiceRelayModeRef gating at the call site).
-  if (senderSignature && senderSignature.length > 0) {
-    parts.push(0x2a);
-    writeVarint(parts, senderSignature.length);
-    for (let i = 0; i < senderSignature.length; i++) parts.push(senderSignature[i]);
-  }
-  return new Uint8Array(parts);
-}
-
 function decodeAudioFrameProto(bytes) {
   let pos = 0;
   let opusBytes = null;
@@ -70,8 +37,10 @@ function decodeAudioFrameProto(bytes) {
   let sequence = 0;
   let isGlobalBroadcast = false;
   let senderSignature = null;
+
   while (pos < bytes.length) {
-    let tag = 0, shift = 0;
+    let tag = 0;
+    let shift = 0;
     while (pos < bytes.length) {
       const b = bytes[pos++];
       tag |= (b & 0x7f) << shift;
@@ -80,8 +49,10 @@ function decodeAudioFrameProto(bytes) {
     }
     const fieldNumber = tag >>> 3;
     const wireType = tag & 0x07;
+
     if (wireType === 0) {
-      let val = 0; shift = 0;
+      let val = 0;
+      shift = 0;
       while (pos < bytes.length) {
         const b = bytes[pos++];
         val |= (b & 0x7f) << shift;
@@ -107,7 +78,45 @@ function decodeAudioFrameProto(bytes) {
       break;
     }
   }
+
   return { opusBytes, ssrc, sequence, isGlobalBroadcast, senderSignature };
+}
+
+// Encoder counterpart to decodeAudioFrameProto above — writes an outgoing
+// specter.v1.AudioFrame. Field order/tags must exactly match what
+// decodeAudioFrameProto expects on the receiving end.
+function encodeAudioFrameProto(ssrc, sequence, opusBytes, isGlobalBroadcast, senderSignature) {
+  const buf = [];
+
+  // Field 1: encrypted_payload (bytes)
+  writeVarint(buf, (1 << 3) | 2);
+  writeVarint(buf, opusBytes.length);
+  for (let i = 0; i < opusBytes.length; i++) buf.push(opusBytes[i]);
+
+  // Field 2: ssrc (uint32)
+  writeVarint(buf, (2 << 3) | 0);
+  writeVarint(buf, ssrc);
+
+  // Field 3: sequence (int32)
+  writeVarint(buf, (3 << 3) | 0);
+  writeVarint(buf, sequence);
+
+  // Field 4: is_global_broadcast (bool) — proto3 default (false) is safe to
+  // omit; decodeAudioFrameProto already treats a missing field 4 as false.
+  if (isGlobalBroadcast) {
+    writeVarint(buf, (4 << 3) | 0);
+    writeVarint(buf, 1);
+  }
+
+  // Field 5: sender_signature (bytes, optional — omitted when signing failed
+  // upstream and the frame is being sent unsigned, matching that fallback).
+  if (senderSignature && senderSignature.length > 0) {
+    writeVarint(buf, (5 << 3) | 2);
+    writeVarint(buf, senderSignature.length);
+    for (let i = 0; i < senderSignature.length; i++) buf.push(senderSignature[i]);
+  }
+
+  return new Uint8Array(buf);
 }
 
 function hashUserId(id) {
@@ -662,13 +671,8 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
   // Instance of our Rust WASM Cryptography bindings
   const cryptoRef = useRef(null);
-  // Same primitive, independent 'audio'-labeled MLS export — derived and kept
-  // fresh alongside cryptoRef/refreshVideoKey below, but not yet wired into the
-  // actual audio send/receive path: media-rust still mixes voice server-side
-  // (see voiceEncryptionEnabled above), so encrypting frames now would just
-  // break playback against a mixer expecting plain Opus. This ref exists so the
-  // key is ready and rotating correctly before the relay path that consumes it
-  // ships.
+  // Independent 'audio'-labeled MLS export used by relay-mode voice
+  // encryption/decryption.
   const cryptoAudioRef = useRef(null);
   // Event-scoped cascade key (see mlsSession.js's ensureEventGroup) — only
   // derived when this channel belongs to an event (channel.event_id set).
@@ -679,9 +683,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   // authoritative mapping for attributing an incoming relay-mode audio lane to
   // a real speaker (a client can't independently recompute another user's
   // hashUserId, since it only knows their callsign, not their true user_id).
-  // Unused until the per-lane playback refactor consumes it; harmless to keep
-  // populated in mixed-mode rooms too, where every audio datagram is still
-  // server-mixed to ssrc=0 regardless.
+  // Used by relay-mode attribution/reporting and sender-key lookup paths.
   const ssrcToUserIdRef = useRef(new Map());
   // Whether the CURRENT channel's media-rust room is running the E2E relay
   // path (per-sender SFrame-encrypted, see media-rust's RoomState::voice_relay_mode)
@@ -800,8 +802,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     setMessages(prev => [...prev, { text, type, ts: new Date().toLocaleTimeString() }]);
   };
 
-  // Cache Tauri invoke import so high-frequency paths (audio playback) do not
-  // allocate a new dynamic-import promise per frame.
+  // Cache Tauri invoke import for high-frequency audio paths.
   const tauriInvokeRef = useRef(null);
   const ensureTauriInvoke = async () => {
     if (tauriInvokeRef.current) return tauriInvokeRef.current;
@@ -810,42 +811,34 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     return invoke;
   };
 
+  const getMediaTicket = async (kind, sharer = null, channelId = channelRef.current?.id) => {
+    const { data, error } = await api.getOrgMediaTicket(org.id, channelId, kind, sharer);
+    if (error || !data?.ticket) {
+      throw new Error(error || 'Failed to acquire media ticket');
+    }
+    return data;
+  };
+
   const connect = async () => {
     traceLog(`CommLink connect() called for channelRef.current.id=${channelRef.current?.id} name=${channelRef.current?.name}`);
-    // Any call to connect() — manual, auto-connect-on-mount, or one of our own
-    // scheduled retries — represents a fresh attempt to be back online, so a
-    // future unexpected drop should be free to auto-recover again.
+    // Any connect attempt resets the "intentional disconnect" guard.
     intentionalDisconnectRef.current = false;
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
     setStatus('connecting');
     addMsg(`Initiating handshake with ${org.callsign} [${channelRef.current.name}]...`);
 
-    // Voice is mixed server-side by media-rust (priority ducking needs plaintext
-    // PCM to mix), which is fundamentally incompatible with E2E without dropping
-    // that feature — so voice stays TLS-on-WebTransport only. Video is a pure
-    // relay server-side (media-rust never decodes it), so it's keyed from this
-    // channel's real MLS group below instead.
-    const voiceEncryptionEnabled = false;
-
     try {
-      // Initialize WASM cryptography engine for this session (non-fatal — video
-      // just stays unencrypted, same as voice, if this fails or the MLS group
-      // can't be established for any reason)
+      // Initialize WASM crypto (best-effort).
       try {
         await initWasm();
         const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
         await ensureChannelGroup(api, currentUserId, org.id, channelRef.current.id);
         const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
         cryptoRef.current = new SFrameCrypto(videoKey);
-        // Independent key, same group/epoch, 'audio' label — see cryptoAudioRef's
-        // doc comment for why this isn't used to encrypt anything yet.
+        // Independent 'audio' label export for relay-mode audio crypto.
         const audioKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'audio', 32);
         cryptoAudioRef.current = new SFrameCrypto(audioKey);
-        // Event-scoped cascade key — only relevant for event channels (priority
-        // ducking/cascade doesn't exist for casual channels, see orgController.ts's
-        // getOrgToken). Best-effort: a casual channel or a brand-new event whose
-        // group hasn't reconciled yet just leaves this null, same non-fatal
-        // pattern as the rest of this block.
+        // Event-scoped cascade key used only for event channels.
         if (channel?.event_id) {
           await ensureEventGroup(api, currentUserId, org.id, channel.event_id);
           const cascadeKey = await exportGroupSecret(api, currentUserId, channel.event_id, 'audio-cascade', 32);
@@ -878,18 +871,16 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         }
       }
 
-      // 1. Get Token
-      const { data, error } = await api.getOrgToken(org.id, channelRef.current.id);
-      if (error) throw new Error(error);
-      const token = data.token;
-      const mediaUrl = data.media_url || 'https://localhost:4434';
+      // 1) Get short-lived voice ticket
+      const voiceTicket = await getMediaTicket('voice', null, channelRef.current.id);
+      const token = voiceTicket.ticket;
+      const mediaUrl = voiceTicket.media_url || 'https://localhost:4434';
       mediaUrlRef.current = mediaUrl;
-      voiceRelayModeRef.current = data.voice_relay === true;
+      voiceRelayModeRef.current = voiceTicket.voice_relay === true;
       
-      addMsg('Token acquired: ' + token.substring(0, 10) + '...');
+      addMsg('Session token acquired.');
 
-      // 2. Connect WebTransport
-      // Make sure the mediaUrl has no trailing slash before appending /specter
+      // 2) Connect WebTransport
       const base = mediaUrl.replace(/\/$/, '');
       const url = `${base}/specter?token=${token}&channel_id=${channelRef.current.id}`;
       const transport = new WebTransport(url);
@@ -897,16 +888,9 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
       await transport.ready;
       setStatus('connected');
-      // Reset backoff now that we're actually back online — otherwise a
-      // connection that fails again much later (unrelated to this streak)
-      // would inherit an already-escalated delay instead of starting fresh.
+      // Reset backoff after a successful connect.
       reconnectAttemptRef.current = 0;
-      // Bound the outgoing datagram queue: without this, a stalled/slow-ACKing
-      // connection lets audio frames queue indefinitely (no expiry by default),
-      // so delay only grows and never recovers — worst under low/steady traffic,
-      // where nothing else forces the congestion window open. Capping the queue
-      // to ~4 frames (80ms) and expiring anything older than 200ms means a stale
-      // frame gets dropped instead of piling up behind it.
+      // Bound outgoing datagram queue to limit latency growth under congestion.
       try {
         transport.datagrams.outgoingHighWaterMark = 4;
         transport.datagrams.outgoingMaxAge = 200;
@@ -917,18 +901,29 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       playFrameInFlightRef.current = 0;
       playFrameDroppedRef.current = 0;
       outputFallbackAttemptedRef.current = false;
-      // Clear any "not connected" mic error that fired while transport was connecting.
+      // Clear transient mic errors after transport is up.
       setMicError(null);
-      // Tell the mixer our preferred activation threshold right away so it applies
-      // from the first frame instead of defaulting to 150 until the user drags the slider.
+      // Apply threshold immediately instead of waiting for UI interaction.
       sendAudioThreshold(micThreshold);
       addMsg('Uplink established. Channel secure.');
         // Register presence so all org members can see who is in this channel
         api.joinChannelPresence(org.id, channelRef.current.id).catch(() => {});
         // Keep channel presence fresh so abrupt closes are auto-cleaned server-side.
         if (presenceHeartbeatRef.current) clearInterval(presenceHeartbeatRef.current);
-        presenceHeartbeatRef.current = setInterval(() => {
-          api.pingChannelPresence(org.id, channelRef.current.id).catch(() => {});
+        presenceHeartbeatRef.current = setInterval(async () => {
+          // api.js's fetchWithAuth resolves {data, error} rather than
+          // rejecting, so failures need an explicit check here, not .catch().
+          // A stale/deleted channel returns 404 "Channel not found" (see
+          // channelController's pingChannelPresence) — stop the heartbeat and
+          // tear down the connection instead of retrying a dead channel forever.
+          const { error } = await api.pingChannelPresence(org.id, channelRef.current.id);
+          if (error === 'Channel not found') {
+            if (presenceHeartbeatRef.current) {
+              clearInterval(presenceHeartbeatRef.current);
+              presenceHeartbeatRef.current = null;
+            }
+            disconnect();
+          }
         }, 20_000);
       readDatagrams(transport);
       readIncomingStreams(transport); // Roster + Video streams
@@ -1265,7 +1260,6 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     setRemoteShare(header);
 
     const codec = header.codec || 'vp8';
-    const isH264 = codec.startsWith('avc1') || codec.startsWith('avc3');
 
     // Store header so we can re-send it if the overlay opens mid-stream.
     // NOTE: We no longer fire a separate header-only emit here.  Instead the header
@@ -1674,7 +1668,6 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const cleanGainRef = useRef(null);
   const radioGainRef = useRef(null);
   const noiseGainRef = useRef(null);
-  const noiseTimeoutRef = useRef(null);
   const duckingTimeoutRef = useRef(null);
 
   // Generates a distortion curve for the military radio effect
@@ -2367,9 +2360,9 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const startEncodingPipeline = async (track, profileOverride = null, orgTier = 0) => {
     if (typeof VideoEncoder === 'undefined' || typeof MediaStreamTrackProcessor === 'undefined') return;
 
-    const { data } = await api.getOrgToken(org.id, channel.id);
-    const base = (mediaUrlRef.current || data.media_url).replace(/\/$/, '');
-    const pubUrl = `${base}/specter/video?token=${data.token}&channel_id=${channel.id}&role=publish`;
+    const ticketData = await getMediaTicket('video_publish', null, channel.id);
+    const base = (mediaUrlRef.current || ticketData.media_url).replace(/\/$/, '');
+    const pubUrl = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channel.id}&role=publish`;
     const vt = new WebTransport(pubUrl);
     publishTransportRef.current = vt;
     await vt.ready;
@@ -2570,9 +2563,9 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
         const effectiveSource = selectedSource;
 
-        const { data } = await api.getOrgToken(org.id, channel.id);
-        const base = (mediaUrlRef.current || data.media_url).replace(/\/$/, '');
-        const pubUrl = `${base}/specter/video?token=${data.token}&channel_id=${channel.id}&role=publish`;
+        const ticketData = await getMediaTicket('video_publish', null, channel.id);
+        const base = (mediaUrlRef.current || ticketData.media_url).replace(/\/$/, '');
+        const pubUrl = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channel.id}&role=publish`;
         console.log('[share] publish transport connecting, base=', base);
         const vt = new WebTransport(pubUrl);
         publishTransportRef.current = vt;
@@ -3114,15 +3107,16 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       videoTransportRef.current = null;
     }
 
-    const { data } = await api.getOrgToken(org.id, channel.id);
-    const base = (mediaUrlRef.current || data.media_url).replace(/\/$/, '');
+    const role = 'subscribe';
+    const kind = 'video_subscribe';
+    const ticketData = await getMediaTicket(kind, callsign, channel.id);
+    const base = (mediaUrlRef.current || ticketData.media_url).replace(/\/$/, '');
     console.log('[subscribe] transport connecting, base=', base, 'sharer=', callsign);
     // Always subscribe to the full-res stream. The overlay window is fed via local IPC
     // (overlay-video-nal emit in processVideoData), so subscribe_overlay / simulcast is
     // not needed — and would silently stall when the sharer's overlay encoder isn't
     // running (e.g. CPU capture mode or D3D11VA overlay encoder init failure).
-    const role = 'subscribe';
-    const url = `${base}/specter/video?token=${data.token}&channel_id=${channel.id}&role=${role}&sharer=${encodeURIComponent(callsign)}`;
+    const url = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channel.id}&role=${role}&sharer=${encodeURIComponent(callsign)}`;
 
     const vt = new WebTransport(url);
     videoTransportRef.current = vt;
@@ -3296,15 +3290,20 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           const opusBytes = Uint8Array.from(atob(data), c => c.charCodeAt(0));
           const seq = sequenceRef.current++;
           // Only encrypt when the server actually relays instead of mixing —
-          // see voiceRelayModeRef's doc comment. Falls back to plain Opus
-          // (today's behavior) if encryption fails, same non-fatal pattern
-          // used for video's cryptoRef.
+          // see voiceRelayModeRef's doc comment. Relay mode is a confidentiality
+          // promise to every listener in the channel, so this must fail CLOSED:
+          // if the key isn't ready yet or encrypt() throws, drop the frame
+          // rather than send it in the clear.
           let payload = opusBytes;
-          if (voiceRelayModeRef.current && cryptoAudioRef.current) {
+          if (voiceRelayModeRef.current) {
+            if (!cryptoAudioRef.current) {
+              return; // key not ready yet — drop rather than send plaintext
+            }
             try {
               payload = cryptoAudioRef.current.encrypt(opusBytes);
             } catch (e) {
-              console.warn('[Audio] encrypt failed, sending unencrypted:', e);
+              console.warn('[Audio] encrypt failed, dropping frame (relay mode requires encryption):', e);
+              return;
             }
           }
           // Signs the ciphertext actually being sent, not the raw Opus — proves

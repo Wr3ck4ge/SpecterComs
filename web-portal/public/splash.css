@@ -1,0 +1,71 @@
+/* Pre-React splash screen styling — must be an external stylesheet, not a
+   <style> tag or inline style="" attributes in index.html. Tauri auto-injects
+   a nonce into style-src at runtime, which per CSP spec silently negates
+   'unsafe-inline' for any inline style the app authors itself (same issue
+   fixed for OperationPlanner/StartupSplashScreen/WarRoom's <style> tags —
+   this is the same class of bug in the one place those fixes couldn't reach,
+   since this markup renders before React or any JS has run). A same-origin
+   linked stylesheet isn't inline content, so it's unaffected. */
+/* Scoped to classes, not bare html/body selectors — this file is shared by
+   both index.html and overlay.html, which want different (transparent vs.
+   opaque) backgrounds, so a bare element selector here would leak one
+   page's rule into the other. */
+.specter-splash-html,
+.specter-splash-body {
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+}
+
+.specter-splash {
+  position: fixed;
+  inset: 0;
+  background: #030a13;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.specter-splash-title {
+  font-family: monospace;
+  font-size: 24px;
+  font-weight: bold;
+  letter-spacing: 0.3em;
+  color: #22d3ee;
+}
+
+.specter-splash-status {
+  font-family: monospace;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  color: #0891b2;
+}
+
+/* overlay.html's pre-React boot status — same CSP reasoning as above. The
+   background/color swap on error is done via el.style.background/color in
+   overlay.html's inline <script> (JS setting individual CSSOM properties,
+   not a style="" attribute string), which CSP does not restrict, so that
+   part needed no change. */
+.specter-overlay-html,
+.specter-overlay-body {
+  margin: 0 !important;
+  padding: 0 !important;
+  background: #030a13 !important;
+  overflow: hidden !important;
+}
+
+.specter-overlay-boot-status {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 5px 8px;
+  background: #854d0e;
+  color: #fef08a;
+  font: 11px/1.4 monospace;
+  z-index: 9999;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

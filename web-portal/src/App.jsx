@@ -6,6 +6,29 @@ import WarRoom from './components/WarRoom';
 
 import StartupSplashScreen from './components/StartupSplashScreen';
 import { invoke } from '@tauri-apps/api/core';
+import { saveChannelMessages } from './messageStore';
+
+// Drains whatever the Rust background sync task (tray_light mode) collected
+// into msgcache.rs while the window was closed, into messageStore.js's
+// IndexedDB — the existing chat UI already reads history from there, so this
+// is the only integration point needed rather than a second history system.
+// Read-then-clear (not read-and-delete-together): only clears the Rust-side
+// cache after every channel's messages are confirmed saved, so a mid-drain
+// failure re-drains the same messages next launch instead of losing them.
+async function drainMessageCache() {
+  if (!window.__TAURI__) return;
+  try {
+    const byChannel = await invoke('msgcache_read_all');
+    const channelIds = Object.keys(byChannel || {});
+    if (channelIds.length === 0) return;
+    for (const channelId of channelIds) {
+      await saveChannelMessages(channelId, byChannel[channelId]);
+    }
+    await invoke('msgcache_clear_all');
+  } catch (err) {
+    console.log('Message cache drain failed:', err);
+  }
+}
 
 // ─── Tauri Update Checker ──────────────────────────────────────────────────────
 let _updateCheckInProgress = false;
@@ -218,11 +241,12 @@ function AuthScreen({ onLogin }) {
       setLoading(false);
       if (error) return setError(error);
       localStorage.setItem('specter_token', data.token);
+      if (data.refresh_token) localStorage.setItem('specter_refresh_token', data.refresh_token);
       localStorage.setItem('specter_user', JSON.stringify(data.user));
-      // Save credentials so the app can restore the session on next launch
+      // Save encrypted revocable session state for next launch.
       if (window.__TAURI__) {
-        await invoke('save_credentials', { email: form.email, password: form.password }).catch((err) => {
-          console.log('Saving credentials failed:', err);
+        await invoke('save_credentials', { token: data.token, refreshToken: data.refresh_token || null, user: data.user }).catch((err) => {
+          console.log('Saving session failed:', err);
         });
       }
       // Trigger update check if server reports a newer version
@@ -348,6 +372,17 @@ function BrowserNotSupported() {
         <div className="text-specter-primary-cyan font-mono text-xs uppercase tracking-widest">Desktop Client Required</div>
         <div className="text-specter-text-main font-mono text-lg font-bold tracking-wide">SPECTERCOMS APP IS NOT AVAILABLE IN A BROWSER</div>
         <div className="text-specter-text-muted font-mono text-xs">Install and launch the signed desktop client to access operations, channels, and voice.</div>
+        <div className="text-left bg-specter-bg-panel border border-specter-primary-dim rounded p-3">
+          <div className="text-specter-primary-cyan text-[10px] uppercase tracking-widest font-mono mb-2">Installer Permission Notice</div>
+          <ul className="text-specter-text-muted text-xs font-mono leading-5 list-disc pl-4 space-y-1">
+            <li>Microphone access for voice communications</li>
+            <li>Screen/window capture access when sharing is started by you</li>
+            <li>Global hotkeys for push-to-talk and overlay controls</li>
+            <li>Overlay window permissions (always-on-top and click-through modes)</li>
+            <li>Network access to SpecterComs services for auth, messaging, voice, and updates</li>
+          </ul>
+          <div className="text-[10px] text-zinc-500 font-mono mt-2">Capture and mic permissions are requested at runtime when features are used, not silently at install time.</div>
+        </div>
         <div>
           <Button onClick={() => window.location.href = '/api/downloads?platform=windows'}>Download Windows Client</Button>
         </div>
@@ -366,31 +401,85 @@ function AppContent({ isTauriRuntime }) {
   const [updateProgress, setUpdateProgress] = useState(null); // { status, pct?, message? }
 
   useEffect(() => {
-    // On initial load, try to restore session from saved credentials (Tauri only)
+    // Sync the saved close-behavior setting to Rust on every launch — it
+    // can't read localStorage itself, and its in-memory default ("quit") is
+    // only updated when SettingsUI.jsx's Save button runs, which won't have
+    // happened yet this session for a returning user with a saved preference.
+    // Independent of login state (a device-level app setting, not account data).
+    if (window.__TAURI__) {
+      const savedCloseBehavior = localStorage.getItem('specter_close_behavior');
+      if (savedCloseBehavior) {
+        invoke('set_close_behavior', { mode: savedCloseBehavior }).catch(() => {});
+      }
+      // Covers both a cold app start and a tray_light reopen — the latter
+      // destroys and rebuilds the webview (see build_main_window in Rust),
+      // so this same mount-time effect runs again naturally either way.
+      drainMessageCache();
+    }
+  }, []);
+
+  useEffect(() => {
+    // On initial load, try to restore an encrypted saved session (Tauri only).
     if (window.__TAURI__) {
       invoke('load_credentials')
-        .then(creds => {
-          if (creds && creds.email && creds.password) {
-            console.log('Attempting to log in with saved credentials...');
+        .then(async saved => {
+          if (saved && saved.token && saved.user) {
+            // Primary path: token-based persisted session (no password at rest).
+            // The saved access token is very likely stale by now (30 min TTL) —
+            // redeem the refresh token first so this actually survives past a
+            // single short session instead of just replaying a dead token.
+            if (saved.refresh_token) {
+              const { data: refreshed, error: refreshError } = await api.refresh(saved.refresh_token);
+              if (!refreshError && refreshed?.token) {
+                localStorage.setItem('specter_token', refreshed.token);
+                localStorage.setItem('specter_refresh_token', refreshed.refresh_token);
+                localStorage.setItem('specter_user', JSON.stringify(saved.user));
+                invoke('save_credentials', { token: refreshed.token, refreshToken: refreshed.refresh_token, user: saved.user }).catch(() => {});
+                return api.getMyProfile();
+              }
+              // Refresh token itself is dead (expired past its 30-day life, or
+              // revoked) — nothing left to silently recover, fall through to a
+              // real login.
+              return Promise.reject('No saved session');
+            }
+            localStorage.setItem('specter_token', saved.token);
+            localStorage.setItem('specter_user', JSON.stringify(saved.user));
+            return api.getMyProfile();
+          }
+
+          if (saved && saved.email && saved.password) {
+            // Backward-compat migration path from older builds.
+            console.log('Attempting one-time migration from legacy saved credentials...');
             return invoke('get_hwid').then(hwid => 
-              api.login({ email: creds.email, password: creds.password, hwid: hwid || 'browser-fallback-hwid' })
+              api.login({ email: saved.email, password: saved.password, hwid: hwid || 'browser-fallback-hwid' })
             );
           }
-          return Promise.reject('No saved credentials');
+          return Promise.reject('No saved session');
         })
         .then(({ data, error }) => {
+          // Profile validation path from token restore returns getMyProfile() shape.
+          if (data && !error && data.user == null && data.callsign) {
+            setUser(data);
+            return;
+          }
+
           if (error) throw new Error(error);
           localStorage.setItem('specter_token', data.token);
+          if (data.refresh_token) localStorage.setItem('specter_refresh_token', data.refresh_token);
           localStorage.setItem('specter_user', JSON.stringify(data.user));
+          // Migrate legacy saved credentials to token-based persisted session.
+          invoke('save_credentials', { token: data.token, refreshToken: data.refresh_token || null, user: data.user }).catch(() => {});
           if (data.latest_version) checkVersionFromLogin(data.latest_version);
           setUser(data.user);
         })
         .catch(err => {
           console.log('Auto-login failed:', err.message || err);
-          if (String(err?.message || err) !== 'No saved credentials') {
+          if (String(err?.message || err) !== 'No saved session') {
             // Clear potentially stale data if auto-login failed for a real reason.
             localStorage.removeItem('specter_token');
+            localStorage.removeItem('specter_refresh_token');
             localStorage.removeItem('specter_user');
+            invoke('delete_credentials').catch(() => {});
           }
         })
         .finally(() => {
@@ -414,11 +503,36 @@ function AppContent({ isTauriRuntime }) {
     // Run update check on startup (after a short delay)
     setTimeout(checkForUpdates, 3000);
 
-    const handleAuthExpired = () => {
+    // A 401 already cleared specter_token/specter_user (see fetchWithAuth in
+    // api.js) before this fires. Try one silent refresh — using the still-live
+    // specter_refresh_token, which that same 401 handling deliberately leaves
+    // alone — before giving up and forcing a real re-login. This is what turns
+    // "the 30-min access token expired mid-session" from a forced logout into
+    // an invisible recovery.
+    const forceLogout = () => {
       setUser(null);
-      if (window.__TAURI__) {
-        invoke('delete_credentials').catch(() => {});
-      }
+      localStorage.removeItem('specter_refresh_token');
+      if (window.__TAURI__) invoke('delete_credentials').catch(() => {});
+    };
+    const handleAuthExpired = () => {
+      const refreshToken = localStorage.getItem('specter_refresh_token');
+      if (!refreshToken) { forceLogout(); return; }
+
+      api.refresh(refreshToken).then(({ data, error }) => {
+        if (error || !data?.token) { forceLogout(); return; }
+        localStorage.setItem('specter_token', data.token);
+        localStorage.setItem('specter_refresh_token', data.refresh_token);
+        // Re-fetch the profile rather than trusting a stale closure over this
+        // component's user state (this handler is registered once on mount).
+        api.getMyProfile().then(({ data: profile, error: profileError }) => {
+          if (profileError || !profile) { forceLogout(); return; }
+          localStorage.setItem('specter_user', JSON.stringify(profile));
+          if (window.__TAURI__) {
+            invoke('save_credentials', { token: data.token, refreshToken: data.refresh_token, user: profile }).catch(() => {});
+          }
+          setUser(profile);
+        });
+      });
     };
     window.addEventListener('specter:auth-expired', handleAuthExpired);
 
@@ -441,8 +555,15 @@ function AppContent({ isTauriRuntime }) {
   const navigate = useNavigate();
   const handleLogin = (loggedInUser) => setUser(loggedInUser);
   const handleLogout = async () => {
+    // Revoke the refresh token server-side so it can't silently renew the
+    // session again after this — without this, an explicit logout only ever
+    // discarded the client's local copy, leaving the long-lived credential
+    // itself valid until it naturally expired up to 30 days later.
+    const refreshToken = localStorage.getItem('specter_refresh_token');
+    if (refreshToken) api.logout(refreshToken).catch(() => {});
     if (window.__TAURI__) await invoke('delete_credentials').catch(() => {});
     localStorage.removeItem('specter_token');
+    localStorage.removeItem('specter_refresh_token');
     localStorage.removeItem('specter_user');
     setUser(null);
   };

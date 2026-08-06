@@ -142,6 +142,7 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
   const [overlayPassthroughKey, setOverlayPassthroughKey] = useState(localStorage.getItem('specter_overlay_passthrough_key') || '');
   const [overlayCorner, setOverlayCorner] = useState(localStorage.getItem('specter_overlay_corner') || 'top-right'); // 'top-right' | 'top-left'
   const [overlaySafeMode, setOverlaySafeMode] = useState(localStorage.getItem('specter_overlay_safe_mode') === '1');
+  const [closeBehavior, setCloseBehavior] = useState(localStorage.getItem('specter_close_behavior') || 'quit'); // 'quit' | 'tray_resident' | 'tray_light'
   const [recordingKey, setRecordingKey] = useState(null); // 'ptt' | 'channelToggle' | 'streamNext' | 'overlayPassthrough' | null
   const [commsSaved, setCommsSaved] = useState(false);
 
@@ -453,6 +454,12 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
       localStorage.setItem('specter_overlay_safe_mode', '1');
     } else {
       localStorage.removeItem('specter_overlay_safe_mode');
+    }
+    localStorage.setItem('specter_close_behavior', closeBehavior);
+    if (isTauri) {
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('set_close_behavior', { mode: closeBehavior }).catch(() => {});
+      });
     }
     window.dispatchEvent(new StorageEvent('storage', { key: 'specter_ptt_key' }));
     window.dispatchEvent(new StorageEvent('storage', { key: 'specter_channel_toggle_key' }));
@@ -797,6 +804,34 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
                 </span>
               </label>
             </div>
+
+            {/* Close Behavior */}
+            {isTauri && (
+              <div className="pt-2 border-t border-specter-primary-dim/30">
+                <label className="block text-xs text-specter-text-muted mb-2 uppercase tracking-wider">When Closing The Window</label>
+                <span className="text-xs text-specter-text-muted opacity-60 block mb-2">
+                  What the X button does. Tray modes add a system tray icon — use its menu to reopen or quit for real.
+                </span>
+                <div className="flex flex-col gap-2">
+                  {[
+                    { v: 'quit', l: 'Fully Close', d: "Exits the app completely — today's default behavior." },
+                    { v: 'tray_light', l: 'Close To Tray', d: 'Frees the window’s memory but keeps background message sync and event notifications running.' },
+                    { v: 'tray_resident', l: 'Minimize To Tray', d: 'Keeps the window fully loaded in the background for an instant reopen — uses more memory while closed.' },
+                  ].map(opt => (
+                    <button key={opt.v} onClick={() => setCloseBehavior(opt.v)}
+                      className={`text-left px-3 py-2 border text-xs font-mono transition-colors ${
+                        closeBehavior === opt.v
+                          ? 'border-specter-primary-neon text-specter-primary-neon bg-specter-primary-neon/10'
+                          : 'border-specter-primary-dim text-specter-text-muted hover:text-white hover:border-specter-primary-cyan'
+                      }`}
+                    >
+                      <span className="block uppercase tracking-widest">{opt.l}</span>
+                      <span className="block opacity-70 mt-0.5 normal-case tracking-normal">{opt.d}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="mt-6 flex justify-end gap-3 items-center">
               {commsSaved && <span className="text-xs font-mono text-specter-state-success">Comms settings saved.</span>}

@@ -189,6 +189,53 @@ export const getOrgEvents = async (req: AuthRequest, res: Response) => {
   }
 };
 
+// GET /users/me/upcoming-events — cross-org, unlike getOrgEvents above (which
+// takes an explicit :orgId). Built for the desktop client's background sync
+// task (tray_light mode): a headless Rust process with no webview can't
+// replicate the per-org fetch-then-filter the main UI does, so this collapses
+// "every org I'm in, upcoming/live event, that I'm actually signed up for"
+// into one call. "Signed up" = roster RSVP, an assigned group role, or being
+// the event's commander/creator — matches the different ways WarRoom.jsx's
+// getActiveOpsCards-adjacent UI treats a user as "in" an event, but ADDS the
+// signup filter that function doesn't have (that one shows every org event in
+// the time window regardless of participation — fine for an in-app list you
+// glance at, wrong for a notification interrupting someone about an event
+// they're not even part of).
+export const getMyUpcomingEvents = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  try {
+    const result = await pool.query(
+      `SELECT e.id, e.name, e.org_id, o.callsign AS org_callsign,
+              e.start_time, e.end_time, COALESCE(e.launched, false) AS launched
+       FROM events e
+       JOIN organizations o ON o.id = e.org_id
+       WHERE e.ended_at IS NULL
+         AND (e.end_time IS NULL OR e.end_time > NOW())
+         AND e.start_time <= NOW() + INTERVAL '24 hours'
+         AND EXISTS (SELECT 1 FROM org_members om WHERE om.org_id = e.org_id AND om.user_id = $1)
+         AND (
+           e.commander_user_id = $1
+           OR e.creator_id = $1
+           OR EXISTS (SELECT 1 FROM event_roster er WHERE er.event_id = e.id AND er.user_id = $1)
+           OR EXISTS (
+             SELECT 1 FROM event_group_members egm
+             JOIN event_groups eg ON eg.id = egm.group_id
+             WHERE eg.event_id = e.id AND egm.user_id = $1
+           )
+         )
+       ORDER BY e.start_time ASC`,
+      [userId]
+    );
+
+    res.json({ events: result.rows });
+  } catch (err) {
+    console.error('Get my upcoming events error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // Ended operations (ended_at IS NOT NULL — see migration 000034), most recent
 // first. The frontend groups these by month; per-event attendance is fetched
 // on demand via the existing GET /:eventId/groups endpoint when an entry is

@@ -30,9 +30,14 @@ export const resetPasswordSchema = z.object({
   password: z.string().min(8).max(100),
 });
 
+export const refreshSchema = z.object({
+  refresh_token: z.string().min(1),
+});
+
 export type ForgotPasswordInput = z.infer<typeof forgotPasswordSchema>;
 export type ResetPasswordInput = z.infer<typeof resetPasswordSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
+export type RefreshInput = z.infer<typeof refreshSchema>;
 
 export const createOrgSchema = z.object({
   callsign: z.string().min(3).max(64),

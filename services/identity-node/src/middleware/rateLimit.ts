@@ -53,3 +53,7 @@ export const loginRateLimiter = createRateLimiter(15 * 60_000, 10, 'Too many log
 export const registerRateLimiter = createRateLimiter(15 * 60_000, 10, 'Too many registration attempts. Try again later.');
 // Forgot-password can be used to spam a victim's inbox — keep this tighter.
 export const forgotPasswordRateLimiter = createRateLimiter(60 * 60_000, 5, 'Too many password reset requests. Try again later.');
+// Refresh is called automatically (silent renewal, reconnect-after-drop), not
+// typed by a human, so it needs more headroom than login — but still bounded
+// per IP against abuse of the endpoint itself.
+export const refreshRateLimiter = createRateLimiter(15 * 60_000, 30, 'Too many refresh attempts. Try again later.');

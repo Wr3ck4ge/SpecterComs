@@ -25,12 +25,6 @@ export default function StartupSplashScreen() {
         SPECTERCOMS
       </div>
       <div>RESTORING SESSION...</div>
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.6; }
-        }
-      `}</style>
     </div>
   );
 }

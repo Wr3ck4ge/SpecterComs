@@ -399,6 +399,27 @@ button:not(:disabled):hover {
   50%       { opacity: 0.7; }
 }
 
+/* Moved out of inline <style> tags in OperationPlanner/StartupSplashScreen/WarRoom —
+   Tauri auto-injects a nonce into style-src at runtime, which per CSP spec silently
+   negates 'unsafe-inline' for any inline <style> the app writes itself, so these
+   @keyframes were never actually registering. A linked stylesheet isn't affected;
+   the components already reference these by name via style={{ animation: '...' }},
+   so no changes were needed there beyond deleting the dead <style> tags. */
+@keyframes planner-node-in {
+  from { opacity: 0; transform: translateX(-14px) scale(0.96); }
+  to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes notif-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .glow-connector-h {
   background: linear-gradient(90deg,
     rgba(6,182,212,0.3),

@@ -65,6 +65,8 @@ export function createApi(API_BASE_URL) {
     login: (body) => fetchWithAuth("/auth/login", { method: "POST", body }),
     forgotPassword: (email) => fetchWithAuth('/auth/forgot-password', { method: 'POST', body: { email } }),
     resetPassword:  (resetToken, password) => fetchWithAuth('/auth/reset-password', { method: 'POST', body: { token: resetToken, password } }),
+    refresh: (refreshToken) => fetchWithAuth('/auth/refresh', { method: 'POST', body: { refresh_token: refreshToken } }),
+    logout: (refreshToken) => fetchWithAuth('/auth/logout', { method: 'POST', body: { refresh_token: refreshToken } }),
 
     // Users
     updatePresence: (status, gameActivity) => fetchWithAuth("/users/presence", { method: "PUT", body: { status, gameActivity } }),
@@ -78,6 +80,7 @@ export function createApi(API_BASE_URL) {
     uploadAvatar: (formData) => fetchWithAuth("/users/avatar", { method: "POST", body: formData }),
     searchUsers: (q) => fetchWithAuth(`/users/search?q=${encodeURIComponent(q)}`),
     getMyTransactions: (limit = 50, offset = 0) => fetchWithAuth(`/users/me/transactions?limit=${limit}&offset=${offset}`),
+    getMyUpcomingEvents: () => fetchWithAuth('/users/me/upcoming-events'),
 
     // Organizations
     createOrg:    (body)   => fetchWithAuth("/orgs",                          { method: "POST", body: body }),

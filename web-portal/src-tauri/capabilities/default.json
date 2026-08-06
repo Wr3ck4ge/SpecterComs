@@ -27,6 +27,7 @@
     "dialog:default",
     "process:default",
     "process:allow-exit",
+    "notification:default",
     "specter-audio:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",

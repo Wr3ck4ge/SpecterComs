@@ -1742,12 +1742,6 @@ export const GroupPlanner = forwardRef(function GroupPlanner({ orgId, eventId, m
 
   return (
     <div>
-      <style>{`
-        @keyframes planner-node-in {
-          from { opacity: 0; transform: translateX(-14px) scale(0.96); }
-          to   { opacity: 1; transform: translateX(0) scale(1); }
-        }
-      `}</style>
       {/* Access mode badge */}
       <div style={{ marginBottom: 8 }}>
         <span style={{
