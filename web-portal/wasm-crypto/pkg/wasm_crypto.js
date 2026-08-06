@@ -28,6 +28,23 @@ export class SFrameCrypto {
         return v2;
     }
     /**
+     * @param {Uint8Array} encrypted_frame
+     * @param {number} ssrc
+     * @param {number} sequence
+     * @returns {Uint8Array}
+     */
+    decrypt_framed(encrypted_frame, ssrc, sequence) {
+        const ptr0 = passArray8ToWasm0(encrypted_frame, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.sframecrypto_decrypt_framed(this.__wbg_ptr, ptr0, len0, ssrc, sequence);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v2;
+    }
+    /**
      * Encrypt a frame: Returns [12-byte Nonce | Ciphertext | 16-byte Tag]
      * @param {Uint8Array} payload
      * @returns {Uint8Array}
@@ -36,6 +53,23 @@ export class SFrameCrypto {
         const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.sframecrypto_encrypt(this.__wbg_ptr, ptr0, len0);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v2;
+    }
+    /**
+     * @param {Uint8Array} payload
+     * @param {number} ssrc
+     * @param {number} sequence
+     * @returns {Uint8Array}
+     */
+    encrypt_framed(payload, ssrc, sequence) {
+        const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.sframecrypto_encrypt_framed(this.__wbg_ptr, ptr0, len0, ssrc, sequence);
         if (ret[3]) {
             throw takeFromExternrefTable0(ret[2]);
         }

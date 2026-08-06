@@ -2033,7 +2033,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         const decryptKey = frame.isGlobalBroadcast ? cryptoAudioCascadeRef.current : cryptoAudioRef.current;
         if (voiceRelayModeRef.current && decryptKey) {
           try {
-            frame.opusBytes = decryptKey.decrypt(frame.opusBytes);
+            frame.opusBytes = decryptKey.decrypt_framed(frame.opusBytes, frame.ssrc >>> 0, frame.sequence >>> 0);
           } catch (e) {
             console.warn('[Audio] decrypt failed, dropping frame:', e);
             continue;
@@ -3300,7 +3300,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
               return; // key not ready yet — drop rather than send plaintext
             }
             try {
-              payload = cryptoAudioRef.current.encrypt(opusBytes);
+              payload = cryptoAudioRef.current.encrypt_framed(opusBytes, ssrc, seq);
             } catch (e) {
               console.warn('[Audio] encrypt failed, dropping frame (relay mode requires encryption):', e);
               return;
@@ -3336,7 +3336,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           // waiting for the same Duck signal this frame's arrival would trigger).
           if (voiceRelayModeRef.current && cryptoAudioCascadeRef.current) {
             try {
-              const cascadePayload = cryptoAudioCascadeRef.current.encrypt(opusBytes);
+              const cascadePayload = cryptoAudioCascadeRef.current.encrypt_framed(opusBytes, ssrc, seq);
               const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
               let cascadeSignature = null;
               try {

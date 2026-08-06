@@ -8,10 +8,12 @@ export class SFrameCrypto {
      * Decrypt a frame: Expects [12-byte Nonce | Ciphertext | 16-byte Tag]
      */
     decrypt(encrypted_frame: Uint8Array): Uint8Array;
+    decrypt_framed(encrypted_frame: Uint8Array, ssrc: number, sequence: number): Uint8Array;
     /**
      * Encrypt a frame: Returns [12-byte Nonce | Ciphertext | 16-byte Tag]
      */
     encrypt(payload: Uint8Array): Uint8Array;
+    encrypt_framed(payload: Uint8Array, ssrc: number, sequence: number): Uint8Array;
     /**
      * Initialize a new cipher with a 32-byte key
      */
@@ -30,7 +32,9 @@ export interface InitOutput {
     readonly __wbg_sframecrypto_free: (a: number, b: number) => void;
     readonly generate_group_key: () => [number, number, number, number];
     readonly sframecrypto_decrypt: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly sframecrypto_decrypt_framed: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly sframecrypto_encrypt: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly sframecrypto_encrypt_framed: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly sframecrypto_new: (a: number, b: number) => [number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;

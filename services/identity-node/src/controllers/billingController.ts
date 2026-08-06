@@ -9,6 +9,12 @@ import { getPaymentProvider, paymentsEnabled } from '../payments/index.js';
 // matching docs/PRICING_MODEL_2026_05_28.md. Member-hours is NOT a billed/tracked
 // dimension — explicit product decision (that doc recommends keeping it; overridden).
 
+function addMonths(d: Date, n: number): Date {
+  const copy = new Date(d);
+  copy.setMonth(copy.getMonth() + n);
+  return copy;
+}
+
 interface BillingViewer {
   isMember: boolean;
   canViewBilling: boolean;
@@ -79,7 +85,30 @@ export const getBillingStatus = async (req: AuthRequest, res: Response) => {
        FROM org_billing WHERE org_id = $1`,
       [orgId]
     );
-    const row = billingRes.rows[0];
+    let row = billingRes.rows[0];
+
+    // Usage cycles are rolling monthly anniversaries from cycle_start_at, but
+    // nothing ever advanced cycle_start_at or zeroed cycle_bytes_out on
+    // rollover — billingConsumer.ts only ever increments it — so usage just
+    // accumulated across every month boundary indefinitely. Lazily catch up
+    // on read here (same on-demand pattern as the row-creation INSERT above)
+    // rather than requiring a cron job. The cycle_start_at = $3 guard makes
+    // this a no-op if another concurrent request already advanced it.
+    let cycleStart = new Date(row.cycle_start_at);
+    const now = new Date();
+    if (now >= addMonths(cycleStart, 1)) {
+      const originalCycleStart = row.cycle_start_at;
+      while (now >= addMonths(cycleStart, 1)) cycleStart = addMonths(cycleStart, 1);
+      const resetRes = await pool.query(
+        `UPDATE org_billing SET cycle_bytes_out = 0, cycle_start_at = $2, updated_at = NOW()
+         WHERE org_id = $1 AND cycle_start_at = $3
+         RETURNING cycle_bytes_out, cycle_start_at`,
+        [orgId, cycleStart, originalCycleStart]
+      );
+      if (resetRes.rows.length > 0) {
+        row = { ...row, cycle_bytes_out: resetRes.rows[0].cycle_bytes_out, cycle_start_at: resetRes.rows[0].cycle_start_at };
+      }
+    }
 
     const bytesOut     = Number(row.cycle_bytes_out);
     const gbOut        = bytesOut / 1_000_000_000;

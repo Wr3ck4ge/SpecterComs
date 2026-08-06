@@ -215,8 +215,12 @@ fn show_main_window(app: tauri::AppHandle) -> Result<(), String> {
     };
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
-    // The foreground JS/WASM session resumes owning message decrypt + MLS
-    // state once the window is back — see background_sync::FOREGROUND_ACTIVE.
+    // Block until any background decrypt already in flight finishes and
+    // releases MLS_STATE_CRITICAL_SECTION before letting the foreground touch
+    // .specter_mls_state itself — see background_sync's module doc comment.
+    // Flipping FOREGROUND_ACTIVE alone doesn't stop an in-progress cycle, only
+    // future ones.
+    { let _guard = background_sync::MLS_STATE_CRITICAL_SECTION.lock().unwrap_or_else(|e| e.into_inner()); }
     background_sync::FOREGROUND_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }

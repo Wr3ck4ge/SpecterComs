@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 use chacha20poly1305::{
-    aead::{Aead, KeyInit},
+    aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Key, Nonce
 };
 use getrandom::getrandom;
@@ -58,6 +58,54 @@ impl SFrameCrypto {
             .map_err(|_| JsValue::from_str("Decryption failed / Invalid Tag"))?;
 
         Ok(plaintext)
+    }
+
+    // ── Sequence-bound framing (SFrame-style) ──────────────────────────────
+    // encrypt/decrypt above use a random nonce and no AAD — the comment there
+    // already flagged this as not a "real SFrame": nothing ties a ciphertext
+    // to the SSRC/sequence it was actually sent under, so a captured frame
+    // can be replayed later and will still pass AEAD tag verification. These
+    // two derive the nonce deterministically from (ssrc, sequence) instead of
+    // random bytes, and bind both as AAD — a replayed or ssrc/sequence-
+    // mismatched frame now fails the tag check outright rather than silently
+    // decrypting. Since the nonce is derived, not transmitted, there's no
+    // more 12-byte nonce prefix on the wire: ciphertext is exactly
+    // [Ciphertext | 16-byte Tag]. Both ssrc and sequence are already sent
+    // unencrypted alongside the payload in specter.v1.AudioFrame, so this
+    // needs no new wire fields, only that the caller pass the same values it
+    // already had at hand.
+    fn frame_nonce(ssrc: u32, sequence: u32) -> [u8; 12] {
+        let mut nonce = [0u8; 12];
+        nonce[0..4].copy_from_slice(&ssrc.to_be_bytes());
+        nonce[4..12].copy_from_slice(&(sequence as u64).to_be_bytes());
+        nonce
+    }
+
+    fn frame_aad(ssrc: u32, sequence: u32) -> [u8; 8] {
+        let mut aad = [0u8; 8];
+        aad[0..4].copy_from_slice(&ssrc.to_be_bytes());
+        aad[4..8].copy_from_slice(&sequence.to_be_bytes());
+        aad
+    }
+
+    pub fn encrypt_framed(&self, payload: &[u8], ssrc: u32, sequence: u32) -> Result<Vec<u8>, JsValue> {
+        let nonce_bytes = Self::frame_nonce(ssrc, sequence);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let aad = Self::frame_aad(ssrc, sequence);
+
+        self.cipher
+            .encrypt(nonce, Payload { msg: payload, aad: &aad })
+            .map_err(|_| JsValue::from_str("Encryption failed"))
+    }
+
+    pub fn decrypt_framed(&self, encrypted_frame: &[u8], ssrc: u32, sequence: u32) -> Result<Vec<u8>, JsValue> {
+        let nonce_bytes = Self::frame_nonce(ssrc, sequence);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let aad = Self::frame_aad(ssrc, sequence);
+
+        self.cipher
+            .decrypt(nonce, Payload { msg: encrypted_frame, aad: &aad })
+            .map_err(|_| JsValue::from_str("Decryption failed / Invalid Tag"))
     }
 }
 

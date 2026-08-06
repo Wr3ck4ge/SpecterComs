@@ -13,19 +13,25 @@
 // redeems the refresh token first rather than assuming the saved access token
 // is still valid.
 //
-// Known limitation: if the window is reopened while this task is mid-decrypt,
-// there's a narrow window where both the foreground WASM session and this
-// task could race on .specter_mls_state. FOREGROUND_ACTIVE is a best-effort
-// guard (skip touching MLS state while the window is open) that narrows the
-// race but doesn't fully eliminate it — a stricter fix (a real cross-process
-// lock) is deferred until this proves to matter in practice.
+// FOREGROUND_ACTIVE alone only closed most of the race window: the
+// foreground and this task are two independent code paths touching the same
+// .specter_mls_state file within a single process, so checking a flag before
+// starting a decrypt cycle doesn't stop one already in flight when the flag
+// flips. MLS_STATE_CRITICAL_SECTION closes the rest of it — this task holds
+// it for its entire load→decrypt→save sequence, and show_main_window (below)
+// blocks on acquiring it before letting the foreground touch state at all,
+// so by the time the window is actually shown, no background decrypt can
+// still be running. A cross-process file lock (as opposed to an in-process
+// Mutex) isn't needed here: both sides run in this same Tauri process, not
+// separate executables — see the earlier decision to keep this feature
+// in-process rather than a standalone service.
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
 use std::time::Duration;
 use tauri::Manager;
 use tauri_plugin_notification::NotificationExt;
@@ -38,6 +44,10 @@ static STARTED: Once = Once::new();
 /// decrypt + MLS state in that case). Set by the CloseRequested handler
 /// (tray_light) and show_main_window.
 pub static FOREGROUND_ACTIVE: AtomicBool = AtomicBool::new(true);
+
+/// Guards the load→decrypt→save sequence against .specter_mls_state — see
+/// module doc comment above.
+pub static MLS_STATE_CRITICAL_SECTION: Mutex<()> = Mutex::new(());
 
 const NOTIFY_POLL_SECS: u64 = 300;
 const NOTIFY_LEAD_SECS: i64 = 15 * 60;
@@ -176,6 +186,14 @@ async fn decrypt_and_cache(app: &tauri::AppHandle, msg: &serde_json::Value) {
         msg.get("channel_id").and_then(|v| v.as_str()),
         msg.get("encrypted_content").and_then(|v| v.as_str()),
     ) else { return };
+
+    // Held across the whole load→decrypt→save sequence below (all synchronous,
+    // no .await inside) — see module doc comment and show_main_window's
+    // matching acquire, which is what actually closes the race.
+    let _state_guard = MLS_STATE_CRITICAL_SECTION.lock().unwrap_or_else(|e| e.into_inner());
+    // Re-check now that we hold the lock: the foreground may have reopened
+    // and started its own state I/O while we were waiting to acquire it.
+    if FOREGROUND_ACTIVE.load(Ordering::SeqCst) { return; }
 
     let device_state = mls_load_state(app.clone());
     if device_state.is_empty() { return; } // no local identity yet — nothing to decrypt with
