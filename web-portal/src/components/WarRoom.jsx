@@ -643,6 +643,111 @@ function DmCabinet({ friend, onBack, currentUserId }) {
   );
 }
 
+// ── Connection quality indicator — Discord-style signal bars, driven by
+// CommLink's rolling drop/reconnect count over the last 60s (see
+// recomputeConnectionQuality in CommLink.jsx). Purely a visibility aid: it
+// doesn't change any behavior itself, but turns "is my connection actually
+// flaky right now" into something visible at a glance, for the user and for
+// anyone helping them debug a report of choppy audio/video, instead of a
+// question that requires pulling server logs.
+const CONNECTION_QUALITY_META = {
+  excellent: { bars: 4, color: '#22c55e', label: 'Excellent connection' },
+  good:      { bars: 3, color: '#22c55e', label: 'Good connection — one recent drop' },
+  fair:      { bars: 2, color: '#eab308', label: 'Fair connection — a few recent drops' },
+  poor:      { bars: 1, color: '#ef4444', label: 'Poor connection — reconnecting frequently' },
+};
+
+function ConnectionQualityBars({ quality }) {
+  const meta = CONNECTION_QUALITY_META[quality] || CONNECTION_QUALITY_META.excellent;
+  return (
+    <div
+      title={meta.label}
+      style={{ display: 'flex', alignItems: 'flex-end', gap: 1.5, height: 10, cursor: 'default' }}
+    >
+      {[0, 1, 2, 3].map(i => (
+        <div
+          key={i}
+          style={{
+            width: 3,
+            height: 3 + i * 2.3,
+            borderRadius: 1,
+            background: i < meta.bars ? meta.color : '#1e3a5f',
+            transition: 'background 0.3s',
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ── Active Operations: events starting within 24h, plus anything currently
+// live/launched. Slot availability itself is enforced inside
+// EventGroupCompModal (JOIN/FULL per role), so this just needs to surface
+// the right set of cards. Filtering pulled out to a plain function so both
+// the header's count badge and the dropdown panel share one source of truth.
+function getActiveOpsCards(events) {
+  const now = new Date();
+  const in24h = new Date(now.getTime() + 24 * 3600 * 1000);
+  return events
+    .filter(ev => {
+      const start = new Date(ev.start_time);
+      const end = ev.end_time ? new Date(ev.end_time) : null;
+      const isLive = start <= now && (!end || end >= now);
+      const startingSoon = start > now && start <= in24h;
+      return ev.launched || isLive || startingSoon;
+    })
+    .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+}
+
+function ActiveOperationsDropdown({ cards, onEventClick }) {
+  const now = new Date();
+  return (
+    <div
+      className="absolute left-0 right-0 z-20 overflow-y-auto depth-floating"
+      style={{
+        top: '100%', maxHeight: 340, background: '#040c17', borderBottom: '2px solid #0891b2',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.6)', padding: '14px 20px',
+      }}
+    >
+      <div style={{ fontSize: 10, color: '#0e7490', letterSpacing: '0.3em', marginBottom: 8 }}>ACTIVE OPERATIONS</div>
+      <div className="flex flex-wrap gap-2">
+        {cards.map(ev => {
+          const start = new Date(ev.start_time);
+          const end = ev.end_time ? new Date(ev.end_time) : null;
+          const isLive = start <= now && (!end || end >= now);
+          const hasSlots = Number(ev.total_slots) > 0;
+          const slotsOpen = hasSlots && Number(ev.filled_slots) < Number(ev.total_slots);
+          return (
+            <button
+              key={ev.id}
+              onClick={() => onEventClick?.(ev)}
+              className="text-left flex-shrink-0 transition-colors glass-card"
+              style={{ minWidth: 190, padding: '8px 10px', cursor: 'pointer' }}
+            >
+              <div className="flex items-center gap-1.5 mb-1">
+                {(ev.launched || isLive) && (
+                  <span className="text-[10px] rounded px-1 py-0.5 tracking-widest animate-pulse badge-live">LIVE</span>
+                )}
+                {!ev.launched && !isLive && (
+                  <span style={{ fontSize: 10, color: '#0e7490', letterSpacing: '0.15em' }}>
+                    {start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                )}
+              </div>
+              <div className="text-xs font-bold text-white/85 truncate">{ev.name}</div>
+              {hasSlots && (
+                <div className="text-[11px] mt-0.5" style={{ color: slotsOpen ? '#4ade80' : '#94a3b8' }}>
+                  {ev.filled_slots}/{ev.total_slots} slots{slotsOpen ? ' — OPEN' : ''}
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function EventGroupCompModal({ org, event, user, members, canEditEvent, canLaunchEvent, onLaunchEvent, onClose, onOpenEdit, onEventUpdated }) {
   const isOpenAccess = (event?.access_mode || 'open') === 'open';
 

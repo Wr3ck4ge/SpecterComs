@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "SpecterComs",
-  "version": "1.10.9",
+  "version": "1.10.10",
   "identifier": "net.spectercoms.client",
   "build": {
     "frontendDist": "../dist",
