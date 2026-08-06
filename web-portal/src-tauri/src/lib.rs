@@ -997,6 +997,20 @@ pub fn run() {
   }));
 
   tauri::Builder::default()
+    // Must be the first plugin registered (Tauri's own requirement) — it
+    // intercepts a second launch attempt before anything else initializes.
+    // Without this, launching the app again while an instance is already
+    // running invisibly (tray_light close mode keeps the process alive on
+    // purpose) silently spawns a second, fully independent process sharing
+    // the same on-disk credentials file with zero coordination between them
+    // — two uncoordinated processes redeeming the same rotating refresh
+    // token is exactly the cross-caller race background_sync.rs's
+    // REFRESH_LOCK was built to prevent, except a same-process Mutex can't
+    // reach across a process boundary. A second launch attempt now just
+    // focuses the existing window instead.
+    .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+      let _ = show_main_window(app.clone());
+    }))
     .manage(MisconductReportBuffer { frames: Mutex::new(VecDeque::new()) })
     .manage(OverlayHandle(Mutex::new(None)))
     .manage(CloseBehaviorState(Mutex::new("quit".to_string())))
