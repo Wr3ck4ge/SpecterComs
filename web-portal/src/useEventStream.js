@@ -21,19 +21,63 @@ export default function useEventStream(handlers) {
   handlersRef.current = handlers;
 
   useEffect(() => {
-    const token = localStorage.getItem('specter_token');
-    if (!token) return;            // not logged in — nothing to subscribe to
-
     let es;
     let retryDelay = 1000;         // start at 1 s
     let cancelled = false;
 
-    const connect = () => {
+    const connect = async () => {
       if (cancelled) return;
 
-      // EventSource doesn't support custom headers, so pass token as query param.
-      // The SSE endpoint must accept ?token= as an alternative to the Authorization header.
-      es = new EventSource(`${API_BASE_URL}/events/stream?token=${encodeURIComponent(token)}`);
+      // Read fresh on every attempt, not once at mount — this token is only
+      // ~30 min-lived (see identity-node's authController.ts ACCESS_TOKEN_TTL),
+      // so a connection that drops after that needs the *current* localStorage
+      // value on reconnect, not whatever was true when this effect first ran.
+      // Missing entirely (not just stale) is treated as transient too: this
+      // can briefly be true while App.jsx's launch/silent-refresh flow is
+      // still in flight, and retrying picks it up as soon as it lands instead
+      // of this hook giving up for the rest of the mount.
+      const token = localStorage.getItem('specter_token');
+      if (!token) {
+        if (cancelled) return;
+        setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30_000);
+        return;
+      }
+
+      // EventSource cannot send custom headers, so we first mint a short-lived
+      // purpose-bound SSE ticket over an authenticated header-based request.
+      let sseTicket = null;
+      try {
+        const resp = await fetch(`${API_BASE_URL}/events/ticket`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+
+        const json = await resp.json().catch(() => ({}));
+        if (!resp.ok || !json.ticket) {
+          if (resp.status === 401) {
+            // This specific token is dead. Clear it and let App.jsx's
+            // specter:auth-expired handler silently refresh in the
+            // background — but keep retrying here too (fall through to the
+            // catch's backoff-retry below) rather than giving up for good;
+            // by the next attempt localStorage likely has a fresh token from
+            // that refresh.
+            localStorage.removeItem('specter_token');
+            localStorage.removeItem('specter_user');
+            window.dispatchEvent(new CustomEvent('specter:auth-expired'));
+          }
+          throw new Error(json.message || `SSE ticket request failed (${resp.status})`);
+        }
+
+        sseTicket = json.ticket;
+      } catch {
+        if (cancelled) return;
+        setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 30_000);
+        return;
+      }
+
+      es = new EventSource(`${API_BASE_URL}/events/stream?token=${encodeURIComponent(sseTicket)}`);
 
       es.onopen = () => {
         retryDelay = 1000;         // reset back-off on successful connect
