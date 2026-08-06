@@ -395,6 +395,7 @@ function DmCabinet({ friend, onBack, currentUserId }) {
   const [messages,    setMessages]    = React.useState([]);
   const [input,       setInput]       = React.useState('');
   const [loading,     setLoading]     = React.useState(true);
+  const [sendError,   setSendError]   = React.useState(null);
   const inFlightRef = React.useRef(false);
   const bottomRef   = React.useRef(null);
 
@@ -518,13 +519,21 @@ function DmCabinet({ friend, onBack, currentUserId }) {
     if (!content || inFlightRef.current) return;
     inFlightRef.current = true;
     setInput('');
+    setSendError(null);
     try {
       await ensureDmGroup(api, currentUserId, friend.user_id, convId);
       const ciphertext = await encryptDm(api, currentUserId, convId, content);
       notePendingSent(convId, content);
-      await api.sendDmMessage(friend.user_id, ciphertext);
-    } catch {
-      // Sender receives own message back via SSE relay; silent failure is acceptable
+      // api.js's fetchWithAuth resolves {data, error} rather than throwing on
+      // a failed request, so a failed send (expired token, network drop) must
+      // be checked explicitly — see the identical fix in the channel chat's
+      // handleSend above.
+      const { error: sendApiError } = await api.sendDmMessage(friend.user_id, ciphertext);
+      if (sendApiError) throw new Error(sendApiError);
+    } catch (err) {
+      console.error('[DM] send failed:', err);
+      setInput(content);
+      setSendError(err?.message || 'Message failed to send — try again.');
     }
     inFlightRef.current = false;
   };
@@ -612,10 +621,15 @@ function DmCabinet({ friend, onBack, currentUserId }) {
       </div>
 
       {/* Input */}
+      {sendError && (
+        <div style={{ padding: '4px 16px', fontSize: 11, color: '#f87171', background: '#1a0505', borderTop: '1px solid #3b0a0a' }}>
+          {sendError}
+        </div>
+      )}
       <div style={{ padding: '8px', borderTop: '1px solid #0e2233', flexShrink: 0, display: 'flex', gap: 6 }}>
         <input
           value={input}
-          onChange={e => setInput(e.target.value)}
+          onChange={e => { setInput(e.target.value); if (sendError) setSendError(null); }}
           onKeyDown={handleKeyDown}
           placeholder={`Message ${friend.callsign}...`}
           maxLength={4000}
@@ -1553,7 +1567,7 @@ function MonitorChannelInstance({ org, channel, volume, onStatusChange }) {
 
 // ── Main WarRoom Component ───────────────────────────────────────────────────
 
-export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
+export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSettingsOpen, onSettingsPromptShown }) {
   const [orgs,               setOrgs]               = useState([]);
   const [selectedOrg,        setSelectedOrg]        = useState(null);
   const [events,             setEvents]             = useState([]);
@@ -1563,6 +1577,16 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId }) {
   const [voiceChannel,       setVoiceChannel]       = useState(null);  // currently connected voice channel (independent)
   const [inComms,            setInComms]            = useState(false);
   const [showSettings,       setShowSettings]       = useState(false);
+
+  // First-launch-of-a-new-version prompt (see App.jsx) — open once, then tell
+  // the parent so it doesn't re-fire if this component remounts.
+  useEffect(() => {
+    if (forceSettingsOpen) {
+      setShowSettings(true);
+      onSettingsPromptShown?.();
+    }
+  }, [forceSettingsOpen]);
+
   const [showOrgSettings,    setShowOrgSettings]    = useState(false);
   const [plannerEvent,       setPlannerEvent]       = useState(null);   // null | 'create' | event obj
   const [groupCompEvent,     setGroupCompEvent]     = useState(null);   // null | event obj

@@ -396,6 +396,7 @@ function BrowserNotSupported() {
 function AppContent({ isTauriRuntime }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [forceSettingsPrompt, setForceSettingsPrompt] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState(null);
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState(null); // { status, pct?, message? }
@@ -552,6 +553,31 @@ function AppContent({ isTauriRuntime }) {
     };
   }, []);
 
+  // First launch of a new version, once actually inside the app (not on the
+  // pre-login screens): auto-open Settings so close-behavior/keybind/mic
+  // choices don't just sit silently defaulted after an update that changes
+  // them (e.g. this release added the close-to-tray option and the
+  // AAD-bound voice crypto — neither is visible unless someone happens to
+  // open Settings on their own). Fires once per version, not once per launch.
+  useEffect(() => {
+    if (!window.__TAURI__ || !user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { getVersion } = await import('@tauri-apps/api/app');
+        const currentVersion = await getVersion();
+        const lastSeen = localStorage.getItem('specter_last_seen_version');
+        if (!cancelled && lastSeen !== currentVersion) {
+          localStorage.setItem('specter_last_seen_version', currentVersion);
+          if (lastSeen) setForceSettingsPrompt(true); // skip on a genuinely first-ever install — nothing to "catch up" on yet
+        }
+      } catch (e) {
+        console.error('Version-seen check failed:', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [user]);
+
   const navigate = useNavigate();
   const handleLogin = (loggedInUser) => setUser(loggedInUser);
   const handleLogout = async () => {
@@ -614,7 +640,7 @@ function AppContent({ isTauriRuntime }) {
       <Route path="/dashboard" element={
         user
           ? isTauriRuntime
-            ? <WarRoom user={user} onLogout={handleLogout} initialConnectOrgId={null} />
+            ? <WarRoom user={user} onLogout={handleLogout} initialConnectOrgId={null} forceSettingsOpen={forceSettingsPrompt} onSettingsPromptShown={() => setForceSettingsPrompt(false)} />
             : <BrowserNotSupported />
           : <Navigate to="/auth" replace />
       } />

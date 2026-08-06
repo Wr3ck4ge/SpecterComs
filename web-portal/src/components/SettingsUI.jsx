@@ -143,6 +143,21 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
   const [overlayCorner, setOverlayCorner] = useState(localStorage.getItem('specter_overlay_corner') || 'top-right'); // 'top-right' | 'top-left'
   const [overlaySafeMode, setOverlaySafeMode] = useState(localStorage.getItem('specter_overlay_safe_mode') === '1');
   const [closeBehavior, setCloseBehavior] = useState(localStorage.getItem('specter_close_behavior') || 'quit'); // 'quit' | 'tray_resident' | 'tray_light'
+  // Applies immediately on click rather than waiting for the distant "Save
+  // Comms" button — unlike the voice/overlay settings below it, this one
+  // reads as self-contained (a row of 3 buttons), so requiring a separate
+  // save step was a real trap: picking "Close To Tray" without also
+  // remembering to click Save left Rust's CloseBehaviorState on its "quit"
+  // default, so the X button silently kept fully exiting instead.
+  const applyCloseBehavior = (mode) => {
+    setCloseBehavior(mode);
+    localStorage.setItem('specter_close_behavior', mode);
+    if (isTauri) {
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('set_close_behavior', { mode }).catch(() => {});
+      });
+    }
+  };
   const [recordingKey, setRecordingKey] = useState(null); // 'ptt' | 'channelToggle' | 'streamNext' | 'overlayPassthrough' | null
   const [commsSaved, setCommsSaved] = useState(false);
 
@@ -454,12 +469,6 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
       localStorage.setItem('specter_overlay_safe_mode', '1');
     } else {
       localStorage.removeItem('specter_overlay_safe_mode');
-    }
-    localStorage.setItem('specter_close_behavior', closeBehavior);
-    if (isTauri) {
-      import('@tauri-apps/api/core').then(({ invoke }) => {
-        invoke('set_close_behavior', { mode: closeBehavior }).catch(() => {});
-      });
     }
     window.dispatchEvent(new StorageEvent('storage', { key: 'specter_ptt_key' }));
     window.dispatchEvent(new StorageEvent('storage', { key: 'specter_channel_toggle_key' }));
@@ -818,7 +827,7 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
                     { v: 'tray_light', l: 'Close To Tray', d: 'Frees the window’s memory but keeps background message sync and event notifications running.' },
                     { v: 'tray_resident', l: 'Minimize To Tray', d: 'Keeps the window fully loaded in the background for an instant reopen — uses more memory while closed.' },
                   ].map(opt => (
-                    <button key={opt.v} onClick={() => setCloseBehavior(opt.v)}
+                    <button key={opt.v} onClick={() => applyCloseBehavior(opt.v)}
                       className={`text-left px-3 py-2 border text-xs font-mono transition-colors ${
                         closeBehavior === opt.v
                           ? 'border-specter-primary-neon text-specter-primary-neon bg-specter-primary-neon/10'

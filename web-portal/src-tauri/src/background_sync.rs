@@ -93,11 +93,38 @@ async fn refresh_tokens(client: &reqwest::Client, base: &str, refresh_token: &st
 }
 
 /// Loads the saved refresh token and redeems it, persisting the rotated pair
-/// back to disk. Shared by both loops (SSE reconnect and notification poll) —
-/// each keeps the on-disk credential fresh independently, since either one
-/// may be the only thing running for long stretches.
+/// back to disk. Shared by both loops (SSE reconnect and notification poll).
+///
+/// Refresh tokens rotate on every use (identity-node's authController.ts) and
+/// a reused/already-rotated token is treated as theft — the whole chain gets
+/// revoked. sse_loop and notify_loop are two independent callers with no
+/// coordination, so without REFRESH_LOCK both could redeem the SAME saved
+/// token at once: one wins, the other's now-stale attempt looks like reuse,
+/// and the server revokes even the winner's brand-new token. That's exactly
+/// what was happening in production — bursts of one 200 followed by 401s in
+/// the server logs, every ~5 minutes (notify_loop's poll interval), which
+/// eventually left the on-disk refresh token permanently dead server-side and
+/// forced a real re-login on the next launch. The lock serializes both
+/// loops; re-reading load_credentials AFTER acquiring it (not before) means a
+/// caller that had to wait picks up whatever the other one just saved instead
+/// of racing a second call with the token that's already spent.
+static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn refresh_and_save(app: &tauri::AppHandle, client: &reqwest::Client) -> Result<String, String> {
+    let _lock = REFRESH_LOCK.lock().await;
+
     let saved = load_credentials(app.clone()).ok_or("no saved session")?;
+
+    // The foreground JS session owns its own token lifecycle while the
+    // window is open (App.jsx's launch-restore + specter:auth-expired silent
+    // refresh) — piling an independent background refresh on top of that
+    // would reintroduce the exact same single-use-token race against a third
+    // caller. Just reuse whatever access token the foreground currently has
+    // saved instead.
+    if FOREGROUND_ACTIVE.load(Ordering::SeqCst) {
+        return saved.token.ok_or_else(|| "no access token saved".to_string());
+    }
+
     let refresh_token = saved.refresh_token.ok_or("no refresh token saved")?;
     let refreshed = refresh_tokens(client, &api_base(), &refresh_token).await?;
     let user = saved.user.unwrap_or_else(|| serde_json::json!({}));
@@ -158,21 +185,23 @@ async fn sse_session(app: &tauri::AppHandle, client: &reqwest::Client) -> Result
         // sseController.ts writes and the browser's EventSource parses.
         while let Some(pos) = buf.find("\n\n") {
             let frame: String = buf.drain(..pos + 2).collect();
-            handle_sse_frame(app, &frame).await;
+            handle_sse_frame(app, client, &frame).await;
         }
     }
     Err("stream ended".to_string())
 }
 
-async fn handle_sse_frame(app: &tauri::AppHandle, frame: &str) {
+async fn handle_sse_frame(app: &tauri::AppHandle, client: &reqwest::Client, frame: &str) {
     for line in frame.lines() {
         let Some(json_str) = line.strip_prefix("data: ") else { continue };
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(json_str) else { continue };
         let subject = payload.get("subject").and_then(|v| v.as_str()).unwrap_or("");
         if !subject.starts_with("specter.msg.channel.") { continue; }
-        if payload.get("type").and_then(|v| v.as_str()) != Some("message_relay") { continue; }
-        if let Some(msg) = payload.get("payload") {
-            decrypt_and_cache(app, msg).await;
+        let Some(inner) = payload.get("payload") else { continue };
+        match payload.get("type").and_then(|v| v.as_str()) {
+            Some("message_relay") => decrypt_and_cache(app, inner).await,
+            Some("sync_request") => answer_sync_request(app, client, inner).await,
+            _ => {}
         }
     }
 }
@@ -207,6 +236,10 @@ async fn decrypt_and_cache(app: &tauri::AppHandle, msg: &serde_json::Value) {
             let record = serde_json::json!({
                 "id": msg.get("id"),
                 "channel_id": channel_id,
+                // Needed if this device later answers another peer's
+                // sync-request from this cached record — see
+                // answer_sync_request and messageController.ts's relayPayload.
+                "org_id": msg.get("org_id"),
                 "sender_id": msg.get("sender_id"),
                 "callsign": msg.get("callsign"),
                 "global_tag": msg.get("global_tag"),
@@ -228,6 +261,65 @@ async fn decrypt_and_cache(app: &tauri::AppHandle, msg: &serde_json::Value) {
             // "own echoed message" case when the window is actually open.
         }
     }
+}
+
+/// Answers another peer's channel backfill request (see messageController.ts's
+/// "Peer backfill sync" comment — there's no server-side history, so a client
+/// missing messages asks whichever other members are currently online).
+/// While the window is open, WarRoom.jsx's own _textChatSyncRequestRef handler
+/// already does this from messageStore.js's IndexedDB (this device's *full*
+/// history); this only fires while backgrounded, and can only answer from
+/// msgcache.rs's own store — messages this device has personally seen flow by
+/// since the window last closed, not full history. Deliberately a smaller,
+/// best-effort contribution: the sync protocol already fans a request out to
+/// every online member and merges whatever comes back, so a partial answer
+/// from here is additive, not required to be complete.
+async fn answer_sync_request(app: &tauri::AppHandle, client: &reqwest::Client, req: &serde_json::Value) {
+    if FOREGROUND_ACTIVE.load(Ordering::SeqCst) { return; } // foreground already owns this
+
+    let (Some(channel_id), Some(org_id), Some(requester_id)) = (
+        req.get("channel_id").and_then(|v| v.as_str()),
+        req.get("org_id").and_then(|v| v.as_str()),
+        req.get("requester_id").and_then(|v| v.as_str()),
+    ) else { return };
+
+    let my_id = load_credentials(app.clone())
+        .and_then(|s| s.user)
+        .and_then(|u| u.get("id").and_then(|v| v.as_str()).map(str::to_string));
+    if my_id.as_deref() == Some(requester_id) { return; } // don't answer our own request
+
+    let since = req.get("since").and_then(|v| v.as_str());
+
+    let Ok(dir) = app.path().app_data_dir() else { return };
+    let Ok(cached) = msgcache::read(&dir, channel_id, usize::MAX) else { return };
+    let messages: Vec<serde_json::Value> = cached
+        .into_iter()
+        .filter(|m| match (since, m.get("timestamp").and_then(|v| v.as_str())) {
+            (Some(s), Some(t)) => t > s,
+            (None, _) => true,
+            _ => false,
+        })
+        .take(200) // matches messageController.ts's SYNC_MESSAGES_MAX
+        .map(|m| serde_json::json!({
+            "id": m.get("id"),
+            "sender_id": m.get("sender_id"),
+            "callsign": m.get("callsign"),
+            "global_tag": m.get("global_tag"),
+            "encrypted_content": m.get("encrypted_content"),
+            "image_url": m.get("image_url"),
+            "timestamp": m.get("timestamp"),
+        }))
+        .collect();
+    if messages.is_empty() { return; }
+
+    let Ok(access_token) = refresh_and_save(app, client).await else { return };
+    let base = api_base();
+    let _ = client
+        .post(format!("{base}/orgs/{org_id}/channels/{channel_id}/messages/sync-response"))
+        .bearer_auth(&access_token)
+        .json(&serde_json::json!({ "to_user_id": requester_id, "messages": messages }))
+        .send()
+        .await;
 }
 
 // ── Upcoming-event notifications ────────────────────────────────────────────

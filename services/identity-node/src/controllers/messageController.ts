@@ -67,6 +67,12 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
     const relayPayload = {
       id: msg_id,
       channel_id: chanId,
+      // The foreground already knows its own org_id from component state, so
+      // this is only actually needed by the Rust background sync task
+      // (background_sync.rs) — it has no equivalent "current org" context and
+      // needs org_id to construct a sync-response URL if it later answers
+      // another peer's backfill request with something cached from here.
+      org_id: orgId,
       sender_id: userId,
       callsign: userRes.rows[0]?.callsign ?? null,
       global_tag: userRes.rows[0]?.global_tag ?? null,
@@ -134,7 +140,7 @@ export const requestChannelSync = async (req: AuthRequest, res: Response) => {
 
     await publishEvent(`specter.msg.channel.${chanId}`, {
       type: 'sync_request',
-      payload: { channel_id: chanId, requester_id: userId, since: parsed.data.since ?? null },
+      payload: { channel_id: chanId, org_id: orgId, requester_id: userId, since: parsed.data.since ?? null },
     });
 
     res.status(202).json({ ok: true });
