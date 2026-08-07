@@ -27,6 +27,7 @@ This isn't open source — there's no license here for reuse or redistribution. 
 ## Trust model
 
 - Text, direct messages, org channels, video, and voice (on channels running the new relay path) are MLS end-to-end encrypted — servers store and relay ciphertext they cannot decrypt.
+- Private keys are generated on your own device and never leave it, not even encrypted. We don't hold a copy, so there's nothing on our end to hand over even if someone asked.
 - Voice channels not yet migrated to the relay path are still encrypted in transit (TLS) but decrypted server-side so the media relay can mix audio for priority ducking — the same tradeoff described above, being phased out channel-by-channel.
 - A priority speaker's audio reaching other channels (cascade) uses a separate MLS group scoped to the event rather than the channel, since cascade recipients aren't in the speaker's own channel's group — membership is every accepted participant across the event, not just the specific frequency/group a listener happens to be in.
 - Auth tokens and account data are handled by `services/identity-node/`; nothing in that path has access to MLS group keys.
