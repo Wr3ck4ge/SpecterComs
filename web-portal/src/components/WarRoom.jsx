@@ -39,6 +39,10 @@ const _textChatSyncRequestRef  = { current: null };
 const _textChatSyncResponseRef = { current: null };
 const _dmCabinetSyncRequestRef  = { current: null };
 const _dmCabinetSyncResponseRef = { current: null };
+// Re-triggers the channel's "ask peers what I'm missing" request on every
+// fresh SSE connection (initial connect + every reconnect), not just once on
+// channel open — see the `connected` handler below.
+const _textChatResyncRef = { current: null };
 const LAST_SELECTED_ORG_KEY = 'specter_last_selected_org_id';
 
 // ── Palette ─────────────────────────────────────────────────────────────────
@@ -976,6 +980,11 @@ function TextChat({ orgId, channel, user }) {
   const [expandedImg, setExpandedImg] = useState(null);
   const [reportModal, setReportModal] = useState(null); // { msg }
   const endRef = useRef(null);
+  // ids we've already saved/displayed optimistically on send — lets the SSE
+  // echo for our own message still drain the MLS recall queue (see
+  // notePendingSent below) without re-processing/clobbering what's already
+  // the authoritative local copy.
+  const ownSentIdsRef = useRef(new Set());
 
   // ── Load from local IndexedDB on channel change ───────────────────────────
   useEffect(() => {
@@ -1001,6 +1010,12 @@ function TextChat({ orgId, channel, user }) {
         } catch {
           plaintext = null; // genuinely undecryptable (e.g. arrived before this device joined the group)
         }
+        // Own sends are already saved/displayed optimistically in handleSend —
+        // the decrypt-or-recall call above still needed to run unconditionally
+        // to drain the FIFO recall queue in order, but there's nothing left to
+        // do with its result: skip so a stray null-plaintext recall can't
+        // clobber the good local copy.
+        if (isOwnAccount && ownSentIdsRef.current.has(payload.id)) return;
         const msg = {
           id:                payload.id,
           channel_id:        payload.channel_id,
@@ -1025,16 +1040,23 @@ function TextChat({ orgId, channel, user }) {
 
   // ── Ask other online members for anything missing from our local history ──
   // There's no server copy to pull from, so this fans out over the same
-  // per-channel relay subject everyone's already subscribed to.
+  // per-channel relay subject everyone's already subscribed to. Also
+  // registered as a resync callback so the top-level `connected` handler can
+  // re-fire this on every SSE reconnect, not just once on channel open — a
+  // gap only gets filled if someone holding the missing message happens to
+  // be online at the exact moment this runs.
   useEffect(() => {
     if (!channel?.id || !orgId) return;
     let cancelled = false;
-    (async () => {
-      const since = await getLatestChannelTimestamp(channel.id).catch(() => null);
-      if (cancelled) return;
-      api.requestChannelSync(orgId, channel.id, since).catch(() => {});
-    })();
-    return () => { cancelled = true; };
+    const runSync = () => {
+      getLatestChannelTimestamp(channel.id).catch(() => null).then((since) => {
+        if (cancelled) return;
+        api.requestChannelSync(orgId, channel.id, since).catch(() => {});
+      });
+    };
+    runSync();
+    _textChatResyncRef.current = runSync;
+    return () => { cancelled = true; if (_textChatResyncRef.current === runSync) _textChatResyncRef.current = null; };
   }, [channel?.id, orgId]);
 
   // ── Answer another member's sync-request with whatever we have locally ───
@@ -1099,15 +1121,44 @@ function TextChat({ orgId, channel, user }) {
     try {
       await ensureChannelGroup(api, user?.id, orgId, channel.id);
       const ciphertext = await encryptChannel(api, user?.id, channel.id, text);
-      notePendingSent(channel.id, text);
-      const { error: sendApiError } = await api.sendMessage(orgId, channel.id, ciphertext);
+      const { data, error: sendApiError } = await api.sendMessage(orgId, channel.id, ciphertext);
       // api.js never throws on a failed request — it always resolves to
       // {data, error} (see fetchWithAuth) — so a failed send (expired token,
       // network drop, etc.) would fall through here silently unless checked
       // explicitly. Promote it to a thrown error so the catch block below
       // restores the input and surfaces it, same as a thrown MLS error.
       if (sendApiError) throw new Error(sendApiError);
-      // Optimistic message arrives back via SSE message_relay
+
+      // Only queue the plaintext for MLS's own-echo recall (see
+      // decryptGroupOrRecallOwn's doc comment in mlsSession.js) once the send
+      // actually succeeded — queueing it earlier would leave a stale entry
+      // in the FIFO on failure, silently mislabeling a later, unrelated
+      // message with this text.
+      notePendingSent(channel.id, text);
+
+      // Save/display this message immediately rather than waiting on the SSE
+      // echo — if our own SSE connection isn't live at the exact instant the
+      // server publishes (reconnect backoff, ticket refresh, backgrounded
+      // tab), the echo may never arrive and the message would otherwise
+      // vanish with no trace anywhere, sender included.
+      const msg = {
+        id:                data.id,
+        channel_id:        channel.id,
+        sender_id:         user?.id,
+        callsign:          user?.callsign ?? null,
+        global_tag:        user?.global_tag ?? null,
+        encrypted_content: ciphertext,
+        plaintext:         text,
+        image_url:         null,
+        timestamp:         data.timestamp,
+        received_at:       new Date().toISOString(),
+      };
+      ownSentIdsRef.current.add(msg.id);
+      saveChannelMessage(msg).catch(() => {});
+      setMessages(prev => {
+        if (prev.some(m => m.id === msg.id)) return prev;
+        return [...prev, msg];
+      });
     } catch (err) {
       // A failure here (thrown MLS error from ensureChannelGroup/encryptChannel,
       // e.g. an epoch conflict from another client committing to the group at
@@ -2389,7 +2440,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
     orgs_changed:     refreshOrgs,
     org_created:      refreshOrgs,
     // SSE stream just connected — refresh org list in case the initial fetch raced with startup
-    connected:        refreshOrgs,
+    connected:        () => { refreshOrgs(); _textChatResyncRef.current?.(); },
     // Org-scoped events for the currently selected org
     channel_created:  refreshChannelsCb,
     channel_deleted:  refreshChannelsCb,
@@ -2492,6 +2543,18 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
       _textChatRelayRef.current?.(payload);
       _dmCabinetRelayRef.current?.(payload);
       commLinkRelayRef.current?.(payload);
+    },
+    // Peer backfill sync (see messageStore.js / messageController.ts) — these
+    // were previously unwired here, so TextChat/DmCabinet's carefully
+    // registered _*SyncRequestRef/_*SyncResponseRef were never invoked and
+    // the "ask peers for anything I missed" mechanism never actually ran.
+    sync_request: (payload) => {
+      _textChatSyncRequestRef.current?.(payload);
+      _dmCabinetSyncRequestRef.current?.(payload);
+    },
+    sync_response: (payload) => {
+      _textChatSyncResponseRef.current?.(payload);
+      _dmCabinetSyncResponseRef.current?.(payload);
     },
     // MLS group-management traffic (see mlsGroupController.ts's submitDmCommit) —
     // handled globally, not just while the relevant DM is open, since a
