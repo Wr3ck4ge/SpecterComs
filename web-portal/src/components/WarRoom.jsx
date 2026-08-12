@@ -1683,7 +1683,10 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
   const commLinkActionsRef = useRef({});
   // Ref for CommLink's text chat relay (used only when CommLink renders a text channel)
   const commLinkRelayRef = useRef(null);
-  const [calendarOpen,       setCalendarOpen]       = useState(false);
+  // Ref for CommLink's MLS video/audio key re-derive — see the mls_commit
+  // handler below for why this needs to fire on top of handleChannelCommit.
+  const commLinkMlsCommitRef = useRef(null);
+  const [calendarOpen,       setCalendarOpen]       = useState(true);
   const [opsListOpen,        setOpsListOpen]        = useState(false);
   const [serverPickerOpen,   setServerPickerOpen]   = useState(false);
   const [orgBilling,         setOrgBilling]         = useState(null);
@@ -2565,7 +2568,15 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
       if (payload?.conversation_id && payload?.commit) {
         handleDmCommit(api, user?.id, payload.conversation_id, payload.commit).catch(() => {});
       } else if (payload?.channel_id && payload?.commit) {
-        handleChannelCommit(api, user?.id, payload.channel_id, payload.commit).catch(() => {});
+        handleChannelCommit(api, user?.id, payload.channel_id, payload.commit).catch(() => {})
+          .then(() => {
+            // If this is the channel CommLink currently has open, its cached
+            // SFrameCrypto key is now stale — re-derive, or video/audio
+            // to/from anyone added/removed by this commit silently fails to
+            // decrypt for the rest of the session (see CommLink.jsx's Join
+            // handler).
+            if (payload.channel_id === commChannel?.id) commLinkMlsCommitRef.current?.();
+          });
       } else if (payload?.event_group_id && payload?.commit) {
         handleEventGroupCommit(api, user?.id, payload.event_group_id, payload.commit).catch(() => {});
       }
@@ -2621,7 +2632,10 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
     setVoiceMuted(true);
     setVoiceSharing(false);
     setProfileModalUser(null);
-    setCalendarOpen(false);
+    // Calendar is the default view when landing on a server — keep this in
+    // sync with the CALENDAR pill's highlighted state (see calendarOpen
+    // useState above) so the pill and the content shown never disagree.
+    setCalendarOpen(true);
     setActiveSharers([]);
     setWatchTarget(null);
     setChannelPresence({});
@@ -3821,6 +3835,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                 embedded
                 overlayActive={isOverlay}
                 onRelayRef={commLinkRelayRef}
+                onMlsCommitRef={commLinkMlsCommitRef}
               />
             </div>
           );

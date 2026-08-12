@@ -467,7 +467,7 @@ function SourcePickerModal({ sources, onSelect, onCancel }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSpeakingChange, onSharersChange, watchStreamTarget, onWatchFailed, onStreamCanvas, onMuteChange, onLocalLevelChange, onRemoteLevelsChange, onSharingChange, externalControlsRef, hideMuteButton, overlayActive = false, channelVolume = 1.0, onRelayRef, localMutedUserIds, onConnectionQualityChange }) => {
+const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSpeakingChange, onSharersChange, watchStreamTarget, onWatchFailed, onStreamCanvas, onMuteChange, onLocalLevelChange, onRemoteLevelsChange, onSharingChange, externalControlsRef, hideMuteButton, overlayActive = false, channelVolume = 1.0, onRelayRef, onMlsCommitRef, localMutedUserIds, onConnectionQualityChange }) => {
   const [status, setStatus] = useState('disconnected'); // disconnected, connecting, connected, error
   const [messages, setMessages] = useState([]);
   const [roster, setRoster] = useState([]);
@@ -961,6 +961,13 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           }
       } else if (msg.type === 'Join') {
           setRoster(prev => prev.includes(msg.data) ? prev : [...prev, msg.data]);
+          // A joiner's own connect() bumps the channel's MLS epoch if they
+          // weren't already represented in the group. Re-derive here too (not
+          // just on Leave below) or we keep the pre-join key for the rest of
+          // the session while they're on the post-join one — silent decrypt
+          // mismatch (video black, audio silent).
+          refreshVideoKey();
+          refreshAudioKey();
           // Play join sound for remote users only (not for ourselves)
           const localUser = JSON.parse(localStorage.getItem('specter_user') || '{}');
           const localCallsign = localUser.callsign || localUser.username || '';
@@ -1271,6 +1278,12 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     let framesRelayed = 0;
     let framesDecoded = 0;
     let stallWarned = false;
+    // Separate from framesRelayed/framesDecoded below, which only count
+    // successfully-decrypted frames — a 100%-decrypt-failure stream would
+    // otherwise never trip the stall warning (relayed stays 0) and would
+    // just render black with no signal to the user.
+    let consecutiveDecryptFailures = 0;
+    let decryptFailWarned = false;
     // Decode-rate telemetry: log FPS + drop rate every 5 seconds
     let statsWindowStart = Date.now();
     let statsRelayedWindow = 0;
@@ -1366,6 +1379,16 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           } catch (err) {
             frameUndecryptable = true;
           }
+        }
+        if (frameUndecryptable) {
+          consecutiveDecryptFailures++;
+          if (!decryptFailWarned && consecutiveDecryptFailures === 30) {
+            decryptFailWarned = true;
+            addMsg('Video staying black — decrypt key mismatch with sharer. Try leaving and rejoining the channel.', 'error');
+            console.warn('[video] sustained decrypt failure: consecutiveDecryptFailures=', consecutiveDecryptFailures);
+          }
+        } else {
+          consecutiveDecryptFailures = 0;
         }
         if (!frameUndecryptable) {
         // Accumulate GOP buffer so we can replay a complete reference chain when seeding
@@ -1606,6 +1629,16 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     if (onRelayRef) onRelayRef.current = (payload) => chatRelayRef.current?.(payload);
     return () => { if (onRelayRef) onRelayRef.current = null; };
   }, [onRelayRef]);
+
+  // Authoritative "epoch changed" hook for WarRoom's global mls_commit SSE
+  // handler, complementing the Join-triggered re-derive above — Join can
+  // race ahead of the SSE delivery that actually applies the commit
+  // locally, so whichever signal lands second just re-derives (a no-op if
+  // the other already caught it).
+  useEffect(() => {
+    if (onMlsCommitRef) onMlsCommitRef.current = () => { refreshVideoKey(); refreshAudioKey(); };
+    return () => { if (onMlsCommitRef) onMlsCommitRef.current = null; };
+  }, [onMlsCommitRef]);
   
   const audioStreamRef = useRef(null);
   const analyserRef = useRef(null);

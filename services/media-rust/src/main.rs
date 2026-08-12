@@ -788,8 +788,13 @@ async fn main() -> anyhow::Result<()> {
     let config = ServerConfig::builder()
         .with_bind_default(port)
         .with_identity(&identity)
+        // keep_alive_interval alone doesn't detect a dead peer — it only stops
+        // this end from tripping its own idle timer. max_idle_timeout is what
+        // actually closes the connection once a peer stops responding (a
+        // crash/force-quit/network-drop/sleep never sends CONNECTION_CLOSE).
+        // 10s sits comfortably above the 1s keep-alive cadence.
         .keep_alive_interval(Some(Duration::from_secs(1)))
-        .max_idle_timeout(None)
+        .max_idle_timeout(Some(Duration::from_secs(10)))
         .expect("valid idle timeout")
         .build();
 
@@ -1589,6 +1594,15 @@ async fn run_session_loop(
 
     loop {
         tokio::select! {
+            // ── Connection dead ────────────────────────────────────────────
+            // Fires on a graceful CONNECTION_CLOSE, or once max_idle_timeout
+            // elapses with no packets received — the only path that catches a
+            // peer that disappeared without closing cleanly.
+            _ = session.closed() => {
+                info!("Session closed for {} (idle timeout or peer disconnect).", user_id);
+                break;
+            }
+
             // ── Admin kill ─────────────────────────────────────────────────
             _ = kill_rx.recv() => {
                 warn!("Kill signal for {}. Closing.", user_id);

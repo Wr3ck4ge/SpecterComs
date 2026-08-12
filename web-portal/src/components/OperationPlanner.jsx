@@ -59,14 +59,19 @@ const S = {
   },
 };
 
-// ── Create / Edit Event Form ────────────────────────────────────────────────
+// ── Event header — name/date/access/game, then (once created) launch controls ──
 // GAME_OPTIONS is shared (see games.js) with SettingsUI's per-user "my games"
 // picker. Extensible on purpose — mirrors the backend's SUPPORTED_GAMES set
 // in eventsController.ts. Adding a game there + here is the only change
 // needed to offer it; the ship picker below only activates for
 // 'star_citizen' specifically, so a new game added here won't show a picker
 // until its own game_ships sync + picker UI are wired up.
-function EventForm({ orgId, event, members, onSaved, onCancel }) {
+//
+// Covers three states in one persistent header area: not-yet-created
+// (editing forced true, submit reads CREATE OPERATION), editing an existing
+// event in place (submit reads UPDATE), and read-only display
+// (launch/edit/delete).
+function EventHeader({ orgId, event, members, editing, canEdit, launching, onEdit, onLaunch, onDelete, onSaved, onCancelEdit }) {
   const [name, setName] = useState(event?.name || '');
   const isEdit = !!event?.id;
   const [startNow, setStartNow] = useState(!isEdit);
@@ -77,7 +82,6 @@ function EventForm({ orgId, event, members, onSaved, onCancel }) {
   const [plannerIds, setPlannerIds] = useState(() => (event?.planners || []).map(p => p.user_id));
   const [hasMeetupLocation, setHasMeetupLocation] = useState(!!event?.meetup_location);
   const [meetupLocation, setMeetupLocation] = useState(event?.meetup_location || '');
-  const [showConfigure, setShowConfigure] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -111,8 +115,8 @@ function EventForm({ orgId, event, members, onSaved, onCancel }) {
       if (error) { setErr(error); return; }
       // Server response doesn't join planner callsigns back in — synthesize
       // them from what this form already knows locally rather than an extra
-      // round-trip, so the detail view we're about to switch into shows the
-      // right planner list immediately instead of waiting for a refetch.
+      // round-trip, so the builder we're about to unlock shows the right
+      // planner list immediately instead of waiting for a refetch.
       const createdEvent = {
         ...data.event,
         planners: plannerIds.map(uid => {
@@ -124,134 +128,166 @@ function EventForm({ orgId, event, members, onSaved, onCancel }) {
     }
   };
 
-  return (
-    <form onSubmit={handleSubmit} style={{ maxWidth: 420 }}>
-      <div style={{ marginBottom: 12 }}>
-        <label style={S.label}>OPERATION NAME</label>
-        <input value={name} onChange={e => setName(e.target.value)} style={S.input} maxLength={64} placeholder="Operation Thunderstrike" />
+  if (!editing) {
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+          <div>
+            <div style={{ fontSize: 12, color: '#e5e7eb', fontWeight: 'bold' }}>{event.name}</div>
+            <div style={{ fontSize: 11, color: '#0891b2', marginTop: 2 }}>
+              {new Date(event.start_time).toLocaleString()}
+              {event.end_time && <> — {new Date(event.end_time).toLocaleString()}</>}
+            </div>
+          </div>
+          <div style={{ flex: 1 }} />
+          {event.launched && (
+            <span style={{ fontSize: 11, color: '#22c55e', border: '1px solid #16a34a', padding: '3px 10px', borderRadius: 3, letterSpacing: '0.15em' }}>
+              LAUNCHED
+            </span>
+          )}
+        </div>
+
+        {(event.planners || []).length > 0 && (
+          <div style={{ marginBottom: 8, fontSize: 11, color: '#0e7490' }}>
+            Planners: {event.planners.map(p => (
+              <span key={p.user_id} style={{ color: '#67e8f9', marginRight: 6 }}>{p.callsign}</span>
+            ))}
+          </div>
+        )}
+
+        {event.meetup_location && (
+          <div style={{ marginBottom: 8, fontSize: 11, color: '#0e7490' }}>
+            <span style={{ letterSpacing: '0.15em' }}>MEETUP: </span>
+            <span style={{ color: '#e5e7eb', fontFamily: 'monospace' }}>{event.meetup_location}</span>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          {canEdit && !event.launched && (
+            <button onClick={onLaunch} disabled={launching} style={{ ...S.btnLaunch, padding: '6px 14px', opacity: launching ? 0.6 : 1 }}>
+              {launching ? 'LAUNCHING...' : 'LAUNCH'}
+            </button>
+          )}
+          {canEdit && !event.launched && (
+            <button onClick={onEdit} style={S.btnCyan}>EDIT</button>
+          )}
+          {canEdit && <button onClick={onDelete} style={S.btnDanger}>DELETE</button>}
+        </div>
       </div>
-      <div style={{ marginBottom: 12 }}>
-        <label style={S.label}>START TIME</label>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button
-            type="button"
-            onClick={() => setStartNow(true)}
-            style={{
-              fontSize: 11, padding: '5px 12px', borderRadius: 3, cursor: 'pointer', letterSpacing: '0.1em',
-              background: startNow ? '#041e2e' : 'transparent',
-              border: `1px solid ${startNow ? '#0891b2' : '#0e2233'}`,
-              color: startNow ? '#22d3ee' : '#9ca3af',
-            }}
-          >START NOW</button>
-          <button
-            type="button"
-            onClick={() => setStartNow(false)}
-            style={{
-              fontSize: 11, padding: '5px 12px', borderRadius: 3, cursor: 'pointer', letterSpacing: '0.1em',
-              background: !startNow ? '#041e2e' : 'transparent',
-              border: `1px solid ${!startNow ? '#0891b2' : '#0e2233'}`,
-              color: !startNow ? '#22d3ee' : '#9ca3af',
-            }}
-          >SCHEDULE</button>
-          {!startNow && (
-            <input type="datetime-local" value={startTime} onChange={e => setStartTime(e.target.value)} style={{ ...S.input, flex: 1, minWidth: 160 }} />
+    );
+  }
+
+  return (
+    <form onSubmit={handleSubmit} style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
+        <div style={{ flex: '1 1 240px', minWidth: 200 }}>
+          <label style={S.label}>OPERATION NAME</label>
+          <input value={name} onChange={e => setName(e.target.value)} style={S.input} maxLength={64} placeholder="Operation Thunderstrike" />
+        </div>
+        <div style={{ flex: '1 1 260px', minWidth: 220 }}>
+          <label style={S.label}>START TIME</label>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              onClick={() => setStartNow(true)}
+              style={{
+                fontSize: 11, padding: '5px 12px', borderRadius: 3, cursor: 'pointer', letterSpacing: '0.1em',
+                background: startNow ? '#041e2e' : 'transparent',
+                border: `1px solid ${startNow ? '#0891b2' : '#0e2233'}`,
+                color: startNow ? '#22d3ee' : '#9ca3af',
+              }}
+            >START NOW</button>
+            <button
+              type="button"
+              onClick={() => setStartNow(false)}
+              style={{
+                fontSize: 11, padding: '5px 12px', borderRadius: 3, cursor: 'pointer', letterSpacing: '0.1em',
+                background: !startNow ? '#041e2e' : 'transparent',
+                border: `1px solid ${!startNow ? '#0891b2' : '#0e2233'}`,
+                color: !startNow ? '#22d3ee' : '#9ca3af',
+              }}
+            >SCHEDULE</button>
+            {!startNow && (
+              <input type="datetime-local" value={startTime} onChange={e => setStartTime(e.target.value)} style={{ ...S.input, flex: 1, minWidth: 160 }} />
+            )}
+          </div>
+        </div>
+        <div style={{ flex: '1 1 200px', minWidth: 180 }}>
+          <label style={S.label}>END TIME <span style={{ color: '#0e7490', fontWeight: 'normal' }}>(optional)</span></label>
+          <input type="datetime-local" value={endTime} onChange={e => setEndTime(e.target.value)} style={S.input} />
+          {endTime && (
+            <button type="button" onClick={() => setEndTime('')} style={{ ...S.btnDim, fontSize: 10, marginTop: 4, padding: '2px 8px' }}>
+              CLEAR END TIME
+            </button>
           )}
         </div>
       </div>
-      <div style={{ marginBottom: 12 }}>
-        <label style={S.label}>END TIME <span style={{ color: '#0e7490', fontWeight: 'normal' }}>(optional)</span></label>
-        <input type="datetime-local" value={endTime} onChange={e => setEndTime(e.target.value)} style={S.input} />
-        {endTime && (
-          <button type="button" onClick={() => setEndTime('')} style={{ ...S.btnDim, fontSize: 10, marginTop: 4, padding: '2px 8px' }}>
-            CLEAR END TIME
-          </button>
-        )}
-      </div>
-      <div style={{ marginBottom: 12 }}>
-        {/* Configure toggle */}
-        <button
-          type="button"
-          onClick={() => setShowConfigure(c => !c)}
-          style={{
-            width: '100%', fontSize: 11, padding: '7px 14px', borderRadius: 3, cursor: 'pointer',
-            letterSpacing: '0.15em', textAlign: 'left', display: 'flex', alignItems: 'center', gap: 8,
-            background: showConfigure ? '#041e2e' : '#020c14',
-            border: `1px solid ${showConfigure ? '#0891b2' : '#0e2233'}`,
-            color: showConfigure ? '#22d3ee' : '#9ca3af',
-            transition: 'all 0.15s',
-          }}
-        >
-          <span>{showConfigure ? '▼' : '▶'}</span>
-          <span>CONFIGURE</span>
-          <span style={{ fontSize: 10, color: '#0e7490', marginLeft: 4 }}>planners · access mode</span>
-        </button>
 
-        {showConfigure && (
-          <div style={{ marginTop: 8, padding: '12px', background: '#020c14', border: '1px solid #0e2233', borderRadius: 3 }}>
-            <div style={{ marginBottom: 12 }}>
-              <label style={S.label}>ACCESS MODE</label>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {[{ v: 'open', l: 'OPEN — anyone can join' }, { v: 'restricted', l: 'RESTRICTED — planners assign' }].map(opt => (
-                  <button
-                    key={opt.v} type="button" onClick={() => setAccessMode(opt.v)}
-                    style={{
-                      flex: 1, fontSize: 11, padding: '6px 4px', borderRadius: 3, cursor: 'pointer', fontFamily: 'monospace',
-                      background: accessMode === opt.v ? '#041e2e' : 'transparent',
-                      border: `1px solid ${accessMode === opt.v ? '#0891b2' : '#0e2233'}`,
-                      color: accessMode === opt.v ? '#22d3ee' : '#9ca3af',
-                      transition: 'all 0.15s',
-                    }}
-                  >
-                    {opt.l}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div style={{ marginBottom: 12 }}>
-              <label style={S.label}>GAME <span style={{ color: '#0e7490', fontWeight: 'normal' }}>(optional — enables a ship picker per group)</span></label>
-              <div style={{ display: 'flex', gap: 6 }}>
-                {GAME_OPTIONS.map(opt => (
-                  <button
-                    key={opt.v} type="button" onClick={() => setGame(opt.v)}
-                    style={{
-                      flex: 1, fontSize: 11, padding: '6px 4px', borderRadius: 3, cursor: 'pointer', fontFamily: 'monospace',
-                      background: game === opt.v ? '#041e2e' : 'transparent',
-                      border: `1px solid ${game === opt.v ? '#0891b2' : '#0e2233'}`,
-                      color: game === opt.v ? '#22d3ee' : '#9ca3af',
-                      transition: 'all 0.15s',
-                    }}
-                  >
-                    {opt.l}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <label style={S.label}>CO-PLANNERS <span style={{ color: '#0e7490', fontWeight: 'normal' }}>(can edit event &amp; assign roles)</span></label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxHeight: 100, overflowY: 'auto' }}>
-                {members.map(m => {
-                  const selected = plannerIds.includes(m.user_id);
-                  return (
-                    <button
-                      key={m.user_id} type="button" onClick={() => togglePlanner(m.user_id)}
-                      style={{
-                        fontSize: 11, padding: '3px 8px', borderRadius: 3, cursor: 'pointer',
-                        background: selected ? '#041e2e' : 'transparent',
-                        border: `1px solid ${selected ? '#0891b2' : '#0e2233'}`,
-                        color: selected ? '#22d3ee' : '#9ca3af',
-                        transition: 'all 0.15s', fontFamily: 'monospace',
-                      }}
-                    >
-                      {m.callsign}
-                    </button>
-                  );
-                })}
-                {members.length === 0 && <span style={{ fontSize: 11, color: '#0e7490' }}>No members loaded</span>}
-              </div>
-            </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
+        <div style={{ flex: '1 1 260px', minWidth: 220 }}>
+          <label style={S.label}>ACCESS MODE</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[{ v: 'open', l: 'OPEN — anyone can join' }, { v: 'restricted', l: 'RESTRICTED — planners assign' }].map(opt => (
+              <button
+                key={opt.v} type="button" onClick={() => setAccessMode(opt.v)}
+                style={{
+                  flex: 1, fontSize: 11, padding: '6px 4px', borderRadius: 3, cursor: 'pointer', fontFamily: 'monospace',
+                  background: accessMode === opt.v ? '#041e2e' : 'transparent',
+                  border: `1px solid ${accessMode === opt.v ? '#0891b2' : '#0e2233'}`,
+                  color: accessMode === opt.v ? '#22d3ee' : '#9ca3af',
+                  transition: 'all 0.15s',
+                }}
+              >
+                {opt.l}
+              </button>
+            ))}
           </div>
-        )}
+        </div>
+        <div style={{ flex: '0 1 220px', minWidth: 180 }}>
+          <label style={S.label}>GAME <span style={{ color: '#0e7490', fontWeight: 'normal' }}>(enables a ship picker per group)</span></label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {GAME_OPTIONS.map(opt => (
+              <button
+                key={opt.v} type="button" onClick={() => setGame(opt.v)}
+                style={{
+                  flex: 1, fontSize: 11, padding: '6px 4px', borderRadius: 3, cursor: 'pointer', fontFamily: 'monospace',
+                  background: game === opt.v ? '#041e2e' : 'transparent',
+                  border: `1px solid ${game === opt.v ? '#0891b2' : '#0e2233'}`,
+                  color: game === opt.v ? '#22d3ee' : '#9ca3af',
+                  transition: 'all 0.15s',
+                }}
+              >
+                {opt.l}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <label style={S.label}>CO-PLANNERS <span style={{ color: '#0e7490', fontWeight: 'normal' }}>(can edit event &amp; assign roles)</span></label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxHeight: 100, overflowY: 'auto' }}>
+          {members.map(m => {
+            const selected = plannerIds.includes(m.user_id);
+            return (
+              <button
+                key={m.user_id} type="button" onClick={() => togglePlanner(m.user_id)}
+                style={{
+                  fontSize: 11, padding: '3px 8px', borderRadius: 3, cursor: 'pointer',
+                  background: selected ? '#041e2e' : 'transparent',
+                  border: `1px solid ${selected ? '#0891b2' : '#0e2233'}`,
+                  color: selected ? '#22d3ee' : '#9ca3af',
+                  transition: 'all 0.15s', fontFamily: 'monospace',
+                }}
+              >
+                {m.callsign}
+              </button>
+            );
+          })}
+          {members.length === 0 && <span style={{ fontSize: 11, color: '#0e7490' }}>No members loaded</span>}
+        </div>
+      </div>
+
       {/* Meetup location */}
       <div style={{ marginBottom: 12 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
@@ -279,9 +315,35 @@ function EventForm({ orgId, event, members, onSaved, onCancel }) {
         <button type="submit" disabled={saving} style={{ ...S.btnCyan, opacity: saving ? 0.5 : 1 }}>
           {saving ? '...' : event?.id ? 'UPDATE' : 'CREATE OPERATION'}
         </button>
-        {onCancel && <button type="button" onClick={onCancel} style={S.btnDim}>CANCEL</button>}
+        <button type="button" onClick={onCancelEdit} style={S.btnDim}>CANCEL</button>
       </div>
     </form>
+  );
+}
+
+// ── Pre-create placeholder ──────────────────────────────────────────────────
+// Group Tree / Frequencies / Presets data is persisted server-side against a
+// real event ID (GroupPlanner's load() fetches by eventId unconditionally on
+// mount), so it can't be shown live before the event exists. Stands in
+// GroupPlanner's layout slot while EventHeader is still in create mode —
+// dimmed chrome, no data fetching, no handlers.
+function GroupPlannerPreview() {
+  return (
+    <div style={{ opacity: 0.45, pointerEvents: 'none', userSelect: 'none' }}>
+      <div style={{ marginBottom: 10, padding: '8px 12px', background: '#020c14', border: '1px solid #0e2233', borderRadius: 4 }}>
+        <span style={{ fontSize: 11, color: '#0e7490', letterSpacing: '0.2em' }}>PRESETS</span>
+      </div>
+      <div style={S.sectionLabel}>FREQUENCIES (0)</div>
+      <div style={S.groupCard}>
+        <span style={{ fontSize: 11, color: '#0e7490' }}>No frequencies defined.</span>
+      </div>
+      <div style={S.sectionLabel}>GROUP TREE (0 groups)</div>
+      <div style={{ ...S.groupCard, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 140, textAlign: 'center' }}>
+        <span style={{ fontSize: 12, color: '#0e7490', letterSpacing: '0.05em' }}>
+          Name your operation and hit CREATE OPERATION above to begin building groups.
+        </span>
+      </div>
+    </div>
   );
 }
 
@@ -1671,18 +1733,6 @@ export const GroupPlanner = forwardRef(function GroupPlanner({ orgId, eventId, m
     return result;
   }, [orgId, eventId]);
 
-  const handleQuickJoin = async () => {
-    const { error } = await api.quickJoinEvent(orgId, eventId);
-    if (error) setMsg({ type: 'error', text: error });
-    else load();
-  };
-
-  const handleQuickLeave = async () => {
-    const { error } = await api.leaveMyEventSignup(orgId, eventId);
-    if (error) setMsg({ type: 'error', text: error });
-    else load();
-  };
-
   // ── Accept / Decline assignment (restricted events) ──────────────
   const handleRespond = async (accept) => {
     const { error } = await api.respondEventAssignment(orgId, eventId, accept);
@@ -1715,9 +1765,12 @@ export const GroupPlanner = forwardRef(function GroupPlanner({ orgId, eventId, m
     setTimeout(() => setJustDropped(null), 400);
   };
 
-  // Expose save() for parent to call on close
+  // Expose save() for parent to call on close, and load() so OperationPlanner's
+  // event_roster_changed SSE handler can refetch this tree when the roster
+  // changes elsewhere (self-signup, approval, leave, another planner's save).
   useImperativeHandle(ref, () => ({
     save: handleSave,
+    load,
   }));
 
   if (loading) return <div style={{ color: '#0e7490', fontSize: 12 }}>Loading groups...</div>;
@@ -1779,19 +1832,6 @@ export const GroupPlanner = forwardRef(function GroupPlanner({ orgId, eventId, m
       {!isOpen && assignmentGroupName && assignmentStatus === 'declined' && (
         <div style={{ fontSize: 11, color: '#ef4444', marginBottom: 8, letterSpacing: '0.1em' }}>
           ✕ You declined your assignment to {assignmentGroupName}
-        </div>
-      )}
-
-      {isOpen && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', marginBottom: 12,
-          background: '#0c1a26', border: '1px solid #0891b2', borderRadius: 4,
-        }}>
-          <span style={{ fontSize: 12, color: '#e5e7eb', flex: 1 }}>
-            Quick signup for this operation
-          </span>
-          <button onClick={handleQuickJoin} style={S.btnCyan}>ONE-CLICK JOIN</button>
-          <button onClick={handleQuickLeave} style={S.btnDanger}>LEAVE SIGNUP</button>
         </div>
       )}
 
@@ -2220,8 +2260,10 @@ function ChannelTree({ orgId, eventId }) {
 
 // ── Main OperationPlanner ───────────────────────────────────────────────────
 export default function OperationPlanner({ org, event: eventProp, members, user, onClose, onRefreshEvents }) {
-  const [view, setView] = useState(eventProp ? 'detail' : 'create');
-  const [editing, setEditing] = useState(false);
+  // true = EventHeader is in its editable form (covers both "not created
+  // yet" and "editing an existing event in place") — see EventHeader's doc
+  // comment. "Not created yet" is derived as !event?.id everywhere below.
+  const [headerEditing, setHeaderEditing] = useState(!eventProp);
   const [launching, setLaunching] = useState(false);
   const [editors, setEditors] = useState([]);
   const groupPlannerRef = useRef(null);
@@ -2262,12 +2304,12 @@ export default function OperationPlanner({ org, event: eventProp, members, user,
     // Roster changed elsewhere (self-signup, approval, leave, another planner's
     // save) — refetch so this view doesn't go stale until a manual reload.
     event_roster_changed: (p) => {
-      if (p.event_id === event?.id) load();
+      if (p.event_id === event?.id) groupPlannerRef.current?.load();
     },
   });
 
   const handleClose = async () => {
-    if (view === 'detail' && canEdit && !event?.launched && groupPlannerRef.current) {
+    if (event?.id && canEdit && !event?.launched && groupPlannerRef.current) {
       await groupPlannerRef.current.save();
     }
     onClose();
@@ -2298,10 +2340,10 @@ export default function OperationPlanner({ org, event: eventProp, members, user,
             ← Back
           </button>
           <span className="text-specter-primary-cyan uppercase tracking-widest text-sm truncate">
-            {view === 'create' ? '+ New Operation' : `⚔ ${event?.name?.toUpperCase()}`}
+            {!event?.id ? '+ New Operation' : `⚔ ${event?.name?.toUpperCase()}`}
           </span>
         </div>
-        {view === 'detail' && canEdit && !event?.launched && (
+        {event?.id && !headerEditing && canEdit && !event?.launched && (
           <button
             onClick={() => groupPlannerRef.current?.save()}
             style={{ ...S.btnCyan, padding: '4px 14px', fontSize: 10 }}
@@ -2328,72 +2370,30 @@ export default function OperationPlanner({ org, event: eventProp, members, user,
         )}
 
         <div style={S.body}>
-          {view === 'create' && (
-            <EventForm
-              orgId={org.id}
-              members={members}
-              onSaved={(newEvent) => {
-                onRefreshEvents?.();
-                // Go straight into the group/tier planner for the event just
-                // created instead of closing — no close-and-reopen required.
-                setEvent(newEvent);
-                setView('detail');
-              }}
-              onCancel={onClose}
-            />
-          )}
+          <EventHeader
+            orgId={org.id}
+            event={event}
+            members={members}
+            editing={headerEditing}
+            canEdit={canEdit}
+            launching={launching}
+            onEdit={() => setHeaderEditing(true)}
+            onLaunch={handleLaunch}
+            onDelete={handleDelete}
+            onCancelEdit={() => { if (!event?.id) { onClose(); } else { setHeaderEditing(false); } }}
+            onSaved={(newEvent) => {
+              onRefreshEvents?.();
+              // Brand-new event: swap straight into the live builder for it
+              // instead of closing — no close-and-reopen required. Existing
+              // event: local `event` state stays as-is until onRefreshEvents
+              // flows an updated eventProp back down.
+              if (newEvent) setEvent(newEvent);
+              setHeaderEditing(false);
+            }}
+          />
 
-          {view === 'detail' && event && !editing && (
+          {event?.id ? (
             <>
-              {/* Event info */}
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-                  <div>
-                    <div style={{ fontSize: 12, color: '#e5e7eb', fontWeight: 'bold' }}>{event.name}</div>
-                    <div style={{ fontSize: 11, color: '#0891b2', marginTop: 2 }}>
-                      {new Date(event.start_time).toLocaleString()}
-                      {event.end_time && <> — {new Date(event.end_time).toLocaleString()}</>}
-                    </div>
-                  </div>
-                  <div style={{ flex: 1 }} />
-                  {event.launched && (
-                    <span style={{ fontSize: 11, color: '#22c55e', border: '1px solid #16a34a', padding: '3px 10px', borderRadius: 3, letterSpacing: '0.15em' }}>
-                      LAUNCHED
-                    </span>
-                  )}
-                </div>
-
-                {/* Planners list */}
-                {(event.planners || []).length > 0 && (
-                  <div style={{ marginBottom: 8, fontSize: 11, color: '#0e7490' }}>
-                    Planners: {event.planners.map(p => (
-                      <span key={p.user_id} style={{ color: '#67e8f9', marginRight: 6 }}>{p.callsign}</span>
-                    ))}
-                  </div>
-                )}
-
-                {/* Meetup location */}
-                {event.meetup_location && (
-                  <div style={{ marginBottom: 8, fontSize: 11, color: '#0e7490' }}>
-                    <span style={{ letterSpacing: '0.15em' }}>MEETUP: </span>
-                    <span style={{ color: '#e5e7eb', fontFamily: 'monospace' }}>{event.meetup_location}</span>
-                  </div>
-                )}
-
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {canEdit && !event.launched && (
-                    <button onClick={handleLaunch} disabled={launching} style={{ ...S.btnLaunch, padding: '6px 14px', opacity: launching ? 0.6 : 1 }}>
-                      {launching ? 'LAUNCHING...' : 'LAUNCH'}
-                    </button>
-                  )}
-                  {canEdit && !event.launched && (
-                    <button onClick={() => setEditing(true)} style={S.btnCyan}>EDIT</button>
-                  )}
-                  {canEdit && <button onClick={handleDelete} style={S.btnDanger}>DELETE</button>}
-                </div>
-              </div>
-
-              {/* Group planner */}
               <GroupPlanner
                 ref={groupPlannerRef}
                 orgId={org.id}
@@ -2411,16 +2411,8 @@ export default function OperationPlanner({ org, event: eventProp, members, user,
                 <ChannelTree orgId={org.id} eventId={event.id} />
               )}
             </>
-          )}
-
-          {view === 'detail' && event && editing && (
-            <EventForm
-              orgId={org.id}
-              event={event}
-              members={members}
-              onSaved={() => { setEditing(false); onRefreshEvents?.(); }}
-              onCancel={() => setEditing(false)}
-            />
+          ) : (
+            <GroupPlannerPreview />
           )}
         </div>
     </div>

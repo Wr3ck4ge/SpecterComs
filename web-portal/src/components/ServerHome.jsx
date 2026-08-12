@@ -1,6 +1,10 @@
 // ServerHome.jsx — Server landing page shown when an org is selected but no channel is active
+//
+// The ops calendar is owned entirely by the CALENDAR pill in WarRoom.jsx's
+// header (gated by `calendarOpen`), rendered as a single inline panel
+// regardless of whether this landing page or a channel is showing
+// underneath — it does not render its own copy here.
 import React from 'react';
-import OpsCalendarPanel from './OpsCalendarPanel';
 
 export default function ServerHome({
   org,
@@ -13,8 +17,6 @@ export default function ServerHome({
   onLaunchEvent,
   onOpenEvent,
 }) {
-  const canShowCalendar = canViewCalendar !== false && org?.show_calendar_on_landing !== false;
-
   // Kept in sync with WarRoom.jsx's GLASS_PANEL constant — same treatment,
   // applied universally across panel-level elements in both files.
   const glass = {
@@ -56,23 +58,6 @@ export default function ServerHome({
           </div>
         )}
 
-        {canShowCalendar && (
-          <OpsCalendarPanel
-            events={events}
-            orgId={org?.id}
-            canScheduleEvents={canScheduleEvents}
-            onSchedule={onOpenPlanner}
-            onOpenEvent={onOpenEvent}
-            onLaunchEvent={onLaunchEvent}
-            canLaunchEvent={canLaunchEvent}
-          />
-        )}
-
-        {!canShowCalendar && (
-          <div style={{ ...glass, borderRadius: 14, padding: '14px 16px', fontSize: 12, color: '#94a3b8' }}>
-            Calendar access is disabled for this server.
-          </div>
-        )}
       </div>
     </div>
   );

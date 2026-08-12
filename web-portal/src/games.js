@@ -5,7 +5,7 @@ import Hangar from './components/Hangar';
 // picker (SettingsUI's games tab) read from this instead of keeping their
 // own separate lists.
 export const GAME_OPTIONS = [
-  { v: 'none', l: 'NONE' },
+  { v: 'none', l: 'GENERAL' },
   { v: 'star_citizen', l: 'STAR CITIZEN' },
 ];
 
