@@ -378,7 +378,7 @@ export const redeemInvite = async (req: AuthRequest, res: Response) => {
 
 export const getOrgToken = async (req: AuthRequest, res: Response) => {
   const userId = req.user?.id;
-  const orgId = req.params.id;
+  const orgId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
   const { channel_id } = req.body as { channel_id?: string };
 
   if (!userId) {
@@ -386,180 +386,266 @@ export const getOrgToken = async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const orgRes = await pool.query(
-      `SELECT r.name, r.permissions, o.tier
-       FROM org_members om
-       JOIN org_roles r ON om.role_id = r.id
-       JOIN organizations o ON om.org_id = o.id
-       WHERE om.org_id = $1 AND om.user_id = $2`,
-      [orgId, userId]
-    );
+    const ctx = await getOrgChannelAccessContext({
+      userId,
+      orgId,
+      channelId: channel_id,
+    });
 
-    if (orgRes.rows.length === 0) {
-      return res.status(403).json({ message: 'Not a member of this organization' });
-    }
-
-    const { name: roleName, permissions, tier } = orgRes.rows[0];
-    const tierConfig = getOrgTierConfig(tier);
-
-    // Determine if this is an event-launched channel (has event_id set).
-    // Priority ducking only activates in event channels; the priority level
-    // comes from the user's event_group_roles.priority assignment (1=highest, 5=lowest).
-    // Org commander (event commander) gets priority level 1 by default.
-    let is_priority_channel = false;
-    let priority_level = 5; // default: lowest priority (no ducking)
-    // E2E voice relay cutover flag (see migration 000059) — decided once per
-    // channel, defaults to false (today's server-mixed TLS-only voice) until a
-    // channel is explicitly flipped for pilot. media-rust rejects a joiner
-    // whose token disagrees with whatever mode the room already established at
-    // first-join, the same defensive pattern as the channel_id binding below.
-    let voice_relay = false;
-    if (channel_id) {
-      const chanRes = await pool.query(
-        `SELECT event_id, COALESCE(is_frequency, false) AS is_frequency,
-                COALESCE(voice_relay_mode, false) AS voice_relay_mode
-         FROM channels WHERE id = $1 AND org_id = $2`,
-        [channel_id, orgId]
-      );
-      const eventId = chanRes.rows.length > 0 ? chanRes.rows[0].event_id : null;
-      const isFrequencyChannel: boolean = chanRes.rows.length > 0 ? chanRes.rows[0].is_frequency : false;
-      voice_relay = chanRes.rows.length > 0 ? chanRes.rows[0].voice_relay_mode : false;
-      is_priority_channel = eventId != null;
-
-      if (eventId) {
-        const evAccessRes = await pool.query(
-          `SELECT access_mode, commander_user_id, command_channel_id
-           FROM events WHERE id = $1`,
-          [eventId]
-        );
-
-        const commandChannelId = evAccessRes.rows.length > 0 ? evAccessRes.rows[0].command_channel_id : null;
-        const isCommandChannel = channel_id === commandChannelId;
-        const isGroupChannel = !isFrequencyChannel && !isCommandChannel;
-
-        // Group channels are always assignment-locked: only accepted members of
-        // the specific group channel can obtain a token.
-        if (isGroupChannel) {
-          const grpRes = await pool.query(
-            `SELECT 1 FROM event_group_members egm
-             JOIN event_groups eg ON egm.group_id = eg.id
-             WHERE eg.channel_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
-             LIMIT 1`,
-            [channel_id, userId]
-          );
-          if ((grpRes.rowCount ?? 0) === 0)
-            return res.status(403).json({ message: 'Not assigned to this group channel' });
-        }
-
-        // ── Event channel access enforcement ─────────────────────────────────
-        // Restricted mode keeps elevated checks for command/frequency channels.
-        if (evAccessRes.rows.length > 0) {
-          const { access_mode, commander_user_id, command_channel_id } = evAccessRes.rows[0];
-          if (access_mode === 'restricted') {
-            const isCommander  = commander_user_id === userId;
-            const canManageEvt = permissions?.can_manage_events === true ||
-                                 permissions?.can_manage_channels === true;
-            if (!isCommander && !canManageEvt) {
-              if (channel_id === command_channel_id) {
-                // Command channel — require any accepted membership in this event.
-                const acceptedRes = await pool.query(
-                  `SELECT 1 FROM event_group_members egm
-                   JOIN event_groups eg ON egm.group_id = eg.id
-                   WHERE eg.event_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
-                   LIMIT 1`,
-                  [eventId, userId]
-                );
-                if ((acceptedRes.rowCount ?? 0) === 0)
-                  return res.status(403).json({ message: 'Not assigned to this operation' });
-              } else if (isFrequencyChannel) {
-                // Liaison frequency — require the user's role to have access.
-                const freqRes = await pool.query(
-                  `SELECT 1 FROM event_frequency_roles efr
-                   JOIN event_frequencies ef ON efr.frequency_id = ef.id
-                   JOIN event_group_members egm ON egm.role_id = efr.role_id
-                   JOIN event_groups eg ON egm.group_id = eg.id
-                   WHERE ef.channel_id = $1 AND eg.event_id = $2
-                     AND egm.user_id = $3 AND egm.status = 'accepted'
-                   LIMIT 1`,
-                  [channel_id, eventId, userId]
-                );
-                if ((freqRes.rowCount ?? 0) === 0)
-                  return res.status(403).json({ message: 'Not authorised for this frequency' });
-              }
-            }
-          }
-        }
-
-        // Check if user is the event commander → priority 1
-        const cmdRes = await pool.query(
-          `SELECT 1 FROM events WHERE id = $1 AND commander_user_id = $2`,
-          [eventId, userId]
-        );
-        if (cmdRes.rowCount && cmdRes.rowCount > 0) {
-          priority_level = 1;
-        } else {
-          // Check user's assigned role priority in their event group
-          const roleRes = await pool.query(
-            `SELECT COALESCE(egr.priority, 3) AS priority
-             FROM event_group_members egm
-             JOIN event_groups eg ON egm.group_id = eg.id
-             LEFT JOIN event_group_roles egr ON egr.id = egm.role_id
-             WHERE eg.event_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
-             ORDER BY COALESCE(egr.priority, 3) ASC
-             LIMIT 1`,
-            [eventId, userId]
-          );
-          if (roleRes.rows.length > 0) {
-            priority_level = roleRes.rows[0].priority;
-          }
-        }
-      }
-    }
-
-    // Generate Short-Lived Token (5 minutes)
-    // max_video_bitrate_kbps is read by the media server to cap screenshare/video resolution
-    // Include callsign so the media server can display it in roster
+    // 5-minute media token consumed by media-rust.
     const callsign = req.user?.callsign || '';
-    // channel_id is bound into the token so the media relay can verify a
-    // connection actually requests the same channel this token was authorized
-    // for above — without this, a token minted for one (authorized) channel
-    // could be replayed to connect to a different (unauthorized) one, since
-    // the relay otherwise takes the connection's channel_id at face value.
+    // Bind channel_id to prevent cross-channel token replay.
     const token = jwt.sign(
       {
         sub: userId,
         org_id: orgId,
-        role: roleName,
-        permissions,
+        role: ctx.roleName,
+        permissions: ctx.permissions,
         callsign,
-        max_video_bitrate_kbps: tierConfig.maxVideoBitrateKbps,
-        is_priority_channel,
-        priority_level,
-        voice_relay,
+        max_video_bitrate_kbps: ctx.tierConfig.maxVideoBitrateKbps,
+        is_priority_channel: ctx.isPriorityChannel,
+        priority_level: ctx.priorityLevel,
+        voice_relay: ctx.voiceRelay,
         channel_id: channel_id || null,
       },
       getJwtSecret(),
       { expiresIn: '5m' }
     );
 
-    // Phase A of multi-tenant infra: route to this org's assigned node if it has
-    // one (and that node's heartbeat is live). Otherwise, the shared-node load
-    // balancer picks whichever in-service node has the most headroom, so unpinned
-    // orgs spread across the pool instead of all landing on one node. Falls back
-    // to the legacy single-node cache only if literally no shared node is
-    // in-service/online — an outage scenario, not the normal path.
-    const assignedMediaUrl = await getNodeForOrg(orgId as string);
-    const mediaUrl = assignedMediaUrl || (await getBestSharedNode()) || getActiveMediaUrl();
-    // Surfaced alongside the token (rather than requiring the client to decode
-    // its own JWT) so CommLink knows whether to actually encrypt/decrypt audio
-    // before it starts sending — encrypting into a still-mixed-mode room would
-    // break voice for everyone in it (the server mixer expects real Opus, not
-    // SFrame ciphertext).
-    res.json({ token, expires_in: 300, media_url: mediaUrl, voice_relay });
+    // Prefer org-assigned media node; otherwise choose healthiest shared node.
+    const mediaUrl = ctx.mediaUrl;
+    // Return relay mode explicitly so the client can gate E2E audio behavior.
+    res.json({ token, expires_in: 300, media_url: mediaUrl, voice_relay: ctx.voiceRelay });
 
   } catch (error) {
     console.error('Get Org Token Error:', error);
     res.status(500).json({ message: 'Internal Server Error' });
+  }
+};
+
+const getOrgChannelAccessContext = async ({
+  userId,
+  orgId,
+  channelId,
+}: {
+  userId: string;
+  orgId?: string;
+  channelId?: string;
+}) => {
+  if (!orgId) {
+    throw new Error('Missing organization id');
+  }
+
+  const orgRes = await pool.query(
+    `SELECT r.name, r.permissions, o.tier
+     FROM org_members om
+     JOIN org_roles r ON om.role_id = r.id
+     JOIN organizations o ON om.org_id = o.id
+     WHERE om.org_id = $1 AND om.user_id = $2`,
+    [orgId, userId]
+  );
+
+  if (orgRes.rows.length === 0) {
+    const err = new Error('Not a member of this organization') as Error & { status?: number };
+    err.status = 403;
+    throw err;
+  }
+
+  const { name: roleName, permissions, tier } = orgRes.rows[0];
+  const tierConfig = getOrgTierConfig(tier);
+
+  let isPriorityChannel = false;
+  let priorityLevel = 5;
+  let voiceRelay = false;
+
+  if (channelId) {
+    const chanRes = await pool.query(
+      `SELECT event_id, COALESCE(is_frequency, false) AS is_frequency,
+              COALESCE(voice_relay_mode, false) AS voice_relay_mode
+       FROM channels WHERE id = $1 AND org_id = $2`,
+      [channelId, orgId]
+    );
+    const eventId = chanRes.rows.length > 0 ? chanRes.rows[0].event_id : null;
+    const isFrequencyChannel: boolean = chanRes.rows.length > 0 ? chanRes.rows[0].is_frequency : false;
+    voiceRelay = chanRes.rows.length > 0 ? chanRes.rows[0].voice_relay_mode : false;
+    isPriorityChannel = eventId != null;
+
+    if (eventId) {
+      const evAccessRes = await pool.query(
+        `SELECT access_mode, commander_user_id, command_channel_id
+         FROM events WHERE id = $1`,
+        [eventId]
+      );
+
+      const commandChannelId = evAccessRes.rows.length > 0 ? evAccessRes.rows[0].command_channel_id : null;
+      const isCommandChannel = channelId === commandChannelId;
+      const isGroupChannel = !isFrequencyChannel && !isCommandChannel;
+
+      if (isGroupChannel) {
+        const grpRes = await pool.query(
+          `SELECT 1 FROM event_group_members egm
+           JOIN event_groups eg ON egm.group_id = eg.id
+           WHERE eg.channel_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
+           LIMIT 1`,
+          [channelId, userId]
+        );
+        if ((grpRes.rowCount ?? 0) === 0) {
+          const err = new Error('Not assigned to this group channel') as Error & { status?: number };
+          err.status = 403;
+          throw err;
+        }
+      }
+
+      if (evAccessRes.rows.length > 0) {
+        const { access_mode, commander_user_id, command_channel_id } = evAccessRes.rows[0];
+        if (access_mode === 'restricted') {
+          const isCommander = commander_user_id === userId;
+          const canManageEvt = permissions?.can_manage_events === true ||
+                               permissions?.can_manage_channels === true;
+          if (!isCommander && !canManageEvt) {
+            if (channelId === command_channel_id) {
+              const acceptedRes = await pool.query(
+                `SELECT 1 FROM event_group_members egm
+                 JOIN event_groups eg ON egm.group_id = eg.id
+                 WHERE eg.event_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
+                 LIMIT 1`,
+                [eventId, userId]
+              );
+              if ((acceptedRes.rowCount ?? 0) === 0) {
+                const err = new Error('Not assigned to this operation') as Error & { status?: number };
+                err.status = 403;
+                throw err;
+              }
+            } else if (isFrequencyChannel) {
+              const freqRes = await pool.query(
+                `SELECT 1 FROM event_frequency_roles efr
+                 JOIN event_frequencies ef ON efr.frequency_id = ef.id
+                 JOIN event_group_members egm ON egm.role_id = efr.role_id
+                 JOIN event_groups eg ON egm.group_id = eg.id
+                 WHERE ef.channel_id = $1 AND eg.event_id = $2
+                   AND egm.user_id = $3 AND egm.status = 'accepted'
+                 LIMIT 1`,
+                [channelId, eventId, userId]
+              );
+              if ((freqRes.rowCount ?? 0) === 0) {
+                const err = new Error('Not authorised for this frequency') as Error & { status?: number };
+                err.status = 403;
+                throw err;
+              }
+            }
+          }
+        }
+      }
+
+      const cmdRes = await pool.query(
+        `SELECT 1 FROM events WHERE id = $1 AND commander_user_id = $2`,
+        [eventId, userId]
+      );
+      if (cmdRes.rowCount && cmdRes.rowCount > 0) {
+        priorityLevel = 1;
+      } else {
+        const roleRes = await pool.query(
+          `SELECT COALESCE(egr.priority, 3) AS priority
+           FROM event_group_members egm
+           JOIN event_groups eg ON egm.group_id = eg.id
+           LEFT JOIN event_group_roles egr ON egr.id = egm.role_id
+           WHERE eg.event_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
+           ORDER BY COALESCE(egr.priority, 3) ASC
+           LIMIT 1`,
+          [eventId, userId]
+        );
+        if (roleRes.rows.length > 0) {
+          priorityLevel = roleRes.rows[0].priority;
+        }
+      }
+    }
+  }
+
+  const assignedMediaUrl = await getNodeForOrg(orgId as string);
+  const mediaUrl = assignedMediaUrl || (await getBestSharedNode()) || getActiveMediaUrl();
+
+  return {
+    roleName,
+    permissions,
+    tierConfig,
+    isPriorityChannel,
+    priorityLevel,
+    voiceRelay,
+    mediaUrl,
+  };
+};
+
+/** POST /orgs/:id/media-ticket — mint short-lived, scoped media tickets. */
+export const issueOrgMediaTicket = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const orgId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+  const { channel_id, kind, sharer } = req.body as {
+    channel_id?: string;
+    kind?: 'voice' | 'video_publish' | 'video_subscribe' | 'video_subscribe_overlay';
+    sharer?: string;
+  };
+
+  if (!userId) {
+    return res.status(401).json({ message: 'User not authenticated' });
+  }
+  if (!channel_id) {
+    return res.status(400).json({ message: 'channel_id is required' });
+  }
+
+  const allowedKinds = new Set(['voice', 'video_publish', 'video_subscribe', 'video_subscribe_overlay']);
+  if (!kind || !allowedKinds.has(kind)) {
+    return res.status(400).json({ message: 'Invalid media ticket kind' });
+  }
+  if ((kind === 'video_subscribe' || kind === 'video_subscribe_overlay') && !sharer) {
+    return res.status(400).json({ message: 'sharer is required for subscribe tickets' });
+  }
+
+  try {
+    const ctx = await getOrgChannelAccessContext({
+      userId,
+      orgId,
+      channelId: channel_id,
+    });
+
+    const expiresInSeconds = 90;
+    const purpose = kind === 'voice' ? 'media_voice' : 'media_video';
+    const mediaRole = kind === 'voice'
+      ? 'voice'
+      : (kind === 'video_publish' ? 'publish' : kind === 'video_subscribe' ? 'subscribe' : 'subscribe_overlay');
+
+    const ticket = jwt.sign(
+      {
+        sub: userId,
+        org_id: orgId,
+        channel_id,
+        callsign: req.user?.callsign || '',
+        purpose,
+        media_role: mediaRole,
+        sharer: sharer || null,
+        role: ctx.roleName,
+        permissions: ctx.permissions,
+        is_priority_channel: ctx.isPriorityChannel,
+        priority_level: ctx.priorityLevel,
+        voice_relay: ctx.voiceRelay,
+        max_video_bitrate_kbps: ctx.tierConfig.maxVideoBitrateKbps,
+        jti: crypto.randomUUID(),
+      },
+      getJwtSecret(),
+      { expiresIn: `${expiresInSeconds}s` }
+    );
+
+    return res.json({
+      ticket,
+      expires_in_seconds: expiresInSeconds,
+      media_url: ctx.mediaUrl,
+      voice_relay: ctx.voiceRelay,
+    });
+  } catch (error: any) {
+    if (error?.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    console.error('Issue Media Ticket Error:', error);
+    return res.status(500).json({ message: 'Internal Server Error' });
   }
 };
 

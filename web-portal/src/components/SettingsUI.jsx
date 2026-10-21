@@ -29,13 +29,17 @@ function DiagnosticsButton({ appVersion }) {
       const safeInvoke = async (cmd) => {
         try { return await invoke(cmd); } catch (e) { return null; }
       };
-      const [perf, captureErrors, breadcrumbs, setupErrors, captureDebug, appLog] = await Promise.all([
+      const [perf, captureErrors, breadcrumbs, setupErrors, captureDebug, appLog, audioPipelineLog] = await Promise.all([
         safeInvoke('capture_get_perf_report'),
         safeInvoke('capture_get_errors'),
         safeInvoke('capture_get_breadcrumbs'),
         safeInvoke('get_setup_errors'),
         safeInvoke('get_capture_debug_log'),
         safeInvoke('get_app_log'),
+        // Mic/speaker device selection + sample-rate/resample decisions — a
+        // separate log from the screen-capture ones above (different Tauri
+        // plugin/crate entirely). See lib.rs's write_audio_log doc comment.
+        safeInvoke('plugin:specter-audio|get_audio_pipeline_log'),
       ]);
       const { error } = await api.submitDiagnostics({
         appVersion,
@@ -45,6 +49,7 @@ function DiagnosticsButton({ appVersion }) {
         setupErrors,
         captureDebug,
         appLog,
+        audioPipelineLog,
       });
       setStatus(error ? 'err' : 'ok');
     } catch (e) {
@@ -160,6 +165,14 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
   };
   const [recordingKey, setRecordingKey] = useState(null); // 'ptt' | 'channelToggle' | 'streamNext' | 'overlayPassthrough' | null
   const [commsSaved, setCommsSaved] = useState(false);
+  // Live test feedback for the bound PTT key — WarRoom's global-shortcut
+  // registration (see its "Global shortcuts" effect) emits specter://ptt-active
+  // whenever the OS reports the key pressed/released, regardless of whether
+  // the user is even in a voice channel. Previously there was no way to tell
+  // a binding actually works — e.g. a key already claimed globally by another
+  // app fails registration silently (just a console.warn) — short of leaving
+  // Settings, joining a channel, and testing for real.
+  const [pttLiveActive, setPttLiveActive] = useState(false);
 
   // Mic activation threshold (VAD) + live test state
   const [vadThreshold, setVadThreshold] = useState(() => parseInt(localStorage.getItem('specter_vad_threshold') || '15', 10));
@@ -281,6 +294,18 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
       if (selected) setProfileImagePath(selected);
     } catch (err) { console.error('File picker:', err); }
   };
+
+  // Live PTT test feedback — see pttLiveActive's declaration for why this exists.
+  useEffect(() => {
+    if (!isTauri || voiceMode !== 'push-to-talk' || !pttKey) { setPttLiveActive(false); return; }
+    let unlisten;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen('specter://ptt-active', (event) => {
+        setPttLiveActive(Boolean(event.payload?.active));
+      }).then(fn => { unlisten = fn; });
+    });
+    return () => { unlisten?.(); setPttLiveActive(false); };
+  }, [voiceMode, pttKey]);
 
   // Hotkey recording
   useEffect(() => {
@@ -666,6 +691,20 @@ const SettingsUI = ({ onClose, user, onOpenShip, micCaptureActive = false }) => 
                     </button>
                   )}
                 </div>
+                {pttKey && recordingKey !== 'ptt' && isTauri && (
+                  <div className="flex items-center gap-2 mt-2 text-xs font-mono">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full flex-shrink-0 transition-colors"
+                      style={{
+                        background: pttLiveActive ? '#22c55e' : '#3f3f46',
+                        boxShadow: pttLiveActive ? '0 0 8px #22c55e' : 'none',
+                      }}
+                    />
+                    <span className={pttLiveActive ? 'text-green-400' : 'text-specter-text-muted'}>
+                      {pttLiveActive ? 'Key detected' : `Press ${pttKey} to test`}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 

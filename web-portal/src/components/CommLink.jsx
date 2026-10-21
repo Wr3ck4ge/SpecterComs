@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { api } from '../api';
 import initWasm, { SFrameCrypto } from 'wasm-crypto';
 import { saveChannelMessage, getChannelMessages } from '../messageStore';
-import { ensureChannelGroup, exportGroupSecret, ensureEventGroup, signBytes, verifySignature } from '../mlsSession';
+import { ensureChannelGroup, syncChannelGroupEpoch, exportGroupSecret, ensureEventGroup, signBytes, verifySignature } from '../mlsSession';
 
 // ── Diagnostic trace logging (debrief/reconnect-storm investigation) ────────
 // See WarRoom.jsx's traceLog for the full rationale — same mechanism (writes
@@ -120,12 +120,13 @@ function encodeAudioFrameProto(ssrc, sequence, opusBytes, isGlobalBroadcast, sen
 }
 
 function hashUserId(id) {
+  if (!id) return 1;
   let hash = 0;
   for (let i = 0; i < id.length; i++) {
     hash = ((hash << 5) - hash) + id.charCodeAt(i);
     hash |= 0;
   }
-  return Math.abs(hash) >>> 0;
+  return Math.abs(hash) >>> 0 || 1;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -284,6 +285,64 @@ function createVideoSendPump(writerRef, onDrop) {
 // backs up, so past this depth, drop non-key frames until the next keyframe
 // rather than letting a struggling machine fall further behind on every tick.
 const MAIN_MAX_DECODE_QUEUE = 2;
+
+// ── Stream encryption declaration ───────────────────────────────────────────
+// A video frame on the wire is [4B size][1B type][4B ts_ms][payload], where the
+// type byte is 0 = keyframe, 1 = delta. Nothing in that framing said whether
+// the payload was encrypted, so a receiver had to guess from its own state:
+// "I hold a key, so this must be ciphertext". When the guess was wrong the
+// ciphertext went straight into VideoDecoder.decode() and the stream died with
+// an opaque decoder error — the sender's crypto state is completely independent
+// of the receiver's (either side can fail WASM init, or not be an MLS group
+// member yet), so the guess was wrong routinely rather than exceptionally.
+//
+// The declaration lives in the stream header, NOT in a spare bit of the type
+// byte. Shipped clients parse that byte as `buffer[4] === 0 ? 'key' : 'delta'`,
+// so any extra bit set on a keyframe makes every already-installed client read
+// it as a delta, never resync, and sit black forever. The payload offset is
+// fixed at byte 9, so there is also no room to append a per-frame flag without
+// shifting what old clients slice. An unknown *header* field, by contrast, is
+// silently ignored by every past version — it's the only backward-compatible
+// place to put this.
+//
+// Because it is per stream rather than per frame, the sender must latch the
+// decision for the stream's lifetime (see streamEncrypted) — otherwise a sharer
+// that acquires a key mid-stream (refreshVideoKey on a roster Join) would start
+// encrypting under a header that says it doesn't, reintroducing the exact bug.
+const STREAM_ENCRYPTION_FIELD = 'encrypted';
+
+// Key recovery backoff for an encrypted stream this device has no key for (see
+// keyMissingFrames). Deliberately slower than the decrypt-failure refresh: that
+// one re-derives a secret we can already export, whereas this one is waiting on
+// another member to commit us into the MLS group, which is human-paced (someone
+// has to open the channel) and involves real server round-trips per attempt.
+const KEY_RECOVERY_FRAME_THRESHOLD = 10;
+const KEY_RECOVERY_BASE_MS = 1500;
+const KEY_RECOVERY_MAX_MS = 30_000;
+
+// export_secret's error for a group this device was never added to (see
+// export_secret_impl in mls-crypto). Distinguishing it from a genuine WASM load
+// failure matters: the former is "wait to be welcomed", recoverable without user
+// action, while the latter means E2E can't work on this device at all.
+const ERR_NOT_A_GROUP_MEMBER = 'group not found in device state';
+const isNotAGroupMemberError = (err) =>
+  String(err?.message ?? err ?? '').includes(ERR_NOT_A_GROUP_MEMBER);
+
+// Rollout-period safety net for senders predating STREAM_ENCRYPTION_FIELD, where
+// "is this encrypted?" has to be guessed. Every codec this app decodes is fed
+// as a bytestream (Annex-B for H.264/HEVC — see annexBToAvcc's comment — and
+// VP8/VP9 keyframes likewise have fixed magic), so a *keyframe* payload that
+// doesn't begin with an Annex-B start code is not plaintext video. Ciphertext
+// begins with 12 random nonce bytes and so passes this test with probability
+// ~2^-24, making a false "plaintext" verdict vanishingly unlikely.
+//
+// Only ever used to *reject* a frame we were about to guess was plaintext —
+// never to claim one is encrypted when the flag says otherwise. Deltas are not
+// checked: a mid-GOP slice has no reliable leading magic.
+const looksLikeAnnexB = (data) =>
+  data.length >= 4 &&
+  data[0] === 0x00 && data[1] === 0x00 &&
+  (data[2] === 0x01 || (data[2] === 0x00 && data[3] === 0x01));
 
 function getAdaptiveStreamProfile(orgTier = 0, concurrentSharers = 1) {
   const base = capProfileResolution(STREAM_PROFILES[orgTier] ?? STREAM_PROFILES[0]);
@@ -523,6 +582,20 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const activeShareCongestionSignalRef = useRef(null);
   // Mutable ref so connect() always uses the current voice channel, even after a
   // server-initiated Move.  Text-chat APIs continue to use the `channel` prop.
+  //
+  // This is deliberately never re-synced from the prop: WarRoom keys CommLink on
+  // the channel id (see its `key={commChannel?.id}`), so an ordinary channel
+  // switch remounts and re-seeds this ref. The one case where ref and prop
+  // genuinely disagree is a server-initiated Move, which rewrites this ref
+  // without WarRoom's voiceChannel (and therefore the prop) ever changing.
+  //
+  // Every media path must therefore use channelRef, not the prop: the MLS group
+  // id is the channel id, so a path that derives a key, requests a ticket, or
+  // opens a transport under the prop's id while cryptoRef holds a key derived
+  // under the ref's id is operating on two different MLS groups. That used to
+  // make subscribe-after-Move unrecoverable — the subscribe derived from the
+  // prop, every refreshVideoKey (including the sustained-decrypt-failure auto
+  // refresh) derived from the ref, so the key ping-ponged and never converged.
   const channelRef = useRef(channel);
   // Callback fired with each decoded VideoFrame (before frame.close()), used by overlay canvas
   const videoFrameCallbackRef = useRef(null);
@@ -829,8 +902,28 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
     try {
       // Initialize WASM crypto (best-effort).
+      //
+      // The two ways this fails are not the same problem and must not report as
+      // one. A WASM load failure means E2E can't work on this device at all. A
+      // missing group membership (ERR_NOT_A_GROUP_MEMBER — any browser session,
+      // since identity doesn't persist outside Tauri, or a fresh install before
+      // another member has committed us in) is temporary and self-healing: the
+      // key arrives with someone's Welcome. Lumping them together as "WASM
+      // Crypto unavailable" sent every keyless viewer down a path that looked
+      // like a local crypto fault, when the actionable state is "wait, or get
+      // someone to open this channel".
+      let wasmReady = true;
       try {
         await initWasm();
+      } catch (err) {
+        wasmReady = false;
+        console.warn('WASM SFrame init failed (non-fatal, video E2E is disabled):', err);
+        addMsg('WASM Crypto unavailable (non-fatal, video runs over TLS only).', 'system');
+      }
+      // Skipped outright when the cipher module itself didn't load — every
+      // derivation below would throw on `new SFrameCrypto` and report a second,
+      // misleading "key unavailable" on top of the real cause.
+      if (wasmReady) try {
         const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
         await ensureChannelGroup(api, currentUserId, org.id, channelRef.current.id);
         const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
@@ -838,16 +931,34 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         // Independent 'audio' label export for relay-mode audio crypto.
         const audioKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'audio', 32);
         cryptoAudioRef.current = new SFrameCrypto(audioKey);
-        // Event-scoped cascade key used only for event channels.
-        if (channel?.event_id) {
-          await ensureEventGroup(api, currentUserId, org.id, channel.event_id);
-          const cascadeKey = await exportGroupSecret(api, currentUserId, channel.event_id, 'audio-cascade', 32);
-          cryptoAudioCascadeRef.current = new SFrameCrypto(cascadeKey);
-        }
         addMsg('WASM Cryptography Engine Initialized (ChaCha20Poly1305, MLS-derived key)');
       } catch (err) {
-        console.warn('WASM SFrame init failed (non-fatal, video E2E is disabled):', err);
-        addMsg('WASM Crypto unavailable (non-fatal, video runs over TLS only).', 'system');
+        if (isNotAGroupMemberError(err)) {
+          // Not an error state to act on here — processVideoData's key recovery
+          // (see keyMissingFrames) retries this with backoff the moment an
+          // encrypted stream actually arrives, and until then there's nothing
+          // to decrypt anyway.
+          console.warn('[crypto] no MLS membership for this channel yet — key will be acquired when a Welcome lands');
+          traceLog(`[crypto] channel key unavailable: not yet an MLS member of channel=${channelRef.current?.id}`);
+          addMsg('Channel key not yet issued for this device — encrypted media will start once it is.', 'system');
+        } else {
+          console.warn('Channel key derivation failed (non-fatal, video E2E is disabled):', err);
+          traceLog(`[crypto] channel key derivation FAILED for channel=${channelRef.current?.id}: ${err?.message || err}`);
+          addMsg('Channel key unavailable (non-fatal, media runs over TLS only).', 'system');
+        }
+      }
+      // Event-scoped cascade key used only for event channels. Separate try: an
+      // event-group failure must not cost us the channel keys above (or vice
+      // versa) — they're independent groups.
+      if (wasmReady) try {
+        if (channelRef.current?.event_id) {
+          const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+          await ensureEventGroup(api, currentUserId, org.id, channelRef.current.event_id);
+          const cascadeKey = await exportGroupSecret(api, currentUserId, channelRef.current.event_id, 'audio-cascade', 32);
+          cryptoAudioCascadeRef.current = new SFrameCrypto(cascadeKey);
+        }
+      } catch (err) {
+        traceLog(`[crypto] event cascade key unavailable for event=${channelRef.current?.event_id}: ${err?.message || err}`);
       }
       
       // Initialize Audio Mixer Core
@@ -966,8 +1077,25 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           // just on Leave below) or we keep the pre-join key for the rest of
           // the session while they're on the post-join one — silent decrypt
           // mismatch (video black, audio silent).
+          //
+          // This roster "Join" arrives over the voice WebTransport connection,
+          // completely independent of the mls_commit SSE event that carries the
+          // actual epoch bump (a separate transport, identity-node not
+          // media-rust). There's no ordering guarantee between them — if this
+          // fires before the commit has actually landed and been applied
+          // locally (see WarRoom.jsx's mls_commit handler, which correctly
+          // waits for handleChannelCommit to resolve first), exportGroupSecret
+          // derives from the *pre-commit* epoch: a real key gets set, just the
+          // wrong one, indistinguishable from a correct refresh until decrypt
+          // starts failing. Confirmed live via a diagnostic report: hasCryptoKey
+          // was true and the key had "refreshed" twice, yet the very first
+          // keyframe still failed to decrypt. Re-run once more after a delay
+          // long enough for a same-request commit to have landed via SSE by
+          // then, correcting the race in the common case without removing this
+          // immediate attempt as a fallback for when SSE itself is what's slow.
           refreshVideoKey();
           refreshAudioKey();
+          setTimeout(() => { refreshVideoKey(); refreshAudioKey(); }, 1500);
           // Play join sound for remote users only (not for ourselves)
           const localUser = JSON.parse(localStorage.getItem('specter_user') || '{}');
           const localCallsign = localUser.callsign || localUser.username || '';
@@ -984,8 +1112,11 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
               }
           }
       } else if (msg.type === 'Leave') {
+          // msg.data is { callsign, user_id } (server v1.10.23+).
+          const leavingCallsign = typeof msg.data === 'string' ? msg.data : msg.data?.callsign;
+          const leavingUserId   = typeof msg.data === 'string' ? null      : msg.data?.user_id;
           setRoster(prev => {
-              const updated = prev.filter(u => u !== msg.data);
+              const updated = prev.filter(u => u !== leavingCallsign);
               // Leaving the voice roster is presence, not group membership — an
               // org member who steps out of the call for a minute still holds a
               // legitimate copy of the MLS group secret, so there's nothing to
@@ -997,6 +1128,28 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
               refreshAudioKey();
               return updated;
           });
+          // Clean up this user's audio lane(s) immediately rather than waiting
+          // for the local user to disconnect — prevents Opus decoder/GainNode
+          // accumulation in channels with repeated join/leave cycles.
+          if (leavingUserId) {
+              const leavingSsrcs = [];
+              for (const [ssrc, uid] of ssrcToUserIdRef.current) {
+                  if (uid === leavingUserId) leavingSsrcs.push(ssrc);
+              }
+              for (const ssrc of leavingSsrcs) {
+                  ssrcToUserIdRef.current.delete(ssrc);
+                  seenSequencesRef.current.delete(ssrc);
+                  const lane = audioLanesRef.current.get(ssrc);
+                  if (lane) { lane.decoder.free?.(); clearAudioLane(ssrc, lane); }
+                  const laneId = `${channelRef.current.id}:${ssrc}`;
+                  if (activeNativeLaneIdsRef.current.has(laneId)) {
+                      activeNativeLaneIdsRef.current.delete(laneId);
+                      import('@tauri-apps/api/core').then(({ invoke }) => {
+                          invoke('plugin:specter-audio|clear_stream', { streamId: laneId }).catch(() => {});
+                      });
+                  }
+              }
+          }
       } else if (msg.type === 'Move') {
           // Admin has forcibly moved this client to a different channel.
           // Leave presence on the OLD channel before updating the ref, then reconnect.
@@ -1063,10 +1216,53 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const refreshVideoKey = async () => {
       try {
           const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+          // Sync-only: apply any pending server commits to advance deviceStateCache to
+          // the current epoch WITHOUT attempting a new membership commit (which would
+          // race against other clients and cause a 409 → retry → infinite 409 loop).
+          await syncChannelGroupEpoch(api, currentUserId, org.id, channelRef.current.id);
           const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
           cryptoRef.current = new SFrameCrypto(videoKey);
+          traceLog(`[video-key] refreshed for channel=${channelRef.current?.id}`);
       } catch (err) {
           console.error("Video key refresh failed", err);
+          traceLog(`[video-key] refresh FAILED for channel=${channelRef.current?.id}: ${err?.message || err}`);
+      }
+  };
+
+  // Stronger than refreshVideoKey, for the case where this device holds no key
+  // for the channel at all rather than a stale one (see keyMissingFrames).
+  //
+  // refreshVideoKey only syncs the epoch and re-exports; that cannot help a
+  // device that isn't an MLS group member, because there is no group to export
+  // from. This runs the full ensureChannelGroup first, which catches up any
+  // pending Welcome (the thing that actually grants membership) and, if this
+  // device really is the first one here, attempts genesis. Resolves true once a
+  // key is in hand.
+  //
+  // Not merged into refreshVideoKey: ensureChannelGroup can submit membership
+  // commits, and running that on every roster Join/Leave is exactly the
+  // concurrent-commit 409 storm that syncChannelGroupEpoch exists to avoid. It
+  // is only safe here because this path is rate-limited by backoff and only
+  // reached when the alternative is a permanently undecodable stream.
+  const recoverVideoKey = async () => {
+      try {
+          const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+          await ensureChannelGroup(api, currentUserId, org.id, channelRef.current.id);
+          const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
+          cryptoRef.current = new SFrameCrypto(videoKey);
+          traceLog(`[video-key] recovered for channel=${channelRef.current?.id}`);
+          // The audio key shares the same group — if video just became
+          // available, audio almost certainly did too.
+          refreshAudioKey();
+          return true;
+      } catch (err) {
+          if (isNotAGroupMemberError(err)) {
+              traceLog(`[video-key] recovery: still not a member of channel=${channelRef.current?.id}`);
+          } else {
+              console.error('Video key recovery failed', err);
+              traceLog(`[video-key] recovery FAILED for channel=${channelRef.current?.id}: ${err?.message || err}`);
+          }
+          return false;
       }
   };
 
@@ -1256,17 +1452,32 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       if (window.__TAURI__) import('@tauri-apps/api/event').then(({ emit }) => emit('overlay-video-status', { message: 'Stream header corrupt — restart share' })).catch(() => {});
       return;
     }
-    console.log('[video] stream header received:', JSON.stringify(header));
+    console.log('[video] stream header received:', JSON.stringify(header), 'hasCryptoKey=', !!cryptoRef.current);
+    traceLog(`[video] stream header received codec=${header.codec} ${header.width}x${header.height} hasCryptoKey=${!!cryptoRef.current}`);
     buffer = buffer.slice(4 + headerLen);
 
     if (typeof VideoDecoder === 'undefined') {
       addMsg('Remote screen share detected but WebCodecs unavailable.', 'error');
+      traceLog('[video] aborting: WebCodecs VideoDecoder unavailable in this webview');
       return;
     }
 
     setRemoteShare(header);
 
     const codec = header.codec || 'vp8';
+    // Against an older sender we fall back to the legacy guess (decrypt iff we
+    // hold a key), which is what this receiver did for every sender before the
+    // declaration existed.
+    // Whether this stream is encrypted is the sender's fact, declared once in
+    // the header (see STREAM_ENCRYPTION_FIELD). `undefined` means a sender from
+    // before the field existed, which leaves nothing to do but the old guess.
+    const declaredEncryption = header[STREAM_ENCRYPTION_FIELD];
+    const senderDeclaresEncryption = typeof declaredEncryption === 'boolean';
+    // looksLikeAnnexB only means anything for the bytestream codecs whose
+    // keyframes start with a start code; VP8/VP9 use different magic, so don't
+    // apply that heuristic to them at all.
+    const isAnnexBCodec = /^(avc|hev|hvc|h264|h265)/i.test(codec);
+    traceLog(`[video] sender encryption declared=${senderDeclaresEncryption ? declaredEncryption : 'absent'} annexB=${isAnnexBCodec}`);
 
     // Store header so we can re-send it if the overlay opens mid-stream.
     // NOTE: We no longer fire a separate header-only emit here.  Instead the header
@@ -1294,7 +1505,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     // raw NAL bytes to it. Set whenever the overlay is seen active so that,
     // once it closes, we wait for the next keyframe before resuming decode
     // here instead of feeding a decoder P-frames for a GOP it never saw.
-    let mainNeedsResync = false;
+    let mainNeedsResync = true; // wait for first keyframe before decoding anything
 
     const decoder = new VideoDecoder({
       output: (frame) => {
@@ -1335,19 +1546,57 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       },
       error: (e) => {
         console.error('VideoDecoder error:', e);
+        traceLog(`[video] VideoDecoder error: ${e?.message || e}`);
         addMsg(`Stream decode error: ${e?.message || e} — sharer may need to restart their share.`, 'error');
       }
     });
-    try {
-      decoder.configure({ codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
-    } catch (cfgErr) {
-      console.error('[processVideoData] decoder.configure failed for codec', codec, cfgErr);
-      if (window.__TAURI__) import('@tauri-apps/api/event').then(({ emit }) => emit('overlay-video-status', { message: `Decoder config failed: ${cfgErr?.message || cfgErr}` })).catch(() => {});
-      return;
-    }
+    // Configure lazily, on the first frame we actually intend to decode rather
+    // than here — configure() opens a real (often hardware) decode session, and
+    // a stream we can't decrypt must never get one. Returns false once it has
+    // exhausted both hardware preferences, which is terminal for this stream.
+    //
+    // Try hardware-accelerated decode first; if the browser/driver rejects it
+    // (e.g. integrated GPU with no VP9 HW decoder), fall back to no-preference
+    // so the browser picks software decode rather than erroring out entirely.
+    let configured = false;
+    let configureFailed = false;
+    const ensureConfigured = () => {
+      if (configured) return true;
+      if (configureFailed) return false;
+      for (const hwPref of ['prefer-hardware', 'no-preference']) {
+        try {
+          decoder.configure({ codec, optimizeForLatency: true, hardwareAcceleration: hwPref });
+          traceLog(`[video] decoder.configure OK codec=${codec} hwPref=${hwPref}`);
+          configured = true;
+          return true;
+        } catch (cfgErr) {
+          traceLog(`[video] decoder.configure FAILED codec=${codec} hwPref=${hwPref}: ${cfgErr?.message || cfgErr}`);
+          if (hwPref === 'no-preference') {
+            console.error('[processVideoData] decoder.configure failed on all hw preferences', codec, cfgErr);
+            if (window.__TAURI__) import('@tauri-apps/api/event').then(({ emit }) => emit('overlay-video-status', { message: `Decoder config failed: ${cfgErr?.message || cfgErr}` })).catch(() => {});
+          }
+        }
+      }
+      configureFailed = true;
+      return false;
+    };
 
-    // Read frames: [4B frame_size][1B type][4B timestamp_ms][data]
+    // Read frames: [4B frame_size][1B flags][4B timestamp_ms][data]
     let _firstFrameLogged = false;
+    // Set while the sender declares it is encrypting (see
+    // STREAM_ENCRYPTION_FIELD) and this device holds no key for the channel.
+    // Previously this exact state fed ciphertext straight into
+    // decoder.decode(), and it is also the one failure mode the old
+    // decrypt-failure counters could not
+    // see, because decrypt was never attempted: consecutiveDecryptFailures
+    // stayed 0, so the 30-frame auto-refresh never ran and the stream sat black
+    // behind an opaque decoder error forever. Recovery is its own backoff loop
+    // below rather than the decrypt-failure path, since the fix is to *obtain* a
+    // key (an MLS Welcome has to arrive) rather than to re-derive one.
+    let keyMissingFrames = 0;
+    let keyMissingWarned = false;
+    let keyRecoveryInFlight = false;
+    let keyRecoveryAttempts = 0;
     try {
       while (true) {
         while (buffer.length < 4) if (!(await readMore())) throw 'eof';
@@ -1368,29 +1617,112 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         let frameData = buffer.slice(9, 4 + frameSize);
         // The wire payload is this channel's MLS-keyed ciphertext (see
         // cryptoRef/refreshVideoKey above) — media-rust never sees plaintext,
-        // only this [size][type][timestamp] header plus opaque bytes. A
-        // decrypt failure (stale key mid-rotation, or crypto init failed and
-        // the sender never encrypted at all) drops just this one frame rather
-        // than feeding garbage into the decoder.
+        // only this [size][flags][timestamp] header plus opaque bytes. A
+        // decrypt failure (stale key mid-rotation) drops just this one frame
+        // rather than feeding garbage into the decoder.
+        //
+        // Whether the payload is encrypted is the sender's fact, not ours: take
+        // the header's declaration when there is one, and only fall back to
+        // inferring it from our own key for senders that predate the field
+        // (see STREAM_ENCRYPTION_FIELD).
+        let frameEncrypted = senderDeclaresEncryption
+          ? declaredEncryption
+          : !!cryptoRef.current;
+        // Undeclared sender and we hold no key, so the guess above said
+        // "plaintext" and we were about to decode it. Verify that claim on
+        // keyframes before trusting it (see looksLikeAnnexB) — this is the one
+        // place the old code fed ciphertext to the decoder, and against an old
+        // sender there is no declaration to save us.
+        if (!senderDeclaresEncryption && !frameEncrypted && frameType === 'key'
+            && isAnnexBCodec && !looksLikeAnnexB(frameData)) {
+          frameEncrypted = true;
+        }
         let frameUndecryptable = false;
-        if (cryptoRef.current) {
+        let frameKeyMissing = false;
+        if (frameEncrypted && !cryptoRef.current) {
+          // Encrypted, and we have nothing to decrypt it with. Never decode it.
+          frameKeyMissing = true;
+        } else if (frameEncrypted) {
           try {
             frameData = cryptoRef.current.decrypt(frameData);
           } catch (err) {
             frameUndecryptable = true;
           }
         }
-        if (frameUndecryptable) {
+        if (frameKeyMissing) {
+          keyMissingFrames++;
+          if (!keyMissingWarned) {
+            keyMissingWarned = true;
+            const msg = 'Stream is encrypted but this device has no channel key yet — acquiring.';
+            console.warn('[video] encrypted stream, no local key:', 'frameType=', frameType, 'frameSize=', frameSize);
+            traceLog(`[video] encrypted frame with no local key (type=${frameType}) — decode suppressed, attempting key recovery`);
+            addMsg(msg, 'system');
+            if (window.__TAURI__) import('@tauri-apps/api/event').then(({ emit }) => emit('overlay-video-status', { message: 'Waiting for channel key…' })).catch(() => {});
+          }
+          // Backoff key recovery. refreshVideoKey alone is not enough here: the
+          // usual cause is that this device isn't an MLS group member at all
+          // (fresh install, or any browser session — identity doesn't persist
+          // outside Tauri), so it has to wait for another member's Welcome to
+          // land and then catch up. recoverVideoKey retries both paths; the
+          // backoff keeps a channel nobody can add us to from spinning.
+          if (!keyRecoveryInFlight && keyMissingFrames >= KEY_RECOVERY_FRAME_THRESHOLD) {
+            keyMissingFrames = 0;
+            keyRecoveryInFlight = true;
+            const attempt = ++keyRecoveryAttempts;
+            const delay = Math.min(KEY_RECOVERY_BASE_MS * 2 ** (attempt - 1), KEY_RECOVERY_MAX_MS);
+            traceLog(`[video] key recovery attempt ${attempt} scheduled in ${delay}ms`);
+            setTimeout(() => {
+              recoverVideoKey().then((got) => {
+                keyRecoveryInFlight = false;
+                if (got) {
+                  traceLog(`[video] key recovery attempt ${attempt} succeeded — resuming decode`);
+                  addMsg('Channel key acquired — stream resuming.', 'system');
+                  keyMissingWarned = false;
+                  keyRecoveryAttempts = 0;
+                  // Force a resync: the GOP this device sat out is unusable, so
+                  // wait for the sharer's next keyframe before decoding again.
+                  mainNeedsResync = true;
+                } else {
+                  traceLog(`[video] key recovery attempt ${attempt} failed — still no group membership`);
+                }
+              });
+            }, delay);
+          }
+        } else if (frameUndecryptable) {
           consecutiveDecryptFailures++;
+          if (consecutiveDecryptFailures === 1) {
+            // Log the first failure immediately rather than waiting for the
+            // 30-frame sustained-failure threshold below — a stream that
+            // decrypts fine after a brief rotation blip never hits 30 and
+            // would otherwise leave zero trace of the failure ever happening.
+            traceLog(`[video] decrypt failure (frame type=${frameType}, hasCryptoKey=${!!cryptoRef.current})`);
+            // Log raw bytes to detect unencrypted Annex-B (sharer WASM init failed)
+            if (consecutiveDecryptFailures === 1) {
+              console.warn('[video] first decrypt failure — frameType=', frameType, 'frameSize=', frameData.length, 'firstBytes=', Array.from(frameData.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' '));
+            }
+          }
           if (!decryptFailWarned && consecutiveDecryptFailures === 30) {
             decryptFailWarned = true;
-            addMsg('Video staying black — decrypt key mismatch with sharer. Try leaving and rejoining the channel.', 'error');
             console.warn('[video] sustained decrypt failure: consecutiveDecryptFailures=', consecutiveDecryptFailures);
+            traceLog(`[video] sustained decrypt failure: consecutiveDecryptFailures=${consecutiveDecryptFailures} — auto-refreshing key`);
+            refreshVideoKey().then(() => {
+              // Reset so we get a fresh warning + another auto-refresh attempt if the
+              // new key still doesn't match (e.g. another epoch commit mid-stream).
+              consecutiveDecryptFailures = 0;
+              decryptFailWarned = false;
+            });
           }
         } else {
+          if (consecutiveDecryptFailures > 0) {
+            traceLog(`[video] decrypt recovered after ${consecutiveDecryptFailures} failure(s)`);
+          }
           consecutiveDecryptFailures = 0;
+          keyMissingFrames = 0;
         }
-        if (!frameUndecryptable) {
+        // A frame we couldn't decrypt, or had no key for, is plaintext to nobody:
+        // it must not reach the decoder, the GOP buffer, or the overlay relay.
+        const frameUsable = !frameUndecryptable && !frameKeyMissing;
+        if (frameUsable) {
         // Accumulate GOP buffer so we can replay a complete reference chain when seeding
         // the overlay decoder — sending only a keyframe causes P-frame decode errors.
         if (frameType === 'key') {
@@ -1422,7 +1754,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           // OVERLAY_MAX_DECODE_QUEUE.
           if (frameType !== 'key' && decoder.decodeQueueSize > MAIN_MAX_DECODE_QUEUE) {
             mainNeedsResync = true;
-          } else {
+          } else if (ensureConfigured()) {
             mainNeedsResync = false;
             const timestampUs = tsMs * 1000;
             const chunk = new EncodedVideoChunk({ type: frameType, timestamp: timestampUs, data: frameData });
@@ -1432,7 +1764,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
             }
           }
         }
-        } // !frameUndecryptable
+        } // frameUsable
         const recvMs = performance.now() - recvStageStart;
         const stats = videoStageStatsRef.current;
         stats.recvCount += 1;
@@ -1453,7 +1785,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         }
         buffer = buffer.slice(4 + frameSize);
 
-        if (!frameUndecryptable) {
+        if (frameUsable) {
         // Relay raw H.264 NAL bytes to overlay for its own decoder — no extra
         // network cost, just local IPC. Overlay decodes at native stream quality.
         // On keyframes we re-send the header atomically (same .then() callback) so
@@ -1487,15 +1819,27 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           const stallMsg = 'No video output after 30 frames — streamer may need to STOP and RESTART share.';
           addMsg(stallMsg, 'error');
           console.warn('[video] stall detected: relayed=', framesRelayed, 'decoded=', framesDecoded);
+          traceLog(`[video] stall detected: relayed=${framesRelayed} decoded=${framesDecoded} decoderState=${decoder.state}`);
           if (window.__TAURI__) {
             import('@tauri-apps/api/event').then(({ emit }) => {
               emit('overlay-video-status', { message: 'No signal — streamer must restart share' });
             }).catch(() => {});
           }
         }
-        } // !frameUndecryptable
+        } // frameUsable
       }
-    } catch {}
+    } catch (err) {
+      // Was a bare `catch {}` — 'eof' (deliberate, thrown above to break the
+      // read loop on stream end) is the expected/silent case, but anything
+      // else here is a real exception (decoder.decode() throwing on a
+      // malformed chunk, a DataView range error, etc.) that was previously
+      // discarded with zero trace anywhere — the stream would just silently
+      // stop with no error and no diagnostic evidence of why.
+      if (err !== 'eof') {
+        console.error('[processVideoData] read loop exited on exception:', err);
+        traceLog(`[video] read loop exited on exception: ${err?.message || err}`);
+      }
+    }
     if (decoder.state !== 'closed') decoder.close();
     decodePendingRef.current.clear();
     setRemoteShare(null);
@@ -1702,6 +2046,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const radioGainRef = useRef(null);
   const noiseGainRef = useRef(null);
   const duckingTimeoutRef = useRef(null);
+  const isDuckingRef = useRef(false);
 
   // Generates a distortion curve for the military radio effect
   const makeDistortionCurve = (amount = 50) => {
@@ -1866,19 +2211,22 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   }, [channelVolume]);
 
   const triggerDucking = () => {
-      // Simulate Priority Ducking (-20dB equivalent = ~0.1 gain)
       if (duckingGainRef.current && audioCtxRef.current) {
           const now = audioCtxRef.current.currentTime;
+          // Only apply the gain transition once per duck onset — don't re-schedule
+          // a new Web Audio automation segment on every incoming cascade frame
+          // (called ~50/s in mixed mode). The timeout reset below still extends
+          // the release window correctly regardless of this guard.
+          if (!isDuckingRef.current) {
+              duckingGainRef.current.gain.setTargetAtTime(0.1, now, 0.1);
+          }
+          isDuckingRef.current = true;
           setIsDucking(true);
-          // Rapid duck (100ms fade)
-          duckingGainRef.current.gain.setTargetAtTime(0.1, now, 0.1); 
-
-          // Auto-release after 2 seconds of silence (simulated envelope release)
           if (duckingTimeoutRef.current) clearTimeout(duckingTimeoutRef.current);
           duckingTimeoutRef.current = setTimeout(() => {
               const releaseNow = audioCtxRef.current.currentTime;
-              // Smooth release over 500ms
               duckingGainRef.current.gain.setTargetAtTime(1.0, releaseNow, 0.5);
+              isDuckingRef.current = false;
               setIsDucking(false);
           }, 2000);
       }
@@ -2079,6 +2427,9 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           const ssrcKey = frame.ssrc >>> 0;
           // ssrc=0 = server-mixed stream (proto3 default for unset field).
           // Do NOT dedupe this path; mixer packets may reuse sequence values.
+          if (ssrcKey === 0 && voiceRelayModeRef.current) {
+            console.warn('[Audio] relay-mode frame arrived with ssrc=0 — dedup skipped (hashUserId produced 0 or frame is unattributed)');
+          }
           if (ssrcKey !== 0) {
             if (!seenSequencesRef.current.has(ssrcKey)) {
               seenSequencesRef.current.set(ssrcKey, { set: new Set(), queue: [] });
@@ -2393,9 +2744,12 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   const startEncodingPipeline = async (track, profileOverride = null, orgTier = 0) => {
     if (typeof VideoEncoder === 'undefined' || typeof MediaStreamTrackProcessor === 'undefined') return;
 
-    const ticketData = await getMediaTicket('video_publish', null, channel.id);
+    // channelRef, not the `channel` prop — see channelRef's doc comment: the
+    // two diverge after an admin Move, and the key this stream is encrypted
+    // with is always derived from channelRef.
+    const ticketData = await getMediaTicket('video_publish', null, channelRef.current.id);
     const base = (mediaUrlRef.current || ticketData.media_url).replace(/\/$/, '');
-    const pubUrl = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channel.id}&role=publish`;
+    const pubUrl = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channelRef.current.id}&role=publish`;
     const vt = new WebTransport(pubUrl);
     publishTransportRef.current = vt;
     await vt.ready;
@@ -2415,9 +2769,12 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
     const profile = capProfileResolution(profileOverride || STREAM_PROFILES[orgTier] || STREAM_PROFILES[0]);
     const codec = await probeVideoCodec(w, h, profile.fps);
     const user = JSON.parse(localStorage.getItem('specter_user') || '{}');
+    // Latched for this publish stream — see STREAM_ENCRYPTION_FIELD.
+    const streamEncrypted = !!cryptoRef.current;
     const header = JSON.stringify({
       codec, width: w, height: h,
       user_id: user.id || user.user_id || user.callsign || 'Unknown',
+      [STREAM_ENCRYPTION_FIELD]: streamEncrypted,
     });
     const headerBytes = new TextEncoder().encode(header);
     const hlenBuf = new ArrayBuffer(4);
@@ -2438,11 +2795,17 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         // above) — media-rust relays this payload opaquely, never decoding it, so
         // this is the only place plaintext video ever exists off-device.
         let data = rawData;
-        if (cryptoRef.current) {
+        if (streamEncrypted) {
           try {
             data = cryptoRef.current.encrypt(rawData);
           } catch (err) {
-            console.warn('[share] video frame encryption failed, sending unencrypted:', err);
+            // Drop, never downgrade. This stream's header declares it
+            // encrypted, so emitting a plaintext frame would both contradict
+            // that declaration (the receiver would try to decrypt plaintext and
+            // drop the whole GOP) and push unencrypted screen content through
+            // the relay on a channel the user was told is end-to-end encrypted.
+            console.warn('[share] video frame encryption failed, dropping frame:', err);
+            return;
           }
         }
         const frameSize = 1 + 4 + data.length;
@@ -2596,9 +2959,10 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
         const effectiveSource = selectedSource;
 
-        const ticketData = await getMediaTicket('video_publish', null, channel.id);
+        // channelRef, not the `channel` prop — see channelRef's doc comment.
+        const ticketData = await getMediaTicket('video_publish', null, channelRef.current.id);
         const base = (mediaUrlRef.current || ticketData.media_url).replace(/\/$/, '');
-        const pubUrl = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channel.id}&role=publish`;
+        const pubUrl = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channelRef.current.id}&role=publish`;
         console.log('[share] publish transport connecting, base=', base);
         const vt = new WebTransport(pubUrl);
         publishTransportRef.current = vt;
@@ -2639,10 +3003,15 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
         // this must match what NVENC actually encodes (High Profile by default).
         const tauriCodec = await probeVideoCodec(profile.width, profile.height, profile.fps);
         console.log('[share] probeVideoCodec result:', tauriCodec, 'profile=', profile, 'concurrentSharers=', concurrentSharers);
+        // Latched for this publish stream, and shared with the overlay simulcast
+        // stream below so both declare the same thing — see
+        // STREAM_ENCRYPTION_FIELD.
+        const streamEncrypted = !!cryptoRef.current;
         const tauriHeader = {
           codec: tauriCodec, width: profile.width, height: profile.height,
           user_id: user.id || user.user_id || user.callsign || 'Unknown',
           stream_type: 'full',
+          [STREAM_ENCRYPTION_FIELD]: streamEncrypted,
         };
         // Store codec/dims so the overlay VideoDecoder can be seeded if self-view
         // is selected after capture is already running.
@@ -2838,11 +3207,14 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
           // deliberately: that's local Tauri IPC to this same device, never
           // touching the network or media-rust.
           let payload = nalData;
-          if (cryptoRef.current) {
+          if (streamEncrypted) {
             try {
               payload = cryptoRef.current.encrypt(nalData);
             } catch (err) {
-              console.warn('[share] video frame encryption failed, sending unencrypted:', err);
+              // Drop, never downgrade — see the matching comment in
+              // startEncodingPipeline's encoder output.
+              console.warn('[share] video frame encryption failed, dropping frame:', err);
+              return;
             }
           }
           const frameSize = 1 + 4 + payload.length;
@@ -2881,6 +3253,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
               width: 768, height: 432,
               user_id: user.id || user.user_id || user.callsign || 'Unknown',
               stream_type: 'overlay',
+              [STREAM_ENCRYPTION_FIELD]: streamEncrypted,
             });
             const overlayHdrBytes = new TextEncoder().encode(overlayHdr);
             const overlayHlenBuf = new ArrayBuffer(4);
@@ -2914,11 +3287,13 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
             // Same channel key as the main video stream above — this is a
             // second, independent network stream to the same server.
             let payload = nalData;
-            if (cryptoRef.current) {
+            if (streamEncrypted) {
               try {
                 payload = cryptoRef.current.encrypt(nalData);
               } catch (err) {
-                console.warn('[simulcast] overlay frame encryption failed, sending unencrypted:', err);
+                // Drop, never downgrade — see startEncodingPipeline.
+                console.warn('[simulcast] overlay frame encryption failed, dropping frame:', err);
+                return;
               }
             }
             const frameSize = 1 + 4 + payload.length;
@@ -3140,16 +3515,28 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
       videoTransportRef.current = null;
     }
 
+    // Sync epoch before subscribing — someone may have committed since connect(),
+    // and if we're on a different epoch than the sharer we'll decrypt nothing.
+    try {
+      const currentUserId = JSON.parse(localStorage.getItem('specter_user') || '{}')?.id;
+      await syncChannelGroupEpoch(api, currentUserId, org.id, channelRef.current.id);
+      const videoKey = await exportGroupSecret(api, currentUserId, channelRef.current.id, 'video', 32);
+      cryptoRef.current = new SFrameCrypto(videoKey);
+      traceLog(`[video-key] pre-subscribe epoch sync done`);
+    } catch (err) {
+      traceLog(`[video-key] pre-subscribe epoch sync failed (non-fatal): ${err?.message || err}`);
+    }
+
     const role = 'subscribe';
     const kind = 'video_subscribe';
-    const ticketData = await getMediaTicket(kind, callsign, channel.id);
+    const ticketData = await getMediaTicket(kind, callsign, channelRef.current.id);
     const base = (mediaUrlRef.current || ticketData.media_url).replace(/\/$/, '');
     console.log('[subscribe] transport connecting, base=', base, 'sharer=', callsign);
     // Always subscribe to the full-res stream. The overlay window is fed via local IPC
     // (overlay-video-nal emit in processVideoData), so subscribe_overlay / simulcast is
     // not needed — and would silently stall when the sharer's overlay encoder isn't
     // running (e.g. CPU capture mode or D3D11VA overlay encoder init failure).
-    const url = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channel.id}&role=${role}&sharer=${encodeURIComponent(callsign)}`;
+    const url = `${base}/specter/video?token=${ticketData.ticket}&channel_id=${channelRef.current.id}&role=${role}&sharer=${encodeURIComponent(callsign)}`;
 
     const vt = new WebTransport(url);
     videoTransportRef.current = vt;
@@ -3841,10 +4228,20 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
   // ── Voice channel render ────────────────────────────────────────────────────
 
   return (
-    <div className={`h-full flex flex-col overflow-hidden ${embedded ? '' : 'bg-specter-bg-panel border border-specter-primary-dim rounded-lg'}`}>
+    <div
+      className="h-full flex flex-col overflow-hidden"
+      style={!embedded ? {
+        backdropFilter: 'blur(16px) saturate(1.2)',
+        WebkitBackdropFilter: 'blur(16px) saturate(1.2)',
+        background: 'linear-gradient(180deg, rgba(4,12,23,0.52), rgba(2,8,16,0.42))',
+        border: '1px solid rgba(56,189,248,0.28)',
+        borderRadius: 8,
+        boxShadow: '0 0 0 1px rgba(34,211,238,0.10), 0 0 28px rgba(34,211,238,0.15)',
+      } : undefined}
+    >
       {/* Header — hidden in embedded mode (WarRoom provides its own) */}
       {!embedded && (
-        <div className="bg-specter-bg-surface p-4 border-b border-specter-primary-dim flex justify-between items-center">
+        <div className="p-4 border-b border-specter-primary-dim flex justify-between items-center" style={{ background: 'rgba(2,8,16,0.3)' }}>
           <div>
             <div className="text-xs text-specter-text-muted uppercase tracking-widest">Secure Channel</div>
             <div className="text-lg font-bold text-specter-primary-cyan">{org.callsign}</div>
@@ -3873,7 +4270,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSp
 
       {/* Embedded controls strip */}
       {embedded && (
-        <div className="flex items-center gap-3 px-4 py-2 flex-shrink-0" style={{ borderBottom: '1px solid #0e2233', background: '#040c17' }}>
+        <div className="flex items-center gap-3 px-4 py-2 flex-shrink-0" style={{ borderBottom: '1px solid rgba(56,189,248,0.15)', background: 'rgba(2,8,16,0.45)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)' }}>
           {isDucking && (
             <span style={{ fontSize: 13, color: '#f59e0b', letterSpacing: '0.15em' }} className="animate-pulse">
               [ DUCKING -20dB ]

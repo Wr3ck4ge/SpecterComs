@@ -1405,18 +1405,41 @@ pub fn start_capture(
             write_capture_breadcrumb(&format!("[start_capture/window] parsed hwnd={hwnd_val}"));
 
             use windows::Win32::Foundation::{HWND, RECT};
-            use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsWindow};
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetClientRect, GetWindowPlacement, IsIconic, IsWindow, WINDOWPLACEMENT,
+            };
 
             let hwnd = HWND(hwnd_val as *mut std::ffi::c_void);
             if !unsafe { IsWindow(hwnd).as_bool() } {
                 write_capture_breadcrumb("[start_capture/window] IsWindow=false");
                 return Err("Selected application window is no longer available".to_string());
             }
-            let mut rect = RECT::default();
-            unsafe { GetClientRect(hwnd, &mut rect) }
-                .map_err(|e| format!("GetClientRect failed: {e}"))?;
-            let cap_w = (rect.right - rect.left) as u32;
-            let cap_h = (rect.bottom - rect.top) as u32;
+            // GetClientRect always reports (0,0,0,0) for a minimized window — that's
+            // documented Win32 behavior, not an absence of content. The window picker
+            // (enum_wnd_proc above) already knows this and falls back to
+            // GetWindowPlacement's rcNormalPosition (the restored size) for a minimized
+            // window; this path didn't, so selecting a window that was (or became)
+            // minimized before Start was pressed always hit the zero-dimension
+            // rejection below and never got a frame — Windows.Graphics.Capture (used
+            // for the actual frame stream a few lines down) supports capturing a
+            // minimized window fine once given real dimensions to request.
+            let (cap_w, cap_h) = if unsafe { IsIconic(hwnd) }.as_bool() {
+                let mut wp = WINDOWPLACEMENT {
+                    length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                    ..Default::default()
+                };
+                if unsafe { GetWindowPlacement(hwnd, &mut wp) }.is_ok() {
+                    let r = wp.rcNormalPosition;
+                    ((r.right - r.left) as u32, (r.bottom - r.top) as u32)
+                } else {
+                    (0, 0)
+                }
+            } else {
+                let mut rect = RECT::default();
+                unsafe { GetClientRect(hwnd, &mut rect) }
+                    .map_err(|e| format!("GetClientRect failed: {e}"))?;
+                ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32)
+            };
             write_capture_breadcrumb(&format!("[start_capture/window] client rect {}x{}", cap_w, cap_h));
             if cap_w == 0 || cap_h == 0 {
                 write_capture_breadcrumb("[start_capture/window] rejected zero dimensions");

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createOrg, getMyOrgs, joinOrg, getOrgToken, redeemInvite, getPublicServers, updateOrgSettings, updateMemberProfile, createInvite, updateOrgLanding, uploadOrgLogo, orgLogoUpload } from '../controllers/orgController.js';
+import { createOrg, getMyOrgs, joinOrg, getOrgToken, issueOrgMediaTicket, redeemInvite, getPublicServers, updateOrgSettings, updateMemberProfile, createInvite, updateOrgLanding, uploadOrgLogo, orgLogoUpload } from '../controllers/orgController.js';
 import { authenticateTokenStrict } from '../middleware/authMiddleware.js';
 import { validate } from '../middleware/validationMiddleware.js';
 import { createOrgSchema, joinOrgSchema } from '../utils/validation.js';
@@ -32,6 +32,7 @@ router.get('/me',                       getMyOrgs);
 router.post('/invite/:code/redeem',     redeemInvite);
 router.post('/:id/join',                validate(joinOrgSchema), joinOrg);
 router.post('/:id/token',               getOrgToken);
+router.post('/:id/media-ticket',        issueOrgMediaTicket);
 router.put('/:id/settings',             updateOrgSettings);
 router.put('/:id/profile',              updateMemberProfile);
 router.post('/:id/invites',             createInvite);

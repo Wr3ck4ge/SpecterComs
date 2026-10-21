@@ -84,12 +84,14 @@ export default function UserProfileModal({
         style={{
           maxWidth: 340,
           width: '100%',
-          background: '#041e2e',
-          border: '1px solid #0e3a4e',
+          backdropFilter: 'blur(18px) saturate(1.2)',
+          WebkitBackdropFilter: 'blur(18px) saturate(1.2)',
+          background: 'linear-gradient(180deg, rgba(4,12,23,0.55), rgba(2,8,16,0.45))',
+          border: '1px solid rgba(56,189,248,0.28)',
           borderRadius: 12,
           padding: 24,
           position: 'relative',
-          boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
+          boxShadow: '0 0 0 1px rgba(34,211,238,0.12), 0 0 36px rgba(34,211,238,0.18), 0 24px 64px rgba(0,0,0,0.4)',
         }}
       >
         {/* Close button */}

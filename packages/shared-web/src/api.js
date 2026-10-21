@@ -18,19 +18,26 @@ export function createApi(API_BASE_URL) {
     // regular user session's specter_token.
     const token = tokenOverride || localStorage.getItem("specter_token");
 
-    const isFormData = options.body instanceof FormData;
+    // expectedStatuses: HTTP status codes the caller treats as handled outcomes
+    // rather than errors (e.g. 409 from MLS commit endpoints where an epoch
+    // conflict is normal and self-healing). These return {data:null, error}
+    // without a console.error. Strip before spreading into fetch — it's not a
+    // valid fetch option.
+    const { expectedStatuses = [], ...fetchOpts } = options;
+
+    const isFormData = fetchOpts.body instanceof FormData;
 
     const headers = {
       ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(token ? { "Authorization": `Bearer ${token}` } : {}),
-      ...options.headers,
+      ...fetchOpts.headers,
     };
 
     try {
       const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        ...options,
+        ...fetchOpts,
         headers,
-        body: isFormData ? options.body : JSON.stringify(options.body),
+        body: isFormData ? fetchOpts.body : JSON.stringify(fetchOpts.body),
       });
 
       // Parse response body regardless of status code (error details may be in body)
@@ -49,7 +56,12 @@ export function createApi(API_BASE_URL) {
         const fieldErrors = Array.isArray(json.errors) && json.errors.length
           ? json.errors.map(e => e.message).join(' · ')
           : null;
-        throw new Error(fieldErrors || json.message || `HTTP ${response.status}: ${response.statusText}`);
+        const errMsg = fieldErrors || json.message || `HTTP ${response.status}: ${response.statusText}`;
+        // Return silently for caller-declared expected statuses (no console.error).
+        if (expectedStatuses.includes(response.status)) {
+          return { data: null, error: errMsg };
+        }
+        throw new Error(errMsg);
       }
 
       return { data: json, error: null };
@@ -233,11 +245,21 @@ export function createApi(API_BASE_URL) {
     getUserDeviceKeyPackages: (userId) =>
       fetchWithAuth(`/devices/${userId}/key-packages`, { method: 'GET' }),
     submitDmCommit: (userId, epoch, commitB64, welcomeB64 = null) =>
-      fetchWithAuth(`/dm/${userId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64 } }),
+      fetchWithAuth(`/dm/${userId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64 }, expectedStatuses: [409] }),
     submitChannelCommit: (orgId, chanId, epoch, commitB64, welcomeB64 = null, welcomedUserIds = []) =>
-      fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64, welcomed_user_ids: welcomedUserIds } }),
+      fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64, welcomed_user_ids: welcomedUserIds }, expectedStatuses: [409] }),
     submitEventGroupCommit: (orgId, eventId, epoch, commitB64, welcomeB64 = null, welcomedUserIds = []) =>
-      fetchWithAuth(`/orgs/${orgId}/events/${eventId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64, welcomed_user_ids: welcomedUserIds } }),
+      fetchWithAuth(`/orgs/${orgId}/events/${eventId}/mls/commit`, { method: 'POST', body: { epoch, commit: commitB64, welcome: welcomeB64, welcomed_user_ids: welcomedUserIds }, expectedStatuses: [409] }),
+    // Lets a device that doesn't hold a group locally (or missed a live
+    // mls_welcome/mls_commit — see nats.ts's non-durable event.user.*
+    // subjects) pull whatever it needs to catch up instead of forking a
+    // rogue duplicate group: { welcome: {epoch, welcome}|null, commits: [{epoch, commit}] }.
+    getDmMlsCatchUp: (userId) =>
+      fetchWithAuth(`/dm/${userId}/mls/catch-up`, { method: 'GET' }),
+    getChannelMlsCatchUp: (orgId, chanId) =>
+      fetchWithAuth(`/orgs/${orgId}/channels/${chanId}/mls/catch-up`, { method: 'GET' }),
+    getEventGroupMlsCatchUp: (orgId, eventId) =>
+      fetchWithAuth(`/orgs/${orgId}/events/${eventId}/mls/catch-up`, { method: 'GET' }),
     // Every accepted participant across an event's groups — the membership
     // source for the event-scoped cascade MLS group (see ensureEventGroup in
     // mlsSession.js). Superset of any single frequency's role-based grant.

@@ -1,8 +1,39 @@
-node_modules/
 target/
-dist/
+bin/
+node_modules/
 .env
-.env.*
-*.log
 .DS_Store
-Cargo.lock.bak
+# Droplet-only credential files (e.g. the Firebase service account key,
+# /root/ProjectEchelonLink/secrets/ on the server) -- never generated or
+# expected to exist locally, but excluded defensively so a `git add -A` on
+# the droplet itself could never accidentally stage one.
+secrets/
+specter_images.tar
+specter_config.tar.gz
+debug memory dump file/
+*.DMP
+# Manual deploy-script output — these kept getting committed (deploy.log,
+# deploy-v2.log .. deploy-v6.log, deploy-output.txt, deploy-full.txt, an
+# 8.8MB deploy.zip) across the repo root and web-portal/. Transient run
+# output, not source; never worth version-controlling.
+*.log
+deploy-output.txt
+deploy-full.txt
+deploy.zip
+# Entire signing-key directory, not just the password — a prior version of
+# this rule only excluded *.pass, leaving the private key itself (specter.key)
+# tracked in git for months (rotated 2026-07-12; see memory).
+web-portal/~/.tauri/
+# Production DB dumps and key-management/infra scripts that shouldn't ever
+# be staged (this repo's history also gets exported to a public snapshot).
+specter-prod.sql
+scripts/reencrypt-keys.mjs
+# Build output rebuilt by their own build steps (identity-node's Dockerfile
+# runs `npm run build`; deploy-website.ps1 builds website/). web-portal/dist
+# stays tracked — Tauri's frontendDist points at it.
+services/identity-node/dist/
+website/dist/
+scripts/Write-ComposeEnv.ps1
+ProjectEchelonLink-*.zip
+# Contains production server IP and SSH key paths — ops reference only
+AGENT_OPS.md

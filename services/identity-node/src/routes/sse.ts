@@ -1,9 +1,10 @@
 import { Router } from 'express';
-import { authenticateToken } from '../middleware/authMiddleware.js';
-import { eventStream } from '../controllers/sseController.js';
+import { authenticateSseToken, authenticateTokenStrict } from '../middleware/authMiddleware.js';
+import { eventStream, issueSseTicket } from '../controllers/sseController.js';
 
 const router = Router();
 
-router.get('/stream', authenticateToken, eventStream);
+router.post('/ticket', authenticateTokenStrict, issueSseTicket);
+router.get('/stream', authenticateSseToken, eventStream);
 
 export default router;

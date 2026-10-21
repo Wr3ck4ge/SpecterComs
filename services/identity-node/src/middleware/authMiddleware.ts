@@ -5,7 +5,8 @@ import { getJwtSecret } from '../config/jwtSecret.js';
 export interface AuthRequest extends Request {
   user?: {
     id: string;
-    callsign: string;
+    callsign?: string;
+    purpose?: string;
   };
 }
 
@@ -21,10 +22,7 @@ export const authenticateToken = (req: AuthRequest, res: Response, next: NextFun
 
   jwt.verify(token, getJwtSecret(), (err: any, user: any) => {
     if (err) {
-      // 401, not 403 — this must match what the client's auth-expired
-      // detection listens for (packages/shared-web/src/api.js), otherwise an
-      // expired token silently fails every API call forever instead of
-      // triggering re-auth.
+      // Keep 401 (not 403) so the client triggers auth-expired handling.
       return res.status(401).json({ message: 'Invalid or expired token' });
     }
     req.user = user;
@@ -44,13 +42,32 @@ export const authenticateTokenStrict = (req: AuthRequest, res: Response, next: N
 
   jwt.verify(token, getJwtSecret(), (err: any, user: any) => {
     if (err) {
-      // 401, not 403 — this must match what the client's auth-expired
-      // detection listens for (packages/shared-web/src/api.js), otherwise an
-      // expired token silently fails every API call forever instead of
-      // triggering re-auth.
+      // Keep 401 (not 403) so the client triggers auth-expired handling.
       return res.status(401).json({ message: 'Invalid or expired token' });
     }
     req.user = user;
+    next();
+  });
+};
+
+// SSE variant: query token only, scoped to short-lived SSE tickets.
+export const authenticateSseToken = (req: AuthRequest, res: Response, next: NextFunction) => {
+  const token = typeof req.query.token === 'string' ? req.query.token : undefined;
+
+  if (!token) {
+    return res.status(401).json({ message: 'SSE ticket required' });
+  }
+
+  jwt.verify(token, getJwtSecret(), (err: any, user: any) => {
+    if (err) {
+      return res.status(401).json({ message: 'Invalid or expired SSE ticket' });
+    }
+
+    if (!user || user.purpose !== 'sse' || !user.id) {
+      return res.status(401).json({ message: 'Invalid SSE ticket scope' });
+    }
+
+    req.user = { id: user.id, callsign: user.callsign, purpose: user.purpose };
     next();
   });
 };

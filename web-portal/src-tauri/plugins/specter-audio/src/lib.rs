@@ -13,9 +13,44 @@ use parking_lot::Mutex;
 mod capture;
 mod opus_encode;
 mod playback;
+mod resample;
 
 use capture::CaptureHandle;
 use playback::PlaybackHandle;
+
+/// Persistent log for the audio pipeline's device-selection/sample-rate
+/// decisions — device name, negotiated sample rate, and whether the
+/// resampler engaged for it. Nothing about mic/speaker device selection was
+/// previously captured in any diagnostic report (the main app's
+/// setup_errors.log / capture_breadcrumbs are the *screen*-capture module's,
+/// a different crate entirely), so a report submitted while reproducing a
+/// pitch/speed audio bug had literally nothing in it to confirm or rule out
+/// a sample-rate mismatch. Written to %APPDATA%\specter-coms\audio_pipeline.log,
+/// read back by get_audio_pipeline_log for DiagnosticsButton to bundle.
+pub(crate) fn write_audio_log(msg: &str) {
+    eprintln!("[audio] {msg}");
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let dir = std::path::Path::new(&appdata).join("specter-coms");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("audio_pipeline.log");
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "[{ts}] {msg}");
+        }
+    }
+}
+
+/// Read back the audio pipeline log for diagnostics submission.
+#[tauri::command]
+fn get_audio_pipeline_log() -> Result<String, String> {
+    let appdata = std::env::var("APPDATA").map_err(|e| e.to_string())?;
+    let path = std::path::Path::new(&appdata).join("specter-coms").join("audio_pipeline.log");
+    Ok(std::fs::read_to_string(&path).unwrap_or_default())
+}
 
 /// Per-stream jitter buffer: decoded PCM queue plus whether it currently has
 /// enough buffered audio to be drained by the output callback. Without this,
@@ -313,6 +348,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             clear_stream,
             set_output_device,
             set_send_threshold,
+            get_audio_pipeline_log,
         ])
         .setup(|app, _api| {
             app.manage(AudioState {

@@ -6,6 +6,13 @@ function getSupportedTimezones() {
   try { return Intl.supportedValuesOf('timeZone'); } catch { return TIMEZONE_FALLBACK; }
 }
 
+function detectPlatform() {
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes('win')) return 'windows';
+  if (ua.includes('mac')) return 'macos';
+  return 'linux';
+}
+
 const Button = ({ children, variant = 'primary', onClick, disabled = false, full = false }) => {
   const base = `${full ? 'w-full' : ''} px-4 py-1.5 rounded text-xs font-bold tracking-wider transition-all duration-200 uppercase font-mono`;
   const variants = {
@@ -766,6 +773,30 @@ const TABS = [
 
 const WebPortalDashboard = ({ user, onLogout }) => {
   const [tab, setTab] = useState('servers');
+  const [downloadError, setDownloadError] = useState('');
+
+  // Land members with no server on Discover instead of an empty "My Servers" tab.
+  useEffect(() => {
+    api.getMyOrgs().then(({ data }) => {
+      const orgs = data?.orgs || data?.servers || [];
+      if (orgs.length === 0) setTab('discover');
+    });
+  }, []);
+
+  const handleDownload = async () => {
+    setDownloadError('');
+    const platform = detectPlatform();
+    try {
+      const res = await fetch(`/api/downloads?platform=${platform}`, { method: 'HEAD' });
+      if (res.ok) {
+        window.location.href = `/api/downloads?platform=${platform}`;
+      } else {
+        setDownloadError('Download not available for your platform.');
+      }
+    } catch {
+      setDownloadError('Download service is temporarily unavailable.');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-specter-bg-deep font-mono text-specter-text-main flex flex-col relative overflow-x-hidden">
@@ -782,6 +813,17 @@ const WebPortalDashboard = ({ user, onLogout }) => {
             <span className="text-specter-primary-dim text-xs opacity-60">Web Portal</span>
           </div>
           <div className="flex items-center gap-4">
+            <div className="flex flex-col items-end">
+              <button
+                onClick={handleDownload}
+                title="Download the SpecterComs desktop app"
+                className="flex items-center gap-2 px-3 py-1.5 rounded border border-specter-primary-cyan/50 text-specter-primary-cyan hover:bg-specter-primary-cyan/10 hover:border-specter-primary-cyan transition-colors text-xs font-bold uppercase tracking-wider"
+              >
+                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                Download Client
+              </button>
+              {downloadError && <span className="text-red-400 text-[10px] mt-1">{downloadError}</span>}
+            </div>
             <span className="text-specter-text-muted text-xs">{user?.callsign || user?.email}</span>
             <Button variant="secondary" onClick={onLogout}>Log Out</Button>
           </div>

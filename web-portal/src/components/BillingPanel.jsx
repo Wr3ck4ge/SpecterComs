@@ -93,8 +93,12 @@ export default function BillingPanel({ orgId, orgName, billing, onClose, onFunde
         onClick={e => e.stopPropagation()}
         style={{
           width: 440, maxHeight: '80vh', overflowY: 'auto',
-          background: '#040c17', border: '1px solid #0e2233', borderRadius: 6,
-          boxShadow: '0 0 40px rgba(6,182,212,0.15)', padding: 16,
+          backdropFilter: 'blur(18px) saturate(1.2)',
+          WebkitBackdropFilter: 'blur(18px) saturate(1.2)',
+          background: 'linear-gradient(180deg, rgba(4,12,23,0.55), rgba(2,8,16,0.45))',
+          border: '1px solid rgba(56,189,248,0.28)', borderRadius: 6,
+          boxShadow: '0 0 0 1px rgba(34,211,238,0.12), 0 0 36px rgba(34,211,238,0.18), 0 24px 64px rgba(0,0,0,0.4)',
+          padding: 16,
         }}
       >
         {/* Header */}

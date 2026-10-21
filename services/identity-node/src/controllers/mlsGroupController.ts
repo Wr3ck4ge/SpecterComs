@@ -19,18 +19,88 @@ const submitDmCommitSchema = z.object({
  * one — the Delivery Service ordering rule (RFC 9750 §3): accept exactly
  * one Commit per epoch, so two concurrent commits can't fork the group
  * into disagreeing states. Returns false (caller should 409) on conflict.
+ *
+ * Also durably logs the commit/welcome into mls_commit_log in the same
+ * transaction as the epoch bump — see that migration's doc comment for why:
+ * mls_commit/mls_welcome are relayed over plain NATS core pub/sub with no
+ * replay, so without this a device that isn't connected at the exact
+ * publish instant (a new install, a migrated machine, anyone who was
+ * offline) loses that Commit/Welcome forever and can never catch up. The
+ * catch-up endpoints below read this log back.
  */
-async function bumpGroupEpoch(groupId: string, epoch: number): Promise<boolean> {
-  await pool.query(
-    `INSERT INTO mls_groups (group_id, current_epoch) VALUES ($1, 0) ON CONFLICT (group_id) DO NOTHING`,
+async function bumpGroupEpoch(
+  groupId: string,
+  epoch: number,
+  commit: string,
+  welcome: string | null | undefined,
+  welcomedUserIds: string[] | undefined,
+): Promise<boolean> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `INSERT INTO mls_groups (group_id, current_epoch) VALUES ($1, 0) ON CONFLICT (group_id) DO NOTHING`,
+      [groupId],
+    );
+    const bump = await client.query(
+      `UPDATE mls_groups SET current_epoch = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE group_id = $1 AND current_epoch = $2 - 1`,
+      [groupId, epoch],
+    );
+    if ((bump.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+    await client.query(
+      `INSERT INTO mls_commit_log (group_id, epoch, commit, welcome, welcomed_user_ids)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (group_id, epoch) DO NOTHING`,
+      [
+        groupId,
+        epoch,
+        Buffer.from(commit, 'base64'),
+        welcome ? Buffer.from(welcome, 'base64') : null,
+        welcomedUserIds?.length ? welcomedUserIds : null,
+      ],
+    );
+    await client.query('COMMIT');
+    return true;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Reads mls_commit_log back for a device catching up on a group it doesn't
+ * yet hold locally (or hasn't kept live). Finds the earliest commit that
+ * actually welcomed this user — their entry point into the group — and
+ * returns every commit after it for the client to replay via process_commit,
+ * reconstructing exactly what a continuously-connected device would have
+ * applied live. `welcome: null` means this user has never been welcomed
+ * into this group at all yet (nothing to catch up on until some existing
+ * member's next reconcile pass adds them).
+ */
+async function fetchGroupCatchUp(groupId: string, userId: string) {
+  const result = await pool.query(
+    `SELECT epoch, commit, welcome, welcomed_user_ids FROM mls_commit_log
+     WHERE group_id = $1 ORDER BY epoch ASC`,
     [groupId],
   );
-  const bump = await pool.query(
-    `UPDATE mls_groups SET current_epoch = $2, updated_at = CURRENT_TIMESTAMP
-     WHERE group_id = $1 AND current_epoch = $2 - 1`,
-    [groupId, epoch],
-  );
-  return (bump.rowCount ?? 0) > 0;
+  let welcome: { epoch: number; welcome: string } | null = null;
+  const commits: { epoch: number; commit: string }[] = [];
+  for (const row of result.rows) {
+    if (!welcome) {
+      if (row.welcome && ((row.welcomed_user_ids ?? []) as string[]).includes(userId)) {
+        welcome = { epoch: Number(row.epoch), welcome: (row.welcome as Buffer).toString('base64') };
+      }
+      continue;
+    }
+    commits.push({ epoch: Number(row.epoch), commit: (row.commit as Buffer).toString('base64') });
+  }
+  return { welcome, commits };
 }
 
 /**
@@ -80,7 +150,11 @@ export const submitDmCommit = async (req: AuthRequest, res: Response) => {
 
     const convId = [me, otherUserId].sort().join('-');
 
-    if (!(await bumpGroupEpoch(convId, epoch))) {
+    // DMs don't track welcomed_user_ids explicitly (see the doc comment
+    // above on why both sides always get the live broadcast) — log both
+    // participants as welcomed whenever a welcome is present, so catch-up
+    // can find this commit as either side's entry point.
+    if (!(await bumpGroupEpoch(convId, epoch, commit, welcome, welcome ? [me, otherUserId] : undefined))) {
       return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
     }
 
@@ -197,7 +271,7 @@ export const submitEventGroupCommit = async (req: AuthRequest, res: Response) =>
       return res.status(403).json({ message: 'Not a participant of this event' });
     }
 
-    if (!(await bumpGroupEpoch(eventId as string, epoch))) {
+    if (!(await bumpGroupEpoch(eventId as string, epoch, commit, welcome, welcomed_user_ids))) {
       return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
     }
 
@@ -262,7 +336,7 @@ export const submitChannelCommit = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ message: 'Channel not found' });
     }
 
-    if (!(await bumpGroupEpoch(chanId as string, epoch))) {
+    if (!(await bumpGroupEpoch(chanId as string, epoch, commit, welcome, welcomed_user_ids))) {
       return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
     }
 
@@ -285,6 +359,108 @@ export const submitChannelCommit = async (req: AuthRequest, res: Response) => {
     res.status(202).json({ ok: true, epoch });
   } catch (err) {
     console.error('submitChannelCommit error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/**
+ * GET /dm/:userId/mls/catch-up
+ * DM counterpart to getChannelMlsCatchUp — same auth gate as submitDmCommit.
+ */
+export const getDmMlsCatchUp = async (req: AuthRequest, res: Response) => {
+  const me = req.user?.id;
+  const otherUserId = req.params.userId as string;
+  if (!me) return res.status(401).json({ message: 'Unauthorized' });
+  if (!UUID_RE.test(otherUserId)) return res.status(400).json({ message: 'Invalid userId' });
+  if (me === otherUserId) return res.status(400).json({ message: 'Cannot MLS-commit with yourself' });
+
+  try {
+    const friendCheck = await pool.query(
+      `SELECT 1 FROM friendships
+       WHERE status = 1
+         AND ((user_a_id = $1 AND user_b_id = $2) OR (user_a_id = $2 AND user_b_id = $1))`,
+      [me, otherUserId],
+    );
+    if ((friendCheck.rowCount ?? 0) === 0) {
+      return res.status(403).json({ message: 'Not friends' });
+    }
+    const convId = [me, otherUserId].sort().join('-');
+    res.json(await fetchGroupCatchUp(convId, me));
+  } catch (err) {
+    console.error('getDmMlsCatchUp error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/**
+ * GET /orgs/:orgId/events/:eventId/mls/catch-up
+ * Event counterpart to getChannelMlsCatchUp — same auth gate as
+ * submitEventGroupCommit.
+ */
+export const getEventGroupMlsCatchUp = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const { orgId, eventId } = req.params;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  try {
+    const eventCheck = await pool.query(
+      'SELECT 1 FROM events WHERE id = $1 AND org_id = $2',
+      [eventId, orgId],
+    );
+    if (eventCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Event not found' });
+    }
+    const participantCheck = await pool.query(
+      `SELECT 1 FROM event_group_members egm
+       JOIN event_groups eg ON egm.group_id = eg.id
+       WHERE eg.event_id = $1 AND egm.user_id = $2 AND egm.status = 'accepted'
+       UNION
+       SELECT 1 FROM event_planners WHERE event_id = $1 AND user_id = $2`,
+      [eventId, userId],
+    );
+    if (participantCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Not a participant of this event' });
+    }
+    res.json(await fetchGroupCatchUp(eventId as string, userId));
+  } catch (err) {
+    console.error('getEventGroupMlsCatchUp error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+/**
+ * GET /orgs/:orgId/channels/:chanId/mls/catch-up
+ * Returns whatever this user's device needs to catch a channel group up to
+ * current from scratch: the earliest commit that actually welcomed this
+ * user (their entry point), plus every commit since, in order. Called
+ * before deciding whether a missing local group means "this channel never
+ * had a group" (genuinely create one) or "I'm just late" (a previous
+ * add for this user never reached this device live) — same auth gate as
+ * submitChannelCommit.
+ */
+export const getChannelMlsCatchUp = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  const { orgId, chanId } = req.params;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  try {
+    const memberCheck = await pool.query(
+      'SELECT 1 FROM org_members WHERE org_id = $1 AND user_id = $2',
+      [orgId, userId],
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: 'Not a member of this organization' });
+    }
+    const chanCheck = await pool.query(
+      'SELECT 1 FROM channels WHERE id = $1 AND org_id = $2',
+      [chanId, orgId],
+    );
+    if (chanCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'Channel not found' });
+    }
+    res.json(await fetchGroupCatchUp(chanId as string, userId));
+  } catch (err) {
+    console.error('getChannelMlsCatchUp error:', err);
     res.status(500).json({ message: 'Internal server error' });
   }
 };

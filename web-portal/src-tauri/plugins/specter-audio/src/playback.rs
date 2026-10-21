@@ -7,6 +7,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 
 use super::{AudioDevice, StreamBuffer};
+use super::resample::LinearResampler;
+
+/// Pop one sample from every currently-primed stream in `queues` and sum
+/// them — the same per-tick mixing every format branch below needs, whether
+/// or not the result then goes through the resampler. Factored out so the
+/// resampling path (which needs to pull mixed samples on demand, not just
+/// once per output frame) and the direct/no-resample path share one
+/// definition of "what does a mixed sample mean" instead of drifting apart.
+fn pop_mixed_i16(queues: &mut HashMap<String, StreamBuffer>) -> i16 {
+    let mut mixed = 0i32;
+    for q in queues.values_mut() {
+        if let Some(s) = pop_primed(q) {
+            mixed += s as i32;
+        }
+    }
+    mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
 
 /// Pop one sample from a stream's jitter buffer for this callback tick, if
 /// it's currently primed. An underrun while primed (queue ran dry) drops the
@@ -81,11 +98,13 @@ pub fn start(stream_queues: Arc<Mutex<HashMap<String, StreamBuffer>>>, device_na
 
     let channels = supported.channels() as usize;
 
-    // Force 48 kHz to match the Opus decoder output rate. Using the device
-    // native rate (e.g. 44100 or 96000 Hz) causes the queue to drain at the
-    // wrong speed: 96 kHz drains 2× faster than frames arrive → constant
-    // underrun → crackling/static. 48 kHz is universally supported on
-    // Windows WASAPI, macOS CoreAudio, and Linux ALSA/PulseAudio.
+    // Prefer 48 kHz to match the Opus decoder output rate — the jitter
+    // buffers are always 48 kHz mono PCM (see StreamBuffer's doc comment).
+    // Using the device's native rate directly without correcting for it
+    // used to just desync playback speed from real time (e.g. draining a
+    // 48 kHz-paced queue at 96 kHz plays it 2x fast — the same "chipmunk"
+    // pitch/speed bug capture.rs's LinearResampler fixes on the sending
+    // side, mirrored here for whichever device is actually rendering it).
     let target_rate = cpal::SampleRate(48_000);
     let supports_48k = device
         .supported_output_configs()
@@ -100,12 +119,15 @@ pub fn start(stream_queues: Arc<Mutex<HashMap<String, StreamBuffer>>>, device_na
         target_rate
     } else {
         warn!(
-            "Device does not support 48 kHz output — falling back to device default {} Hz. \
-             Audio may be choppy if rate != 48000.",
+            "Device does not support 48 kHz output — resampling from 48 kHz to device rate {} Hz.",
             supported.sample_rate().0
         );
         supported.sample_rate()
     };
+    super::write_audio_log(&format!(
+        "playback: device='{}' rate={}Hz (48kHz supported={})",
+        device_name, sample_rate.0, supports_48k
+    ));
 
     let config = StreamConfig {
         channels: supported.channels(),
@@ -117,6 +139,18 @@ pub fn start(stream_queues: Arc<Mutex<HashMap<String, StreamBuffer>>>, device_na
     let running_clone = running.clone();
     let running_clone_2 = running.clone();
     let stream_queues_i16 = stream_queues.clone();
+
+    // Shared across whichever format branch actually builds below (see
+    // capture.rs's identical `resampler` pattern for why moving the same
+    // Option into every match arm is fine — only one arm's closure is ever
+    // actually constructed at runtime). `residual` holds resampled-but-not-
+    // yet-written-to-a-callback output samples: the resampler produces
+    // output in whatever-sized batches correspond to however many 48kHz
+    // input ticks were just pulled, which rarely lines up exactly with
+    // `frame_count` for a given callback.
+    let mut resampler = (sample_rate.0 != 48_000)
+        .then(|| LinearResampler::new(48_000, sample_rate.0));
+    let mut residual: Vec<i16> = Vec::new();
 
     let sample_format = supported.sample_format();
 
@@ -135,17 +169,25 @@ pub fn start(stream_queues: Arc<Mutex<HashMap<String, StreamBuffer>>>, device_na
                     }
                     let mut queues = stream_queues.lock();
                     let frame_count = data.len() / channels;
-                    for frame in 0..frame_count {
-                        // Sum one sample from every active stream for this time position.
-                        let mut mixed = 0.0f32;
-                        for q in queues.values_mut() {
-                            if let Some(s) = pop_primed(q) {
-                                mixed += s as f32 / 32_767.0;
+                    if let Some(r) = resampler.as_mut() {
+                        while residual.len() < frame_count {
+                            let s = pop_mixed_i16(&mut queues);
+                            r.process(&[s], &mut residual);
+                        }
+                        for (frame, &s) in residual[..frame_count].iter().enumerate() {
+                            let clipped = (s as f32 / 32_767.0).clamp(-1.0, 1.0);
+                            for ch in 0..channels {
+                                data[frame * channels + ch] = clipped;
                             }
                         }
-                        let clipped = mixed.clamp(-1.0, 1.0);
-                        for ch in 0..channels {
-                            data[frame * channels + ch] = clipped;
+                        residual.drain(..frame_count);
+                    } else {
+                        for frame in 0..frame_count {
+                            let s = pop_mixed_i16(&mut queues);
+                            let clipped = (s as f32 / 32_767.0).clamp(-1.0, 1.0);
+                            for ch in 0..channels {
+                                data[frame * channels + ch] = clipped;
+                            }
                         }
                     }
                 },
@@ -163,16 +205,23 @@ pub fn start(stream_queues: Arc<Mutex<HashMap<String, StreamBuffer>>>, device_na
                     }
                     let mut queues = stream_queues_i16.lock();
                     let frame_count = data.len() / channels;
-                    for frame in 0..frame_count {
-                        let mut mixed = 0i32;
-                        for q in queues.values_mut() {
-                            if let Some(s) = pop_primed(q) {
-                                mixed += s as i32;
+                    if let Some(r) = resampler.as_mut() {
+                        while residual.len() < frame_count {
+                            let s = pop_mixed_i16(&mut queues);
+                            r.process(&[s], &mut residual);
+                        }
+                        for (frame, &clipped) in residual[..frame_count].iter().enumerate() {
+                            for ch in 0..channels {
+                                data[frame * channels + ch] = clipped;
                             }
                         }
-                        let clipped = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                        for ch in 0..channels {
-                            data[frame * channels + ch] = clipped;
+                        residual.drain(..frame_count);
+                    } else {
+                        for frame in 0..frame_count {
+                            let clipped = pop_mixed_i16(&mut queues);
+                            for ch in 0..channels {
+                                data[frame * channels + ch] = clipped;
+                            }
                         }
                     }
                 },
@@ -190,18 +239,27 @@ pub fn start(stream_queues: Arc<Mutex<HashMap<String, StreamBuffer>>>, device_na
                     }
                     let mut queues = stream_queues_i16.lock();
                     let frame_count = data.len() / channels;
-                    for frame in 0..frame_count {
-                        let mut mixed = 0i32;
-                        for q in queues.values_mut() {
-                            if let Some(s) = pop_primed(q) {
-                                mixed += s as i32;
+                    if let Some(r) = resampler.as_mut() {
+                        while residual.len() < frame_count {
+                            let s = pop_mixed_i16(&mut queues);
+                            r.process(&[s], &mut residual);
+                        }
+                        for (frame, &clipped) in residual[..frame_count].iter().enumerate() {
+                            // Scale i16 range to i32 range for the device.
+                            let expanded = (clipped as i32) << 16;
+                            for ch in 0..channels {
+                                data[frame * channels + ch] = expanded;
                             }
                         }
-                        let clipped = mixed.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                        // Scale i16 range to i32 range for the device.
-                        let expanded = (clipped as i32) << 16;
-                        for ch in 0..channels {
-                            data[frame * channels + ch] = expanded;
+                        residual.drain(..frame_count);
+                    } else {
+                        for frame in 0..frame_count {
+                            let clipped = pop_mixed_i16(&mut queues);
+                            // Scale i16 range to i32 range for the device.
+                            let expanded = (clipped as i32) << 16;
+                            for ch in 0..channels {
+                                data[frame * channels + ch] = expanded;
+                            }
                         }
                     }
                 },

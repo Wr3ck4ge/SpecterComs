@@ -50,6 +50,23 @@ fn is_token_expired(claims: &BTreeMap<String, Value>) -> bool {
 /// fraction of a second, mirroring the outgoing-audio-queue max-age bound.
 const MAX_VIDEO_FRAME_AGE: Duration = Duration::from_millis(300);
 
+/// Bit 0 of a video frame's flags byte: 0 = keyframe, 1 = delta. The rest of
+/// the byte carries flags that are none of this relay's business (bit 1 is the
+/// client's end-to-end encryption marker — see FRAME_FLAG_ENCRYPTED in
+/// CommLink.jsx), so keyframe tests must mask rather than compare the whole
+/// byte. They used to compare it against 0x00 outright, which silently turned
+/// "keyframe" into "keyframe AND no other flag set": the keyframe cache would
+/// never populate and `needs_keyframe` would never clear, dropping every frame
+/// for every subscriber the moment any other flag appeared.
+const VIDEO_FLAG_DELTA: u8 = 0x01;
+
+/// True if this frame's flags byte marks a keyframe. `flags` is the first byte
+/// of the frame body (`[1B flags][4B ts][payload]`).
+#[inline]
+fn video_flags_is_keyframe(flags: u8) -> bool {
+    flags & VIDEO_FLAG_DELTA == 0
+}
+
 /// Codec extradata (SPS/PPS or equivalent) is a few hundred bytes to a few KB
 /// at most; this is a generous ceiling that exists only so a publisher can't
 /// send a bogus 4-byte length prefix (e.g. 0xFFFFFFFF) and make the server
@@ -78,7 +95,7 @@ pub enum RosterMessage {
     Snapshot(Vec<String>),
     Sharers(Vec<String>), // active sharer callsigns on join
     Join(String),
-    Leave(String),
+    Leave { callsign: String, user_id: String },
     Move(String), // new_channel_id
     Speaking { callsign: String, level: u8 },
     /// ssrc -> user_id for every current room member, computed via canonical_ssrc.
@@ -812,6 +829,10 @@ async fn main() -> anyhow::Result<()> {
         let rooms_clone = rooms.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
+            // Delay (not the default Burst) so a stalled tick just pushes the next
+            // one back instead of firing a catch-up burst of near-back-to-back
+            // ticks -- keeps the elapsed-time measurement sane (never near-0).
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Persistent across ticks: sysinfo needs a prior reading to compute a CPU
             // delta, so global_cpu_usage() is only meaningful from the second tick
             // onward (first tick reports 0, which is fine for a 5s-cadence gauge).
@@ -822,8 +843,15 @@ async fn main() -> anyhow::Result<()> {
             // instrumentation) are enough since this box only carries relay + minor
             // control traffic.
             let mut networks = sysinfo::Networks::new_with_refreshed_list();
+            // Real elapsed time between samples, not the nominal 5s interval -- if a
+            // tick is ever late (lock contention, a slow syscall, runtime busy), the
+            // accumulated byte delta actually covers more than 5s and dividing by a
+            // fixed 5.0 would report an inflated, traffic-uncorrelated Mbps spike.
+            let mut last_sample = Instant::now();
             loop {
                 interval.tick().await;
+                let elapsed_secs = last_sample.elapsed().as_secs_f64();
+                last_sample = Instant::now();
 
                 // Sum live capacity across all rooms. Nesting the per-room
                 // video_sharers read-lock inside the rooms read-lock mirrors the
@@ -866,9 +894,10 @@ async fn main() -> anyhow::Result<()> {
                     .fold((0u64, 0u64), |(rx, tx), (_, data)| {
                         (rx + data.received(), tx + data.transmitted())
                     });
-                // Bytes since last refresh (5s tick interval) -> Mbps.
-                let net_rx_mbps = (rx_bytes as f64 * 8.0) / 5.0 / 1_000_000.0;
-                let net_tx_mbps = (tx_bytes as f64 * 8.0) / 5.0 / 1_000_000.0;
+                // Bytes since last refresh -> Mbps, using the real measured gap
+                // (elapsed_secs) rather than assuming the nominal 5s interval held.
+                let net_rx_mbps = (rx_bytes as f64 * 8.0) / elapsed_secs / 1_000_000.0;
+                let net_tx_mbps = (tx_bytes as f64 * 8.0) / elapsed_secs / 1_000_000.0;
 
                 let payload = format!(
                     r#"{{"status":"ok","public_url":"{}","node_id":"{}","region":"{}","voice_sessions":{},"video_viewers":{},"video_sharers":{},"cpu_pct":{:.1},"mem_pct":{:.1},"net_rx_mbps":{:.2},"net_tx_mbps":{:.2}}}"#,
@@ -1130,6 +1159,7 @@ async fn handle_voice_connection(
     let get_str = |k: &str| -> String {
         claims.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
     };
+    let purpose = get_str("purpose");
     let user_id = { let s = get_str("sub"); if s.is_empty() { get_str("user_id") } else { s } };
     let org_id  = get_str("org_id");
     let role    = get_str("role");
@@ -1143,13 +1173,12 @@ async fn handle_voice_connection(
         warn!("Connection rejected: missing channel_id");
         return;
     }
+    if purpose != "media_voice" {
+        warn!("Connection rejected: invalid media ticket purpose '{}'", purpose);
+        return;
+    }
 
-    // The server already authorized this token for a *specific* channel_id at
-    // mint time (org membership, group-assignment lock, restricted-mode
-    // command/frequency checks) — but without binding that decision into the
-    // token itself, a token minted for channel A could be replayed here to
-    // connect to a different channel B, since channel_id was otherwise taken
-    // from the connection request at face value with no cross-check.
+    // Enforce channel binding to prevent cross-channel token replay.
     let token_channel_id = get_str("channel_id");
     if token_channel_id != channel_id {
         warn!(
@@ -1159,11 +1188,7 @@ async fn handle_voice_connection(
         return;
     }
 
-    // Priority tiers 1 and 2 (Commander / Squad Leader equivalent) cause ducking.
-    // Falls back to the legacy Commander role check (mapped to tier 1, matching
-    // orgController.ts's "event commander gets priority_level = 1") for tokens
-    // that pre-date the priority_level claim (e.g. existing sessions during a
-    // rolling deploy). priority_tier is only meaningful when is_priority is true.
+    // Priority tiers 1/2 trigger ducking; keep legacy Commander fallback.
     let claimed_level = claims.get("priority_level").and_then(|v| v.as_i64()).unwrap_or(5);
     let legacy_commander = role == "Commander"
         && claims.get("is_priority_channel").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1530,7 +1555,7 @@ async fn handle_voice_connection(
                         state.priority_release_at = None;
                     }
 
-                    let leave = serde_json::to_string(&RosterMessage::Leave(display_name)).unwrap();
+                    let leave = serde_json::to_string(&RosterMessage::Leave { callsign: display_name, user_id: user_id.clone() }).unwrap();
                     let _ = state.roster_tx.send(leave);
 
                     if state.members.is_empty() {
@@ -1984,9 +2009,30 @@ async fn handle_video_connection(
     let user_id = claims.get("sub").or_else(|| claims.get("user_id")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let callsign = claims.get("callsign").and_then(|v| v.as_str()).unwrap_or(&user_id).to_string();
     let org_id = claims.get("org_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let purpose = claims.get("purpose").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let media_role = claims.get("media_role").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let token_sharer = claims.get("sharer").and_then(|v| v.as_str()).unwrap_or_default().to_string();
 
     if user_id.is_empty() {
         warn!("Video connection rejected: missing user_id");
+        return;
+    }
+    if purpose != "media_video" {
+        warn!("Video connection rejected: invalid media ticket purpose '{}'", purpose);
+        return;
+    }
+    if media_role != role {
+        warn!(
+            "Video connection rejected: media_role claim ({}) does not match requested role ({})",
+            media_role, role
+        );
+        return;
+    }
+    if (role == "subscribe" || role == "subscribe_overlay") && token_sharer != sharer {
+        warn!(
+            "Video connection rejected: sharer claim ({}) does not match requested sharer ({})",
+            token_sharer, sharer
+        );
         return;
     }
 
@@ -2237,7 +2283,7 @@ async fn handle_video_publish(
                             framed.extend_from_slice(&frame_body);
                             let framed_bytes = bytes::Bytes::from(framed);
 
-                            if frame_body.first() == Some(&0x00) {
+                            if frame_body.first().copied().is_some_and(video_flags_is_keyframe) {
                                 ov_keyframes.write().await.insert(uid2.clone(), framed_bytes[..].to_vec());
                             }
 
@@ -2301,8 +2347,8 @@ async fn handle_video_publish(
                     framed.extend_from_slice(&frame_body);
                     let framed_bytes = bytes::Bytes::from(framed);
 
-                    // Update keyframe cache if this is an IDR (type byte == 0x00)
-                    if frame_body.first() == Some(&0x00) {
+                    // Update keyframe cache if this is an IDR (flags bit 0 clear)
+                    if frame_body.first().copied().is_some_and(video_flags_is_keyframe) {
                         video_keyframes.write().await.insert(user_id.clone(), framed_bytes[..].to_vec());
                     }
 
@@ -2439,7 +2485,7 @@ async fn handle_video_overlay_subscribe(
                     match vdata {
                         Ok((chunk, produced_at)) => {
                             if chunk.is_empty() { break; }
-                            let is_keyframe = chunk.len() > 4 && chunk[4] == 0x00;
+                            let is_keyframe = chunk.len() > 4 && video_flags_is_keyframe(chunk[4]);
                             if needs_resync {
                                 if !is_keyframe { continue; }
                                 needs_resync = false;
@@ -2575,8 +2621,8 @@ async fn handle_video_subscribe(
                     match vdata {
                         Ok((chunk, produced_at)) => {
                             if chunk.is_empty() { break; }
-                            // Keyframe: type byte is at offset 4 (after 4-byte size header)
-                            let is_keyframe = chunk.len() > 4 && chunk[4] == 0x00;
+                            // Keyframe: flags byte is at offset 4 (after 4-byte size header)
+                            let is_keyframe = chunk.len() > 4 && video_flags_is_keyframe(chunk[4]);
                             if needs_resync {
                                 if !is_keyframe { continue; }
                                 needs_resync = false;

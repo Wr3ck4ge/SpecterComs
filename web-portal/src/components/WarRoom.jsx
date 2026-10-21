@@ -26,6 +26,8 @@ import {
   ensureEventGroup, handleEventGroupCommit, handleEventGroupWelcome,
 } from '../mlsSession';
 import { barColor, fmtBytes } from '../utils/format';
+import holoProjector from '../assets/holo-projector.png';
+import holoRoom from '../assets/holo-room.png';
 
 // ── Module-level relay refs ───────────────────────────────────────────────────
 // TextChat and DmCabinet set these on mount; useEventStream calls them on message_relay.
@@ -62,6 +64,60 @@ function getOrgColor(index) {
   return ORG_COLORS[index % ORG_COLORS.length];
 }
 
+// ── HUD ambient components ────────────────────────────────────────────────
+
+function AudioWaveform({ level, speaking }) {
+  const canvasRef = React.useRef(null);
+  const levelRef  = React.useRef(level);
+  const speakRef  = React.useRef(speaking);
+  const histRef   = React.useRef(Array(48).fill(0));
+  const rafRef    = React.useRef(null);
+  const frameRef  = React.useRef(0);
+
+  React.useEffect(() => { levelRef.current = level; },    [level]);
+  React.useEffect(() => { speakRef.current = speaking; }, [speaking]);
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const draw = () => {
+      rafRef.current = requestAnimationFrame(draw);
+      if (++frameRef.current % 4 !== 0) return;
+      const W = canvas.width, H = canvas.height;
+      const spk = speakRef.current;
+      const lvl = levelRef.current;
+      histRef.current.shift();
+      histRef.current.push(spk ? lvl / 100 : 0);
+      ctx.clearRect(0, 0, W, H);
+      const bars = histRef.current;
+      const bw = W / bars.length;
+      for (let i = 0; i < bars.length; i++) {
+        const a = bars[i];
+        if (a > 0) {
+          const bh = Math.max(2, a * H * 0.85);
+          ctx.fillStyle = `rgba(6,182,212,${(0.35 + a * 0.6).toFixed(2)})`;
+          ctx.fillRect(i * bw + 0.5, (H - bh) / 2, bw - 1, bh);
+        } else {
+          ctx.fillStyle = 'rgba(6,182,212,0.1)';
+          ctx.fillRect(i * bw + 0.5, H / 2 - 0.5, bw - 1, 1);
+        }
+      }
+    };
+    rafRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={192}
+      height={28}
+      style={{ display: 'block', width: '100%', height: 28 }}
+    />
+  );
+}
+
 // ── Diagnostic trace logging (debrief/reconnect-storm investigation) ────────
 // Writes to setup_errors.log via the same client_log command used elsewhere,
 // so the trace survives even if the renderer later hangs/freezes — visible in
@@ -80,10 +136,11 @@ function traceLog(msg) {
 // universally across panel-level elements (see GLASS_PANEL usages below) —
 // keep this and ServerHome.jsx's `glass` object in sync when tuning the glow.
 const GLASS_PANEL = {
-  backdropFilter: 'blur(14px)',
-  background: 'linear-gradient(180deg, rgba(4,12,23,0.82), rgba(2,8,16,0.72))',
-  border: '1px solid rgba(56,189,248,0.35)',
-  boxShadow: 'inset 0 1px 0 rgba(34,211,238,0.06), 0 0 0 1px rgba(34,211,238,0.16), 0 0 26px rgba(34,211,238,0.28), 0 18px 48px rgba(0,0,0,0.35)',
+  backdropFilter: 'blur(16px) saturate(1.2)',
+  WebkitBackdropFilter: 'blur(16px) saturate(1.2)',
+  background: 'linear-gradient(180deg, rgba(4,12,23,0.52), rgba(2,8,16,0.42))',
+  border: '1px solid rgba(56,189,248,0.28)',
+  boxShadow: 'inset 0 1px 0 rgba(34,211,238,0.08), 0 0 0 1px rgba(34,211,238,0.12), 0 0 28px rgba(34,211,238,0.18), 0 18px 48px rgba(0,0,0,0.28)',
 };
 
 // ── Hexagonal Badge ──────────────────────────────────────────────────────────
@@ -1638,6 +1695,20 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
     }
   }, [forceSettingsOpen]);
 
+  // Mouse parallax — drives --look-x/--look-y CSS vars used by the projection
+  // depth system in index.css (background shifts opposite to mouse, panels stay
+  // fixed, creating a sense that the UI is floating above the projection field).
+  useEffect(() => {
+    const handleParallax = (e) => {
+      const x = (e.clientX / window.innerWidth  - 0.5).toFixed(3);
+      const y = (e.clientY / window.innerHeight - 0.5).toFixed(3);
+      document.documentElement.style.setProperty('--look-x', x);
+      document.documentElement.style.setProperty('--look-y', y);
+    };
+    window.addEventListener('pointermove', handleParallax, { passive: true });
+    return () => window.removeEventListener('pointermove', handleParallax);
+  }, []);
+
   const [showOrgSettings,    setShowOrgSettings]    = useState(false);
   const [plannerEvent,       setPlannerEvent]       = useState(null);   // null | 'create' | event obj
   const [groupCompEvent,     setGroupCompEvent]     = useState(null);   // null | event obj
@@ -1694,6 +1765,18 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
   const [membersExpanded,    setMembersExpanded]    = useState(false);
   const [activeSharers,      setActiveSharers]      = useState([]); // callsigns of all active sharers
   const [watchTarget,        setWatchTarget]        = useState(null); // callsign to watch, or null
+  // watchTarget only means anything while CommLink is mounted to actually show
+  // the picture-in-picture preview (see its watchStreamTarget prop below) — but
+  // it also gates the CALENDAR button/panel in the header (search !watchTarget).
+  // There are several separate "leave voice" call sites (disconnect button,
+  // op-end auto-disconnect, clicking away from the channel, CommLink's own
+  // back button...) and it's easy to add a new one without remembering this
+  // reset, which silently leaves the CALENDAR button hidden with no visible
+  // cause. Centralizing the reset here instead of duplicating it at every
+  // setInComms(false) call site makes it correct by construction.
+  useEffect(() => {
+    if (!inComms) setWatchTarget(null);
+  }, [inComms]);
   // Channel management UI state
   const [showCreateChan,     setShowCreateChan]     = useState(false);
   const [newChanName,        setNewChanName]        = useState('');
@@ -2585,7 +2668,11 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
       if (payload?.conversation_id && payload?.welcome) {
         handleDmWelcome(api, user?.id, payload.conversation_id, payload.welcome).catch(() => {});
       } else if (payload?.channel_id && payload?.welcome) {
-        handleChannelWelcome(api, user?.id, payload.channel_id, payload.welcome).catch(() => {});
+        handleChannelWelcome(api, user?.id, payload.channel_id, payload.welcome)
+          .then(() => {
+            if (payload.channel_id === commChannel?.id) commLinkMlsCommitRef.current?.();
+          })
+          .catch(() => {});
       } else if (payload?.event_group_id && payload?.welcome) {
         handleEventGroupWelcome(api, user?.id, payload.event_group_id, payload.welcome).catch(() => {});
       }
@@ -2695,6 +2782,13 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
     || selectedOrg?.permissions?.can_create_events === true;
   // can schedule = org admin, or role explicitly granted create-events permission
   const canScheduleEvents = isCommander || selectedOrg?.permissions?.can_create_events === true;
+  // can access server settings panel = full admin OR any moderation permission
+  const canAccessSettings = isCommander
+    || selectedOrg?.permissions?.can_manage_roles === true
+    || selectedOrg?.permissions?.can_manage_channels === true
+    || selectedOrg?.permissions?.can_kick === true
+    || selectedOrg?.permissions?.can_ban === true
+    || selectedOrg?.permissions?.can_mute === true;
   const canEditOperationEvent = useCallback((ev) => {
     const uid = user?.id;
     if (!uid || !ev) return false;
@@ -2844,10 +2938,20 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
         onEnded={() => { setEndOpModal(false); }}
       />
     )}
+    {/* Holographic scan-line sweep — one fixed element, no layout impact */}
+    <div className="proj-scan-line" />
+    {/* Holographic room environment */}
+    <img src={holoRoom} className="holo-room-bg" alt="" aria-hidden="true" />
+    {/* Circuit tracery grid — subtle background texture */}
+    <div className="hud-circuit-bg" />
+    {/* Projection bloom — light column rising from puck */}
+    <div className="holo-bloom" aria-hidden="true" />
+    {/* Holo projector puck — physical anchor for the projected UI */}
+    <img src={holoProjector} className="holo-projector" alt="" aria-hidden="true" />
     {/* ── Main layout ─────────────────────────────────────────────────── */}
     <div
       className="h-screen text-white font-mono flex flex-col overflow-hidden select-none hud-projected holo-viewport app-shell"
-      style={{ background: '#030a13', paddingTop: window.__TAURI__ ? 28 : 0, display: isLocalOverlayActive ? 'none' : 'flex' }}
+      style={{ background: 'transparent', paddingTop: window.__TAURI__ ? 28 : 0, display: isLocalOverlayActive ? 'none' : 'flex' }}
     >
       {/* ─────────────────── Main 3-column layout ─────────────────── */}
       <div className="flex flex-1 overflow-hidden bg-transparent depth-stage">
@@ -3008,7 +3112,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                 <div className="flex items-center justify-between px-3 pt-2.5 pb-1 flex-shrink-0">
                   <span style={{ fontSize: 11, color: '#0e7490', letterSpacing: '0.35em' }}>CHANNELS</span>
                   <div className="flex items-center gap-1">
-                    {isCommander && (
+                    {canAccessSettings && (
                       <button
                         onClick={() => setShowOrgSettings(true)}
                         title="Server settings"
@@ -3350,7 +3454,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                         {/* Regular voice channels */}
                         {regularVoice.length > 0 && (
                           <div>
-                            <div className="px-3 pt-2 pb-0.5" style={{ fontSize: 10, color: '#22d3ee', letterSpacing: '0.3em' }}>VOICE</div>
+                            <div className="px-3 pt-2 pb-0.5" style={{ fontSize: 9, color: '#2d5a6e', letterSpacing: '0.3em' }}>VOICE</div>
                             {regularVoice.map(ch => {
                               const isJoined = inComms && voiceChannel?.id === ch.id;
                               const isActive = activeChannel?.id === ch.id || isJoined;
@@ -3386,7 +3490,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                   {/* Text channels */}
                   {channels.filter(ch => (ch.channel_kind ?? 0) === 1).length > 0 && (
                     <div>
-                      <div className="px-3 pt-2 pb-0.5" style={{ fontSize: 10, color: '#22d3ee', letterSpacing: '0.3em' }}>TEXT</div>
+                      <div className="px-3 pt-2 pb-0.5" style={{ fontSize: 9, color: '#2d5a6e', letterSpacing: '0.3em' }}>TEXT</div>
                       {channels.filter(ch => (ch.channel_kind ?? 0) === 1).map(ch => {
                         const isActive = activeChannel?.id === ch.id;
                         return (
@@ -3439,8 +3543,8 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                         <span style={{ fontSize: 10, color: '#0e7490', letterSpacing: '0.35em' }}>MEMBERS</span>
                         <div className="flex items-center gap-1.5">
                           <span style={{
-                            fontSize: 9, color: '#0e7490', background: '#041018',
-                            border: '1px solid #0e4a5a', padding: '1px 6px', letterSpacing: '0.15em',
+                            fontSize: 10, color: '#1d7a91', background: '#041018',
+                            border: '1px solid #0e4a5a', borderRadius: 999, padding: '1px 7px', letterSpacing: '0.1em',
                           }}>
                             {members.length}
                           </span>
@@ -3734,6 +3838,13 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
             </div>
           )}
 
+          {/* Audio waveform — visible while in comms */}
+          {inComms && (
+            <div style={{ padding: '4px 10px 6px', flexShrink: 0, borderTop: '1px solid #0e2233' }}>
+              <div style={{ fontSize: 9, color: '#0e7490', letterSpacing: '0.3em', marginBottom: 3 }}>SIGNAL</div>
+              <AudioWaveform level={localAudioLevel} speaking={localSpeaking} />
+            </div>
+          )}
           {/* User footer */}
           <div style={{ borderTop: '1px solid #0e2233', padding: '7px 10px', flexShrink: 0 }}>
             <div className="flex items-center gap-2">
@@ -3917,26 +4028,28 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
             className="flex items-center justify-between px-5 py-3 flex-shrink-0"
             style={{ ...GLASS_PANEL, position: 'relative', zIndex: 2 }}
           >
-            <div>
-              <div style={{ fontSize: 11, color: '#0e7490', letterSpacing: '0.35em', textTransform: 'uppercase' }}>
-                Active Operation
-              </div>
-              <div style={{ fontSize: 14, fontWeight: 'bold', color: '#e5e7eb', letterSpacing: '0.08em', marginTop: 2 }}>
-                {activeOp
-                  ? activeOp.name.toUpperCase()
-                  : selectedOrg
-                    ? `${selectedOrg.callsign.toUpperCase()} — STANDBY`
-                    : 'SELECT SERVER'}
-              </div>
-              {activeOp && (
-                <div style={{ fontSize: 13, color: '#0891b2', marginTop: 2, letterSpacing: '0.1em' }}>
-                  {new Date(activeOp.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                  {activeOp.end_time && (
-                    <>{' — '}{new Date(activeOp.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{' UTC'}</>
-                  )}
+            {!(inComms && voiceChannel) && (
+              <div>
+                <div style={{ fontSize: 11, color: '#0e7490', letterSpacing: '0.35em', textTransform: 'uppercase' }}>
+                  Active Operation
                 </div>
-              )}
-            </div>
+                <div style={{ fontSize: 14, fontWeight: 'bold', color: '#e5e7eb', letterSpacing: '0.08em', marginTop: 2 }}>
+                  {activeOp
+                    ? activeOp.name.toUpperCase()
+                    : selectedOrg
+                      ? `${selectedOrg.callsign.toUpperCase()} — STANDBY`
+                      : 'SELECT SERVER'}
+                </div>
+                {activeOp && (
+                  <div style={{ fontSize: 13, color: '#0891b2', marginTop: 2, letterSpacing: '0.1em' }}>
+                    {new Date(activeOp.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {activeOp.end_time && (
+                      <>{' — '}{new Date(activeOp.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{' UTC'}</>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Comms indicator */}
             <div className="flex items-center gap-2">
@@ -3964,7 +4077,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                   }}
                 >
                   OPERATIONS
-                  <span style={{ fontSize: 10, border: '1px solid currentColor', borderRadius: 3, padding: '0 5px' }}>
+                  <span style={{ fontSize: 10, border: '1px solid currentColor', borderRadius: 999, padding: '1px 6px', minWidth: 18, textAlign: 'center' }}>
                     {opsCards.length}
                   </span>
                 </button>
@@ -3984,7 +4097,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                 >
                   CALENDAR
                   {upcomingCount > 0 && (
-                    <span style={{ fontSize: 10, border: '1px solid currentColor', borderRadius: 3, padding: '0 5px' }}>
+                    <span style={{ fontSize: 10, border: '1px solid currentColor', borderRadius: 999, padding: '1px 6px', minWidth: 18, textAlign: 'center' }}>
                       {upcomingCount}
                     </span>
                   )}
@@ -4065,6 +4178,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                 orgId={selectedOrg?.id}
                 canScheduleEvents={canScheduleEvents}
                 onSchedule={canScheduleEvents ? () => { setPlannerEvent('create'); setCalendarOpen(false); } : null}
+                onScheduleForDate={canScheduleEvents ? (date) => { setPlannerEvent({ initialDate: date }); setCalendarOpen(false); } : null}
                 onOpenEvent={handleOpenEventComp}
                 onLaunchEvent={handleLaunchFromCard}
                 canLaunchEvent={canLaunchEvent}
@@ -4073,7 +4187,9 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
           )}
 
           {/* Body: comms / text chat / calendar */}
-          <div className="flex flex-1 overflow-hidden">
+          {/* Hidden when calendar is open with no channel selected and not in voice —
+              the body row is flex-1 and would otherwise leave an empty panel below the calendar */}
+          {(activeChannel || (inComms && voiceChannel) || !calendarOpen) && <div className="flex flex-1 overflow-hidden">
 
             {/* Center content — contextual */}
             {/* zIndex 2 keeps the op-channels panel + calendar tab (and its dropdown, z-20)
@@ -4195,27 +4311,8 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                   <TextChat orgId={selectedOrg?.id} channel={activeChannel} user={user} />
                 </div>
               ) : !inComms || !voiceChannel ? (
-                activeChannel && (activeChannel.channel_kind ?? 0) === 0 ? (
-                  /* Viewing a voice channel but not connected */
-                  <div className="flex-1 flex items-center justify-center" style={{ background: '#040c17' }}>
-                    <div style={{ textAlign: 'center' }}>
-                      <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.3 }}>◉</div>
-                      <div style={{ fontSize: 13, color: '#0e7490', letterSpacing: '0.2em', marginBottom: 12 }}>
-                        {activeChannel.name.toUpperCase()}
-                      </div>
-                      <button
-                        onClick={() => { setVoiceChannel(activeChannel); setInComms(true); }}
-                        style={{
-                          fontSize: 13, padding: '8px 20px', borderRadius: 3, letterSpacing: '0.2em',
-                          background: '#041e2e', border: '1px solid #0891b2', color: '#22d3ee', cursor: 'pointer',
-                        }}
-                      >
-                        CONNECT TO VOICE
-                      </button>
-                    </div>
-                  </div>
-                ) : selectedOrg && !activeChannel ? (
-                  /* Server landing — shown when a server is selected but no channel is active */
+                selectedOrg && !activeChannel && !calendarOpen ? (
+                  /* Server landing — shown when a server is selected but no channel is active and calendar is closed */
                   <ServerHome
                     org={selectedOrg}
                     events={events}
@@ -4227,24 +4324,11 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                     onOpenEvent={handleOpenEventComp}
                     onOpenPlanner={() => setPlannerEvent('create')}
                   />
-                ) : (
-                  /* Default: no channel selected, not on server home — full calendar */
-                  <div className="flex-1 overflow-y-auto" style={{ padding: '16px 20px' }}>
-                    <OpsCalendarPanel
-                      events={events}
-                      orgId={selectedOrg?.id}
-                      canScheduleEvents={canScheduleEvents}
-                      onSchedule={() => setPlannerEvent('create')}
-                      onOpenEvent={handleOpenEventComp}
-                      onLaunchEvent={handleLaunchFromCard}
-                      canLaunchEvent={canLaunchEvent}
-                    />
-                  </div>
-                )
+                ) : null
               ) : null}
             </div>
 
-          </div>
+          </div>}
           </>
         )}
         </main>
@@ -4287,11 +4371,11 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
         </span>
         {inComms && voiceChannel && <ConnectionQualityBars quality={voiceConnectionQuality} />}
         <div style={{ flex: 1 }} />
-        <span style={{ color: '#0e7490' }}>
+        <span style={{ color: '#1d7a91' }}>
           {selectedOrg ? selectedOrg.callsign.toUpperCase() : '—'} // SPECTERCOMS
         </span>
         {appVersion && (
-          <span style={{ color: '#0e7490', opacity: 0.6 }}>v{appVersion}</span>
+          <span style={{ color: '#1d7a91', opacity: 0.85 }}>v{appVersion}</span>
         )}
       </div>
 
@@ -4454,6 +4538,7 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
         <OrgSettings
           org={selectedOrg}
           user={user}
+          permissions={selectedOrg?.permissions}
           onClose={() => setShowOrgSettings(false)}
           onOrgUpdated={refreshOrgs}
         />

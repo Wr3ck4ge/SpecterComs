@@ -3,8 +3,34 @@ import { AuthRequest } from '../middleware/authMiddleware.js';
 import { connectNats } from '../config/nats.js';
 import { pool } from '../config/db.js';
 import { StringCodec, Subscription } from 'nats';
+import jwt from 'jsonwebtoken';
+import { randomUUID } from 'crypto';
+import { getJwtSecret } from '../config/jwtSecret.js';
 
 const sc = StringCodec();
+
+/**
+ * POST /events/ticket
+ * Issues a short-lived, SSE-purpose token so EventSource does not need to use
+ * the long-lived account JWT in a URL query string.
+ */
+export const issueSseTicket = async (req: AuthRequest, res: Response) => {
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+
+  const ticket = jwt.sign(
+    {
+      id: userId,
+      callsign: req.user?.callsign,
+      purpose: 'sse',
+      jti: randomUUID(),
+    },
+    getJwtSecret(),
+    { expiresIn: '2m' }
+  );
+
+  return res.json({ ticket, expires_in_seconds: 120 });
+};
 
 /**
  * GET /events/stream

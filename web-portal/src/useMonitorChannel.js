@@ -193,10 +193,10 @@ export default function useMonitorChannel({ org, channel, volume = 0.3, enabled 
 
     const connect = async () => {
       try {
-        const { data, error } = await api.getOrgToken(org.id, channel.id);
-        if (error || !data?.token) return;
+        const { data, error } = await api.getOrgMediaTicket(org.id, channel.id, 'voice');
+        if (error || !data?.ticket) return;
         const base = (data.media_url || 'https://localhost:4434').replace(/\/$/, '');
-        const url = `${base}/specter?token=${data.token}&channel_id=${channel.id}`;
+        const url = `${base}/specter?token=${data.ticket}&channel_id=${channel.id}`;
         transport = new WebTransport(url);
         transportRef.current = transport;
         await transport.ready;
@@ -224,9 +224,7 @@ export default function useMonitorChannel({ org, channel, volume = 0.3, enabled 
       if (speakerTimerRef.current) clearTimeout(speakerTimerRef.current);
       try { transportRef.current?.close(); } catch {}
       transportRef.current = null;
-      // Drop the native per-channel Opus decoder — without this it lives
-      // forever keyed by channel id, and a much-later reconnect to this same
-      // channel resumes decoding on a stale decoder instead of a fresh one.
+      // Reset native decoder state so reconnects start with a fresh stream.
       if (window.__TAURI__ && channel?.id) {
         import('@tauri-apps/api/core').then(({ invoke }) => {
           invoke('plugin:specter-audio|clear_stream', { streamId: channel.id }).catch(() => {});

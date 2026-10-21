@@ -51,6 +51,47 @@ pub(crate) fn write_setup_error(msg: &str) {
     }
 }
 
+/// Reposition `win` so it stays fully within whatever monitor it currently
+/// sits on, if it doesn't already.
+///
+/// The overlay's on-screen position is computed once — in JS, from
+/// `currentMonitor()` — whenever it's opened or resized (corner placement,
+/// scale-cycle, stream picker toggling size). Nothing re-derives it after
+/// that. A live display-resolution change while the overlay is already open
+/// (common with exclusive-fullscreen games that switch the actual Windows
+/// desktop resolution, e.g. 4K -> 1080p) leaves the previously-computed
+/// absolute pixel position pointing outside the new, smaller monitor bounds
+/// — the overlay is still "visible" as far as Tauri is concerned, just
+/// entirely off-screen. `ScaleFactorChanged` fires for exactly this case, so
+/// clamping there catches it without needing a poll loop.
+fn clamp_window_to_monitor(win: &WebviewWindow) {
+    let Ok(Some(monitor)) = win.current_monitor() else { return };
+    let Ok(size) = win.outer_size() else { return };
+    let Ok(pos) = win.outer_position() else { return };
+
+    let mon_pos = monitor.position();
+    let mon_size = monitor.size();
+
+    let min_x = mon_pos.x;
+    let min_y = mon_pos.y;
+    // .max(min_x/min_y) guards against the window currently being larger than
+    // the monitor (e.g. still at its full-monitor build size, or the monitor
+    // just shrank below the window's size) — clamp() panics if min > max.
+    let max_x = (mon_pos.x + mon_size.width as i32 - size.width as i32).max(min_x);
+    let max_y = (mon_pos.y + mon_size.height as i32 - size.height as i32).max(min_y);
+
+    let clamped_x = pos.x.clamp(min_x, max_x);
+    let clamped_y = pos.y.clamp(min_y, max_y);
+
+    if clamped_x != pos.x || clamped_y != pos.y {
+        write_setup_error(&format!(
+            "[overlay] clamped position ({},{}) -> ({},{}) to stay within monitor bounds",
+            pos.x, pos.y, clamped_x, clamped_y
+        ));
+        let _ = win.set_position(tauri::PhysicalPosition::new(clamped_x, clamped_y));
+    }
+}
+
 /// Build and return an overlay WebviewWindow.
 /// Uses a always-on-top, frameless window that fills the primary monitor.
 fn build_overlay(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
@@ -95,6 +136,17 @@ fn build_overlay(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
     .build()
     .map_err(|e| format!("Failed to build overlay: {}", e))?;
     write_setup_error("[overlay] build_overlay: webview window built");
+
+    // Re-clamp on a live display-resolution/DPI change — see
+    // clamp_window_to_monitor's doc comment for why this can't just be
+    // computed once at open time.
+    let clamp_win = win.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::ScaleFactorChanged { .. } = event {
+            clamp_window_to_monitor(&clamp_win);
+        }
+    });
+
     Ok(win)
 }
 
@@ -194,7 +246,7 @@ fn build_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, String> {
         .inner_size(1280.0, 720.0)
         .min_inner_size(900.0, 540.0)
         .resizable(true)
-        .decorations(true)
+        .decorations(false)
         .fullscreen(false)
         .transparent(false)
         .disable_drag_drop_handler()

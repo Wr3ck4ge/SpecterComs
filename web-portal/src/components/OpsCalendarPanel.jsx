@@ -126,14 +126,17 @@ function getSignupSummary(ev) {
 
 const MONTH_NAMES = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 const DAY_NAMES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+// Events without an explicit end_time are treated as stale after this many hours
+const MAX_OP_HOURS = 12;
 
 // Kept in sync with WarRoom.jsx's GLASS_PANEL constant — same treatment,
 // applied universally across panel-level elements across the app.
 const glass = {
-  backdropFilter: 'blur(14px)',
-  background: 'linear-gradient(180deg, rgba(4,12,23,0.82), rgba(2,8,16,0.72))',
-  border: '1px solid rgba(56,189,248,0.35)',
-  boxShadow: 'inset 0 1px 0 rgba(34,211,238,0.06), 0 0 0 1px rgba(34,211,238,0.16), 0 0 26px rgba(34,211,238,0.28), 0 18px 48px rgba(0,0,0,0.35)',
+  backdropFilter: 'blur(16px) saturate(1.2)',
+  WebkitBackdropFilter: 'blur(16px) saturate(1.2)',
+  background: 'linear-gradient(180deg, rgba(4,12,23,0.52), rgba(2,8,16,0.42))',
+  border: '1px solid rgba(56,189,248,0.28)',
+  boxShadow: 'inset 0 1px 0 rgba(34,211,238,0.08), 0 0 0 1px rgba(34,211,238,0.12), 0 0 28px rgba(34,211,238,0.18), 0 18px 48px rgba(0,0,0,0.28)',
 };
 
 export default function OpsCalendarPanel({
@@ -141,6 +144,7 @@ export default function OpsCalendarPanel({
   orgId,
   canScheduleEvents,
   onSchedule,
+  onScheduleForDate,
   onOpenEvent,
   onLaunchEvent,
   canLaunchEvent,
@@ -149,8 +153,12 @@ export default function OpsCalendarPanel({
   const [view, setView] = React.useState(() => ({ year: now.getFullYear(), month: now.getMonth() }));
   const [tab, setTab] = React.useState('calendar'); // 'calendar' | 'history'
 
+  const effectiveEnd = (e) => e.end_time
+    ? new Date(e.end_time)
+    : new Date(new Date(e.start_time).getTime() + MAX_OP_HOURS * 3600 * 1000);
+
   const upcomingEvents = (events || [])
-    .filter(e => !e.end_time || new Date(e.end_time) > now)
+    .filter(e => effectiveEnd(e) > now)
     .sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
 
   const monthStart = new Date(view.year, view.month, 1);
@@ -165,7 +173,7 @@ export default function OpsCalendarPanel({
 
   const hasActiveOp = (day) => (events || []).some(e => {
     const target = new Date(view.year, view.month, day, 12);
-    return new Date(e.start_time) <= target && (!e.end_time || new Date(e.end_time) >= target);
+    return new Date(e.start_time) <= target && effectiveEnd(e) >= target;
   });
 
   const visibleEvents = upcomingEvents.slice(0, 8);
@@ -190,13 +198,13 @@ export default function OpsCalendarPanel({
           <button
             onClick={onSchedule}
             style={{
-              fontSize: 10, padding: '3px 10px', borderRadius: 3,
-              background: 'rgba(4,30,46,0.85)', border: '1px solid rgba(8,145,178,0.7)',
-              color: '#22d3ee', cursor: 'pointer', letterSpacing: '0.15em', flexShrink: 0,
-              backdropFilter: 'blur(10px)',
+              fontSize: 10, padding: '4px 12px', borderRadius: 3,
+              background: 'rgba(4,30,46,0.95)', border: '1px solid rgba(8,145,178,0.9)',
+              color: '#67e8f9', cursor: 'pointer', letterSpacing: '0.15em', flexShrink: 0,
+              backdropFilter: 'blur(10px)', fontWeight: 'bold',
             }}
-            onMouseEnter={e => { e.currentTarget.style.background = '#072a40'; }}
-            onMouseLeave={e => { e.currentTarget.style.background = '#041e2e'; }}
+            onMouseEnter={e => { e.currentTarget.style.background = '#083650'; e.currentTarget.style.borderColor = 'rgba(8,145,178,1)'; }}
+            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(4,30,46,0.95)'; e.currentTarget.style.borderColor = 'rgba(8,145,178,0.9)'; }}
           >
             + SCHEDULE OPERATION
           </button>
@@ -226,11 +234,11 @@ export default function OpsCalendarPanel({
       ) : (
       <>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-        <button onClick={prevMonth} style={{ color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer' }}>◀</button>
+        <button onClick={prevMonth} style={{ color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer', padding: '4px 8px', minWidth: 28, minHeight: 28, borderRadius: 4, fontSize: 13 }}>◀</button>
         <span style={{ fontSize: 14, color: '#67e8f9', letterSpacing: '0.28em' }}>
           {MONTH_NAMES[view.month]} {view.year}
         </span>
-        <button onClick={nextMonth} style={{ color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer' }}>▶</button>
+        <button onClick={nextMonth} style={{ color: '#94a3b8', background: 'transparent', border: 'none', cursor: 'pointer', padding: '4px 8px', minWidth: 28, minHeight: 28, borderRadius: 4, fontSize: 13 }}>▶</button>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 10, color: '#0e7490', border: '1px solid rgba(14,116,144,0.45)', borderRadius: 999, padding: '3px 10px', letterSpacing: '0.18em' }}>
           {upcomingEvents.length} OPS
@@ -251,23 +259,27 @@ export default function OpsCalendarPanel({
           ))}
           {cells.map((day, index) => {
             if (day === null) {
-              return <div key={`pad-${index}`} style={{ minHeight: 104 }} />;
+              return <div key={`pad-${index}`} style={{ minHeight: 70 }} />;
             }
 
             const dayEvents = eventsOnDay(day);
             const active = hasActiveOp(day);
             const isToday = day === now.getDate() && view.month === now.getMonth() && view.year === now.getFullYear();
 
+            const isEmpty = dayEvents.length === 0;
+            const cellDate = `${view.year}-${String(view.month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
             return (
               <div
                 key={day}
+                className={`cal-day-cell${isToday ? ' cal-day-cell--today' : active ? ' cal-day-cell--active' : ''}`}
+                onClick={isEmpty && canScheduleEvents && onScheduleForDate ? () => onScheduleForDate(cellDate) : undefined}
                 style={{
-                  minHeight: 104,
+                  minHeight: 70,
                   padding: 6,
-                  borderRadius: 10,
+                  borderRadius: 8,
                   background: isToday ? 'rgba(8,145,178,0.16)' : active ? 'rgba(4,30,46,0.72)' : 'rgba(4,16,24,0.62)',
-                  border: `1px solid ${isToday ? 'rgba(103,232,249,0.35)' : active ? 'rgba(8,145,178,0.22)' : 'rgba(14,34,51,0.7)'}`,
                   overflow: 'hidden',
+                  cursor: isEmpty && canScheduleEvents && onScheduleForDate ? 'pointer' : 'default',
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>

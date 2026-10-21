@@ -156,7 +156,7 @@ function detectPlatform() {
 // Scroll-snap section wrapper — each full-viewport chunk fades/slides in as it
 // snaps into view (and back out on the way past), instead of the page reading
 // as one continuous, un-paced scroll of unrelated content.
-function FadeSection({ children, className = '', more = false }) {
+function FadeSection({ children, className = '', more = false, align = 'center' }) {
   const ref = useRef(null);
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -166,10 +166,11 @@ function FadeSection({ children, className = '', more = false }) {
     obs.observe(el);
     return () => obs.disconnect();
   }, []);
+  const justify = align === 'start' ? 'justify-start pt-6' : 'justify-center';
   return (
     <section
       ref={ref}
-      className={`relative min-h-screen w-full max-w-5xl mx-auto px-6 flex flex-col items-center justify-center text-center snap-start snap-always transition-all duration-700 ease-out ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'} ${className}`}
+      className={`relative min-h-screen w-full max-w-5xl mx-auto px-6 flex flex-col items-center ${justify} text-center snap-start snap-always transition-all duration-700 ease-out ${visible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'} ${className}`}
     >
       {children}
       {/* Scroll cue — lets the user know this snap section isn't the end of the page */}
@@ -351,9 +352,13 @@ const LandingPage = ({ onEnter }) => {
           fade-in section (see FadeSection) rather than one continuous unpaced scroll. */}
       <main className="flex-1 flex flex-col z-10 relative">
 
-        <FadeSection more>
-        <div className="space-y-6">
-            <div className="flex justify-center pt-2 -mb-[96px] sm:-mb-[120px]">
+        <FadeSection more align="start">
+        <div className="space-y-6 relative z-0">
+            {/* pointer-events-none: the PNG has built-in blank space below the
+                logo, and the negative margin below tucks the buttons row up
+                into that space — without this, the image element's (invisible)
+                box still sits on top and swallows clicks meant for the button. */}
+            <div className="flex justify-center pt-2 -mb-[96px] sm:-mb-[120px] pointer-events-none">
                 <img
                   src="/SpecterComsBannerV2.png?v=20260805b"
                   alt="SpecterComs — Built to Connect. Engineered to Perform."
@@ -362,8 +367,11 @@ const LandingPage = ({ onEnter }) => {
             </div>
         </div>
 
-        {/* Buttons (left) + description (right) on wide screens; stacked, text-first, on mobile */}
-        <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-10 w-full max-w-4xl mx-auto">
+        {/* Buttons (left) + description (right) on wide screens; stacked, text-first, on mobile.
+            relative z-10: guarantees this sits above the banner logo above it (whose negative
+            margin tucks it up into this row's space) regardless of stacking-context quirks from
+            the image's drop-shadow filter. */}
+        <div className="relative z-10 flex flex-col sm:flex-row items-center sm:items-start gap-6 sm:gap-10 w-full max-w-4xl mx-auto">
           <div className="order-2 sm:order-1 flex flex-col gap-3 w-full sm:w-60 flex-shrink-0">
             <button
               onClick={onEnter}

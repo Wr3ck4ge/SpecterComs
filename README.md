@@ -21,14 +21,15 @@ This isn't open source — there's no license here for reuse or redistribution. 
 - **Desktop client:** Tauri 2, Rust, React, Vite
 - **Backend:** Node.js, TypeScript, Express
 - **Media:** Rust (custom SFU/relay), FFmpeg
-- **End-to-end encryption:** MLS (RFC 9420) via OpenMLS, compiled to WASM — DMs, org channels, video, and (on channels running the new relay path) voice are E2E encrypted per-device (multi-device aware), with forward secrecy and post-compromise security. Voice used to be TLS-only because priority ducking (a squad lead's voice cutting through background chatter) needed the server to mix audio in plaintext. That's been replaced with a per-sender relay — the server forwards each speaker's still-encrypted audio without ever decoding it, and ducking is now a client-side playback decision driven by packet-arrival metadata (who's authorized to duck, are they currently transmitting) instead of content inspection. A priority speaker's voice reaching listeners in other channels ("cascade") is decrypted with a second, event-scoped MLS group, since the cascade's recipients aren't members of the speaker's own channel group. This is rolling out channel-by-channel; a channel not yet migrated still runs the previous TLS-only server-mixed path.
+- **End-to-end encryption:** MLS (RFC 9420) via OpenMLS, compiled to WASM — DMs, org channels and video are E2E encrypted per-device (multi-device aware), with forward secrecy and post-compromise security. **Voice is not yet E2E encrypted in practice.** Voice is TLS-only because priority ducking (a squad lead's voice cutting through background chatter) needs the server to mix audio in plaintext. A per-sender relay that removes that requirement is implemented — the server forwards each speaker's still-encrypted audio without ever decoding it, and ducking becomes a client-side playback decision driven by packet-arrival metadata (who's authorized to duck, are they currently transmitting) instead of content inspection — and a priority speaker's voice reaching listeners in other channels ("cascade") is decrypted with a second, event-scoped MLS group, since the cascade's recipients aren't members of the speaker's own channel group. That path is gated per channel by a `voice_relay_mode` flag which is **currently enabled on no channels**, so every live voice channel today runs the TLS-only server-mixed path. Cutover is channel-by-channel; until a channel is switched over, treat its voice as encrypted in transit but readable by the media server.
 - **Frontend tooling:** Tailwind, Vite
 
 ## Trust model
 
-- Text, direct messages, org channels, video, and voice (on channels running the new relay path) are MLS end-to-end encrypted — servers store and relay ciphertext they cannot decrypt.
+- Text, direct messages, org channels and video are MLS end-to-end encrypted — servers store and relay ciphertext they cannot decrypt.
+- **Voice is currently not end-to-end encrypted.** It is encrypted in transit (TLS) but decrypted server-side so the media relay can mix audio for priority ducking. The E2E relay path that removes this is built and shipped in the client, but it is gated per channel and enabled on no channels at present — so assume any voice you speak today is readable by the media server while it is being mixed. This is the one place the product does not yet match the rest of the trust model, and it is stated plainly here rather than left to a parenthetical.
 - Private keys are generated on your own device and never leave it, not even encrypted. We don't hold a copy, so there's nothing on our end to hand over even if someone asked.
-- Voice channels not yet migrated to the relay path are still encrypted in transit (TLS) but decrypted server-side so the media relay can mix audio for priority ducking — the same tradeoff described above, being phased out channel-by-channel.
+- Video is E2E encrypted whenever the sharing client holds its channel's MLS key. A client that has not yet been admitted to the channel's MLS group (a fresh install, before another member's key package exchange completes) screen-shares over TLS only until it is; the stream declares which of the two it is, so a viewer never has to guess.
 - A priority speaker's audio reaching other channels (cascade) uses a separate MLS group scoped to the event rather than the channel, since cascade recipients aren't in the speaker's own channel's group — membership is every accepted participant across the event, not just the specific frequency/group a listener happens to be in.
 - Auth tokens and account data are handled by `services/identity-node/`; nothing in that path has access to MLS group keys.
 - The in-game overlay (`web-portal/src/components/GameOverlayWindow.jsx`, `web-portal/src/overlay.jsx`) is a separate always-on-top OS window (Tauri/WebView2), not a DirectX/Vulkan render hook or a DLL injected into the game process. It doesn't touch the game's rendering pipeline at all — same category as any other window sitting on top of a game, not the injection-based technique that trips anti-cheat heuristics.
@@ -36,7 +37,10 @@ This isn't open source — there's no license here for reuse or redistribution. 
 
 ## Status
 
-This is a real, actively developed product, not a demo — this snapshot reflects the current production codebase.
+This is a real, actively developed product, not a demo. This snapshot reflects
+the production codebase at **client v1.10.43** (2026-10-21). The version the
+desktop client reports in its own settings should match; if this snapshot has
+fallen behind a release, the client is the authority and this is stale.
 
 ## Reporting a vulnerability
 

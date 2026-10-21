@@ -29,6 +29,7 @@ import { startPushWatcher } from './jobs/pushWatcher.js';
 dotenv.config();
 
 const app = express();
+export { app };
 const port = process.env.PORT || 3000;
 
 // nginx sits in front of this service and sets X-Forwarded-For (see nginx/*.conf) —
@@ -89,12 +90,12 @@ app.use('/webhooks', express.raw({ type: 'application/json' }), stripeWebhookRou
 // routes HTTP traffic through compression servers which can change Content-Type
 // from application/json to text/plain, leaving req.body empty and causing Zod
 // validation failures.
-// Default body-size limit is 100kb — too small for MissionMap layouts once a
-// surface map's terrain heightmap (4,225-element array, baked in at creation
-// even before any sculpting) is added on top of everything else in the
-// layout; additional maps would silently fail to save past that point.
-app.use(express.json({ type: ['application/json', 'text/plain'], limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Terrain heightmap arrays can exceed the default 100kb limit; apply the elevated
+// limit only to the route that actually needs it so all other endpoints stay
+// protected by the default.
+app.put('/orgs/:orgId/events/:eventId/map-layout', express.json({ type: ['application/json', 'text/plain'], limit: '10mb' }));
+app.use(express.json({ type: ['application/json', 'text/plain'] }));
+app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/auth', authRoutes);
@@ -123,11 +124,6 @@ app.use('/uploads', (_req, res, next) => {
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
   next();
 }, express.static(uploadsDir));
-// Channels are mounted inside orgRoutes now? 
-// Wait, I put `app.use('/orgs', orgRoutes);`
-// And inside `org.ts` I should mount the channel routes?
-
-
 // Database Pool (Managed in config/db.ts, but we keep this check or remove it)
 // We'll remove the local pool config here as it's now in config/db.ts
 
@@ -136,14 +132,13 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Start Server
-app.listen(port, async () => {
-  console.log(`Identity Service running on port ${port}`);
-  // Seed in-memory channel presence from DB so a container restart doesn't
-  // wipe occupant state.  Clients on a stale resume path will re-register
-  // presence once they reconnect; offline clients are preserved as-is.
-  await seedPresenceFromDb();
-});
+// Start Server (skip in test environment — supertest binds its own ephemeral port)
+if (process.env.NODE_ENV !== 'test') {
+  app.listen(port, async () => {
+    console.log(`Identity Service running on port ${port}`);
+    await seedPresenceFromDb();
+  });
+}
 
 import { pool } from './config/db.js';
 import * as argon2 from 'argon2';

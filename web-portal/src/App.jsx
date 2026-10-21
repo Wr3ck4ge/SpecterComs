@@ -5,6 +5,7 @@ import { api } from './api.js';
 import WarRoom from './components/WarRoom';
 
 import StartupSplashScreen from './components/StartupSplashScreen';
+import TitleBar from './components/TitleBar';
 import { invoke } from '@tauri-apps/api/core';
 import { saveChannelMessages } from './messageStore';
 
@@ -435,7 +436,7 @@ function AppContent({ isTauriRuntime }) {
                 localStorage.setItem('specter_token', refreshed.token);
                 localStorage.setItem('specter_refresh_token', refreshed.refresh_token);
                 localStorage.setItem('specter_user', JSON.stringify(saved.user));
-                invoke('save_credentials', { token: refreshed.token, refreshToken: refreshed.refresh_token, user: saved.user }).catch(() => {});
+                await invoke('save_credentials', { token: refreshed.token, refreshToken: refreshed.refresh_token, user: saved.user }).catch(() => {});
                 return api.getMyProfile();
               }
               // Refresh token itself is dead (expired past its 30-day life, or
@@ -458,9 +459,10 @@ function AppContent({ isTauriRuntime }) {
           return Promise.reject('No saved session');
         })
         .then(({ data, error }) => {
-          // Profile validation path from token restore returns getMyProfile() shape.
-          if (data && !error && data.user == null && data.callsign) {
-            setUser(data);
+          // getMyProfile() returns { user: {...} }; login returns { token, refresh_token, user: {...} }.
+          // Detect the profile shape by presence of data.user without data.token.
+          if (data && !error && data.user && !data.token) {
+            setUser(data.user);
             return;
           }
 
@@ -527,11 +529,13 @@ function AppContent({ isTauriRuntime }) {
         // component's user state (this handler is registered once on mount).
         api.getMyProfile().then(({ data: profile, error: profileError }) => {
           if (profileError || !profile) { forceLogout(); return; }
-          localStorage.setItem('specter_user', JSON.stringify(profile));
+          // getMyProfile returns { user: {...} } — extract the inner user object
+          const profileUser = profile.user || profile;
+          localStorage.setItem('specter_user', JSON.stringify(profileUser));
           if (window.__TAURI__) {
-            invoke('save_credentials', { token: data.token, refreshToken: data.refresh_token, user: profile }).catch(() => {});
+            invoke('save_credentials', { token: data.token, refreshToken: data.refresh_token, user: profileUser }).catch(() => {});
           }
-          setUser(profile);
+          setUser(profileUser);
         });
       });
     };
@@ -600,6 +604,7 @@ function AppContent({ isTauriRuntime }) {
 
   return (
     <>
+      <TitleBar />
       {pendingUpdate && isTauriRuntime && (
         <div className={`fixed ${window.__TAURI__ ? 'top-7' : 'top-0'} left-0 right-0 z-[9998] flex items-center justify-between px-4 py-2 bg-specter-primary-cyan text-specter-bg-surface text-xs font-mono font-bold tracking-wider`}>
           <span>

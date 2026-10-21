@@ -5,7 +5,13 @@ import {
   NODE_MEM_ALERT_PCT,
   NODE_BANDWIDTH_CAP_MBPS,
   NODE_BANDWIDTH_ALERT_PCT,
+  NODE_OVERLOAD_SUSTAIN_SECONDS,
 } from '../config/nodeThresholds.js';
+
+// Wall-clock (not call-count) so the debounce is correct regardless of how often a
+// caller polls getNodesWithStatus (admin UI ~20s, pushWatcher 10s) -- tracks when each
+// node *first* crossed threshold, independent of who's asking.
+const overloadedSince = new Map<string, number>();
 
 // Shared between the admin GET /admin/nodes listing (adminController.ts) and
 // pushWatcher.ts's polling loop, so both agree on what "overloaded" and
@@ -24,13 +30,27 @@ export async function getNodesWithStatus() {
   );
 
   const bandwidthAlertMbps = (NODE_BANDWIDTH_ALERT_PCT / 100) * NODE_BANDWIDTH_CAP_MBPS;
+  const now = Date.now();
 
   const nodes = result.rows.map((node) => {
-    const overloaded =
+    const rawOverloaded =
       node.online &&
       ((node.cpu_pct ?? 0) >= NODE_CPU_ALERT_PCT ||
         (node.mem_pct ?? 0) >= NODE_MEM_ALERT_PCT ||
         Math.max(node.net_rx_mbps ?? 0, node.net_tx_mbps ?? 0) >= bandwidthAlertMbps);
+
+    let since = overloadedSince.get(node.node_id);
+    if (rawOverloaded) {
+      if (since === undefined) {
+        since = now;
+        overloadedSince.set(node.node_id, since);
+      }
+    } else {
+      since = undefined;
+      overloadedSince.delete(node.node_id);
+    }
+    const overloaded = since !== undefined && (now - since) / 1000 >= NODE_OVERLOAD_SUSTAIN_SECONDS;
+
     return {
       ...node,
       overloaded,

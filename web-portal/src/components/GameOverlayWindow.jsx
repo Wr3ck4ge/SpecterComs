@@ -298,12 +298,18 @@ export default function GameOverlayWindow() {
             decoderSyncedRef.current = false;
           },
         });
-        try {
-          dec.configure({ codec, optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
-          remoteDecoderRef.current = dec;
-        } catch(e) {
-          console.error('[overlay] decoder configure failed', e);
+        let overlayConfigured = false;
+        for (const hwPref of ['prefer-hardware', 'no-preference']) {
+          try {
+            dec.configure({ codec, optimizeForLatency: true, hardwareAcceleration: hwPref });
+            remoteDecoderRef.current = dec;
+            overlayConfigured = true;
+            break;
+          } catch(e) {
+            console.error('[overlay] decoder configure failed hwPref=' + hwPref, e);
+          }
         }
+        if (!overlayConfigured) console.error('[overlay] decoder configure failed on all hw preferences');
       });
 
           const nalP = listen('overlay-video-nal', (event) => {
@@ -430,13 +436,41 @@ export default function GameOverlayWindow() {
     const resize = async () => {
       try {
         const { getCurrentWindow: getWin } = await import('@tauri-apps/api/window');
-        const { LogicalSize } = await import('@tauri-apps/api/dpi');
+        const { LogicalSize, LogicalPosition } = await import('@tauri-apps/api/dpi');
         // Header and picker rows stay at natural height; only the video area scales.
         const videoH = data.watchTarget ? Math.round(STREAM_H * scale) : 0;
         const pickerH = (showPicker && pickerCount > 0) ? pickerCount * PICKER_ITEM_H + PICKER_PAD : 0;
         const totalH = HEADER_H + videoH + pickerH;
-        console.log('[overlay] setSize', Math.round(OVERLAY_W * scale), 'x', totalH, 'watchTarget:', data.watchTarget);
-        await getWin().setSize(new LogicalSize(Math.round(OVERLAY_W * scale), totalH));
+        const w = Math.round(OVERLAY_W * scale);
+        console.log('[overlay] setSize', w, 'x', totalH, 'watchTarget:', data.watchTarget);
+        const win = getWin();
+        await win.setSize(new LogicalSize(w, totalH));
+
+        // The window is repositioned (top-left placed at a screen corner) only
+        // once, when it's opened — that math assumes a fixed 384px width and
+        // never accounts for the user's saved scale. At scale > 1x on the
+        // top-right corner, the window is now wider than that assumption, so
+        // its right edge can extend past the monitor's actual right edge —
+        // "overlapping"/getting clipped at the screen border. Re-clamp here,
+        // every time the real size is known, instead of trying to predict it
+        // ahead of time from wherever setPosition gets called.
+        const monitor = await win.currentMonitor();
+        if (monitor) {
+          const f = monitor.scaleFactor;
+          const minX = monitor.position.x / f;
+          const minY = monitor.position.y / f;
+          const maxX = Math.max(minX, minX + monitor.size.width / f - w);
+          const maxY = Math.max(minY, minY + monitor.size.height / f - totalH);
+          const pos = await win.outerPosition();
+          const curX = pos.x / f;
+          const curY = pos.y / f;
+          const clampedX = Math.min(Math.max(curX, minX), maxX);
+          const clampedY = Math.min(Math.max(curY, minY), maxY);
+          if (Math.round(clampedX) !== Math.round(curX) || Math.round(clampedY) !== Math.round(curY)) {
+            console.log('[overlay] clamping position', curX, curY, '->', clampedX, clampedY);
+            await win.setPosition(new LogicalPosition(clampedX, clampedY));
+          }
+        }
       } catch(e) { console.error('[overlay] setSize failed:', e); }
     };
     const t = setTimeout(resize, 30);
@@ -533,11 +567,10 @@ export default function GameOverlayWindow() {
     // Fully OPAQUE background — do not add alpha or backdropFilter here (this
     // transparent WebView2 window can fail to composite semi-transparent fills
     // on Windows; blur would also blur the game behind the HUD).
-    // Border/shadow mirror WarRoom.jsx's GLASS_PANEL glow language at a lighter
-    // radius, to match the wallet/ops look without the blur.
+    // No border: overlay is intentionally borderless so it blends into gameplay.
     background: '#030a13',
-    border: '1px solid rgba(56,189,248,0.35)',
-    boxShadow: 'inset 0 1px 0 rgba(34,211,238,0.06), 0 0 0 1px rgba(34,211,238,0.16), 0 0 18px rgba(34,211,238,0.22)',
+    border: 'none',
+    boxShadow: 'none',
   };
 
   // ── Shared style for stream picker list items ──
@@ -582,6 +615,24 @@ export default function GameOverlayWindow() {
           borderRadius: (showPicker || data.watchTarget) ? '6px 6px 0 0' : 6,
         }}
       >
+        {/* Drag grip — dedicated reposition handle, always draggable */}
+        <div
+          style={{
+            WebkitAppRegion: 'drag',
+            cursor: 'grab',
+            color: '#2d5a6e',
+            fontSize: 12,
+            lineHeight: 1,
+            padding: '0 4px 0 0',
+            flexShrink: 0,
+            userSelect: 'none',
+            letterSpacing: '-1px',
+          }}
+          title="Drag to reposition"
+        >
+          ⠿
+        </div>
+
         {/* Blue zone: channel / freq name — click to open stream picker */}
         <button
           onClick={() => setShowPicker((v) => !v)}
@@ -758,7 +809,7 @@ export default function GameOverlayWindow() {
         <div
           style={{
             ...pill,
-            borderTop: 'none',
+            borderTop: '1px solid rgba(56,189,248,0.12)',
             borderRadius: data.watchTarget ? 0 : '0 0 6px 6px',
             padding: '6px 4px',
             WebkitAppRegion: 'no-drag',
@@ -808,14 +859,12 @@ export default function GameOverlayWindow() {
       <div
         style={{
           ...pill,
-          borderTop: 'none',
+          borderTop: data.watchTarget ? '1px solid rgba(56,189,248,0.12)' : 'none',
           borderRadius: '0 0 6px 6px',
           overflow: 'hidden',
           position: 'relative',
           width: data.watchTarget ? Math.round(OVERLAY_W * scale) : 0,
           height: data.watchTarget ? Math.round(STREAM_H * scale) : 0,
-          border: data.watchTarget ? pill.border : 'none',
-          boxShadow: data.watchTarget ? pill.boxShadow : 'none',
           flexShrink: 0,
         }}
       >

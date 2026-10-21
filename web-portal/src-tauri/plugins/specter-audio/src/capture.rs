@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::AudioDevice;
 use super::opus_encode::OpusEncoder;
+use super::resample::LinearResampler;
 
 /// How long a stream keeps transmitting after last clearing `threshold`, so a
 /// brief mid-word RMS dip (soft consonant, breath pause) doesn't chop real
@@ -129,8 +130,38 @@ where
     let sample_format = supported_config.sample_format();
     let config: StreamConfig = supported_config.into();
     let channels = config.channels as usize;
+    let actual_rate = config.sample_rate.0;
 
     info!("Selected input config: {:?}", config);
+    super::write_audio_log(&format!(
+        "capture: device='{}' format={:?} rate={}Hz channels={}",
+        device_name, sample_format, actual_rate, channels
+    ));
+
+    // Devices that don't offer any config spanning 48 kHz (the `filter` above)
+    // fall back to `default_input_config()`, which can hand back a different
+    // native rate (seen on some USB/virtual-mixer devices whose mic side is
+    // fixed at 16 kHz or 44.1 kHz even though playback goes up to 48 kHz).
+    // Everything downstream — the Opus encoder and the 960-samples-is-20ms
+    // framing below — assumes 48 kHz. Without correcting for a different
+    // actual rate here, that mismatch encodes/timestamps audio as if it were
+    // faster than it really is, so every listener hears this one sender
+    // pitched up and sped up (a real report: 16 kHz -> 48 kHz is a 3x
+    // "chipmunk" speedup). Resampling to 48 kHz here keeps that assumption
+    // true regardless of what the device actually delivers.
+    if actual_rate != 48_000 {
+        warn!(
+            "Input device '{}' captured at {} Hz, not 48000 Hz — resampling to 48 kHz before encoding.",
+            device_name, actual_rate
+        );
+        super::write_audio_log(&format!(
+            "capture: RESAMPLING ENGAGED {}Hz -> 48000Hz for device '{}'",
+            actual_rate, device_name
+        ));
+    } else {
+        super::write_audio_log("capture: device native rate is already 48000Hz, no resampling needed");
+    }
+    let mut resampler = (actual_rate != 48_000).then(|| LinearResampler::new(actual_rate, 48_000));
 
     // Opus encoder: 48 kHz, mono, 20 ms = 960 samples per frame.
     let mut encoder = OpusEncoder::new(48_000, 1, 960)
@@ -150,31 +181,37 @@ where
         cpal::SampleFormat::F32 => {
             let threshold = threshold.clone();
             let mut last_above: Option<Instant> = None;
+            let mut mixed_buf: Vec<i16> = Vec::new();
             device.build_input_stream(
                 &config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     if !running_clone.load(Ordering::Relaxed) {
                         return;
                     }
+                    mixed_buf.clear();
                     for frame in data.chunks(channels) {
                         let sum: f32 = frame.iter().sum();
                         let mixed = sum / (channels as f32);
                         let s = (mixed * 32_767.0).clamp(-32_768.0, 32_767.0) as i16;
-                        pcm_buf.push(s);
+                        mixed_buf.push(s);
+                    }
+                    match resampler.as_mut() {
+                        Some(r) => r.process(&mixed_buf, &mut pcm_buf),
+                        None => pcm_buf.extend_from_slice(&mixed_buf),
+                    }
 
-                        if pcm_buf.len() >= 960 {
-                            let f: Vec<i16> = pcm_buf.drain(..960).collect();
-                            let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
-                            on_level(rms as f32);
-                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
-                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
-                            match encoder.encode(&f) {
-                                Ok(enc) => {
-                                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                                    on_frame(enc, ts);
-                                }
-                                Err(e) => warn!("Opus encode error: {}", e),
+                    while pcm_buf.len() >= 960 {
+                        let f: Vec<i16> = pcm_buf.drain(..960).collect();
+                        let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
+                        on_level(rms as f32);
+                        let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                        if !should_send(&mut last_above, thresh, rms as f32) { continue; }
+                        match encoder.encode(&f) {
+                            Ok(enc) => {
+                                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                                on_frame(enc, ts);
                             }
+                            Err(e) => warn!("Opus encode error: {}", e),
                         }
                     }
                 },
@@ -185,30 +222,36 @@ where
         cpal::SampleFormat::I16 => {
             let threshold = threshold.clone();
             let mut last_above: Option<Instant> = None;
+            let mut mixed_buf: Vec<i16> = Vec::new();
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     if !running_clone.load(Ordering::Relaxed) {
                         return;
                     }
+                    mixed_buf.clear();
                     for frame in data.chunks(channels) {
                         let sum: i32 = frame.iter().map(|&x| x as i32).sum();
                         let mixed = (sum / (channels as i32)) as i16;
-                        pcm_buf.push(mixed);
+                        mixed_buf.push(mixed);
+                    }
+                    match resampler.as_mut() {
+                        Some(r) => r.process(&mixed_buf, &mut pcm_buf),
+                        None => pcm_buf.extend_from_slice(&mixed_buf),
+                    }
 
-                        if pcm_buf.len() >= 960 {
-                            let f: Vec<i16> = pcm_buf.drain(..960).collect();
-                            let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
-                            on_level(rms as f32);
-                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
-                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
-                            match encoder.encode(&f) {
-                                Ok(enc) => {
-                                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                                    on_frame(enc, ts);
-                                }
-                                Err(e) => warn!("Opus encode error: {}", e),
+                    while pcm_buf.len() >= 960 {
+                        let f: Vec<i16> = pcm_buf.drain(..960).collect();
+                        let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
+                        on_level(rms as f32);
+                        let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                        if !should_send(&mut last_above, thresh, rms as f32) { continue; }
+                        match encoder.encode(&f) {
+                            Ok(enc) => {
+                                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                                on_frame(enc, ts);
                             }
+                            Err(e) => warn!("Opus encode error: {}", e),
                         }
                     }
                 },
@@ -219,32 +262,38 @@ where
         cpal::SampleFormat::I32 => {
             let threshold = threshold.clone();
             let mut last_above: Option<Instant> = None;
+            let mut mixed_buf: Vec<i16> = Vec::new();
             device.build_input_stream(
                 &config,
                 move |data: &[i32], _: &cpal::InputCallbackInfo| {
                     if !running_clone.load(Ordering::Relaxed) {
                         return;
                     }
+                    mixed_buf.clear();
                     for frame in data.chunks(channels) {
                         // Average channels then scale i32 → i16 by dropping the low 16 bits.
                         let sum: i64 = frame.iter().map(|&x| x as i64).sum();
                         let mixed = (sum / (channels as i64)) as i32;
                         let s = (mixed >> 16) as i16;
-                        pcm_buf.push(s);
+                        mixed_buf.push(s);
+                    }
+                    match resampler.as_mut() {
+                        Some(r) => r.process(&mixed_buf, &mut pcm_buf),
+                        None => pcm_buf.extend_from_slice(&mixed_buf),
+                    }
 
-                        if pcm_buf.len() >= 960 {
-                            let f: Vec<i16> = pcm_buf.drain(..960).collect();
-                            let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
-                            on_level(rms as f32);
-                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
-                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
-                            match encoder.encode(&f) {
-                                Ok(enc) => {
-                                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                                    on_frame(enc, ts);
-                                }
-                                Err(e) => warn!("Opus encode error: {}", e),
+                    while pcm_buf.len() >= 960 {
+                        let f: Vec<i16> = pcm_buf.drain(..960).collect();
+                        let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
+                        on_level(rms as f32);
+                        let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                        if !should_send(&mut last_above, thresh, rms as f32) { continue; }
+                        match encoder.encode(&f) {
+                            Ok(enc) => {
+                                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                                on_frame(enc, ts);
                             }
+                            Err(e) => warn!("Opus encode error: {}", e),
                         }
                     }
                 },
@@ -255,31 +304,37 @@ where
         cpal::SampleFormat::U8 => {
             let threshold = threshold.clone();
             let mut last_above: Option<Instant> = None;
+            let mut mixed_buf: Vec<i16> = Vec::new();
             device.build_input_stream(
                 &config,
                 move |data: &[u8], _: &cpal::InputCallbackInfo| {
                     if !running_clone.load(Ordering::Relaxed) {
                         return;
                     }
+                    mixed_buf.clear();
                     for frame in data.chunks(channels) {
                         let sum: f32 = frame.iter().map(|&x| (x as f32 - 128.0) / 128.0).sum();
                         let mixed = sum / (channels as f32);
                         let s = (mixed * 32_767.0).clamp(-32_768.0, 32_767.0) as i16;
-                        pcm_buf.push(s);
+                        mixed_buf.push(s);
+                    }
+                    match resampler.as_mut() {
+                        Some(r) => r.process(&mixed_buf, &mut pcm_buf),
+                        None => pcm_buf.extend_from_slice(&mixed_buf),
+                    }
 
-                        if pcm_buf.len() >= 960 {
-                            let f: Vec<i16> = pcm_buf.drain(..960).collect();
-                            let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
-                            on_level(rms as f32);
-                            let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
-                            if !should_send(&mut last_above, thresh, rms as f32) { continue; }
-                            match encoder.encode(&f) {
-                                Ok(enc) => {
-                                    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                                    on_frame(enc, ts);
-                                }
-                                Err(e) => warn!("Opus encode error: {}", e),
+                    while pcm_buf.len() >= 960 {
+                        let f: Vec<i16> = pcm_buf.drain(..960).collect();
+                        let rms = (f.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 960.0).sqrt();
+                        on_level(rms as f32);
+                        let thresh = f32::from_bits(threshold.load(Ordering::Relaxed));
+                        if !should_send(&mut last_above, thresh, rms as f32) { continue; }
+                        match encoder.encode(&f) {
+                            Ok(enc) => {
+                                let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                                on_frame(enc, ts);
                             }
+                            Err(e) => warn!("Opus encode error: {}", e),
                         }
                     }
                 },

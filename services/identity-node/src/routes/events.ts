@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authenticateTokenStrict } from '../middleware/authMiddleware.js';
-import { submitEventGroupCommit } from '../controllers/mlsGroupController.js';
+import { submitEventGroupCommit, getEventGroupMlsCatchUp } from '../controllers/mlsGroupController.js';
 import {
   getOrgEvents, getOrgEventHistory, createOrgEvent, rsvpEvent, updateOrgEvent, deleteOrgEvent,
   getEventGroups, saveEventGroups, launchEvent,
@@ -52,6 +52,7 @@ router.delete('/:eventId/presence',          authenticateTokenStrict, clearPrese
 router.get('/:eventId/my-assignment',        authenticateTokenStrict, getMyEventAssignment as any);
 router.post('/:eventId/end',                 authenticateTokenStrict, endOperation as any);
 router.post('/:eventId/mls/commit',          authenticateTokenStrict, submitEventGroupCommit as any);
+router.get('/:eventId/mls/catch-up',         authenticateTokenStrict, getEventGroupMlsCatchUp as any);
 
 // Channel layout presets (org-scoped)
 router.get('/presets',                       authenticateTokenStrict, getEventPresets as any);

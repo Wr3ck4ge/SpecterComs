@@ -20,10 +20,11 @@ export default function ServerHome({
   // Kept in sync with WarRoom.jsx's GLASS_PANEL constant — same treatment,
   // applied universally across panel-level elements in both files.
   const glass = {
-    backdropFilter: 'blur(14px)',
-    background: 'linear-gradient(180deg, rgba(4,12,23,0.82), rgba(2,8,16,0.72))',
-    border: '1px solid rgba(56,189,248,0.35)',
-    boxShadow: 'inset 0 1px 0 rgba(34,211,238,0.06), 0 0 0 1px rgba(34,211,238,0.16), 0 0 26px rgba(34,211,238,0.28), 0 18px 48px rgba(0,0,0,0.35)',
+    backdropFilter: 'blur(16px) saturate(1.2)',
+    WebkitBackdropFilter: 'blur(16px) saturate(1.2)',
+    background: 'linear-gradient(180deg, rgba(4,12,23,0.52), rgba(2,8,16,0.42))',
+    border: '1px solid rgba(56,189,248,0.28)',
+    boxShadow: 'inset 0 1px 0 rgba(34,211,238,0.08), 0 0 0 1px rgba(34,211,238,0.12), 0 0 28px rgba(34,211,238,0.18), 0 18px 48px rgba(0,0,0,0.28)',
   };
 
   return (
@@ -32,7 +33,7 @@ export default function ServerHome({
       style={{
         color: '#e5e7eb',
         fontFamily: 'monospace',
-        background: 'radial-gradient(circle at top, rgba(6,182,212,0.10), transparent 34%), linear-gradient(180deg, #020b12 0%, #020810 100%)',
+        background: 'transparent',
       }}
     >
       {org?.banner_url && (

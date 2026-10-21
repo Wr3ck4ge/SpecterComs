@@ -10,3 +10,9 @@ export const NODE_MEM_ALERT_PCT = Number(process.env.NODE_MEM_ALERT_PCT ?? 85);
 // Mbps is a placeholder; set NODE_BANDWIDTH_CAP_MBPS per real node/plan sizing.
 export const NODE_BANDWIDTH_CAP_MBPS = Number(process.env.NODE_BANDWIDTH_CAP_MBPS ?? 800);
 export const NODE_BANDWIDTH_ALERT_PCT = Number(process.env.NODE_BANDWIDTH_ALERT_PCT ?? 80);
+
+// A node must stay continuously over threshold this long before it's flagged
+// "overloaded" (and can in turn count toward scaling_warning) -- on a small/single-node
+// deployment a brief CPU blip (cert renewal, healthchecks, GC pause, etc.) can cross
+// NODE_CPU_ALERT_PCT for a single 5s heartbeat without reflecting real sustained load.
+export const NODE_OVERLOAD_SUSTAIN_SECONDS = Number(process.env.NODE_OVERLOAD_SUSTAIN_SECONDS ?? 30);

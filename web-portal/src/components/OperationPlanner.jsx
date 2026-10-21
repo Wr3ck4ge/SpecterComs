@@ -52,9 +52,10 @@ const S = {
     fontSize: 11, color: '#0e7490', letterSpacing: '0.3em', marginBottom: 8, marginTop: 16,
   },
   groupCard: {
-    background: 'rgba(4, 16, 24, 0.68)',
-    backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
-    border: '1px solid rgba(6,182,212,0.13)', borderRadius: 4,
+    background: 'rgba(4, 12, 23, 0.48)',
+    backdropFilter: 'blur(16px) saturate(1.2)', WebkitBackdropFilter: 'blur(16px) saturate(1.2)',
+    border: '1px solid rgba(56,189,248,0.22)', borderRadius: 4,
+    boxShadow: '0 0 0 1px rgba(34,211,238,0.08), 0 0 18px rgba(34,211,238,0.1)',
     padding: 12, marginBottom: 10,
   },
 };
@@ -74,8 +75,12 @@ const S = {
 function EventHeader({ orgId, event, members, editing, canEdit, launching, onEdit, onLaunch, onDelete, onSaved, onCancelEdit }) {
   const [name, setName] = useState(event?.name || '');
   const isEdit = !!event?.id;
-  const [startNow, setStartNow] = useState(!isEdit);
-  const [startTime, setStartTime] = useState(event?.start_time ? event.start_time.slice(0, 16) : '');
+  const hasInitialDate = !isEdit && !!event?.initialDate;
+  const [startNow, setStartNow] = useState(!isEdit && !hasInitialDate);
+  const [startTime, setStartTime] = useState(
+    event?.start_time ? event.start_time.slice(0, 16) :
+    event?.initialDate ? `${event.initialDate}T08:00` : ''
+  );
   const [endTime, setEndTime] = useState(event?.end_time ? event.end_time.slice(0, 16) : '');
   const [accessMode, setAccessMode] = useState(event?.access_mode || 'open');
   const [game, setGame] = useState(event?.game || 'none');

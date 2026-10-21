@@ -69,11 +69,21 @@ const PERMISSION_DEFS = [
   { key: 'can_view_calendar', label: 'View Ops Calendar' },
   { key: 'can_kick', label: 'Kick Members' },
   { key: 'can_ban', label: 'Ban Members' },
+  { key: 'can_mute', label: 'Mute Members' },
   { key: 'can_manage_roles', label: 'Manage Roles' },
   { key: 'can_manage_channels', label: 'Manage Channels' },
   { key: 'can_invite', label: 'Create Invites' },
   { key: 'can_create_events', label: 'Create Operations' },
 ];
+
+// Which tabs each permission unlocks for non-admin users.
+// Owners and full admins (can_manage_channels) always see every tab.
+const TAB_PERMISSIONS = {
+  roles:    p => p?.can_manage_roles,
+  members:  p => p?.can_kick || p?.can_ban || p?.can_mute,
+  bans:     p => p?.can_ban,
+  channels: p => p?.can_manage_channels,
+};
 
 // ── General Tab ─────────────────────────────────────────────────────────────
 function GeneralTab({ org, onSaved }) {
@@ -645,8 +655,19 @@ function BillingInfoTab({ org }) {
 }
 
 // ── Main OrgSettings ────────────────────────────────────────────────────────
-export default function OrgSettings({ org, user, onClose, onOrgUpdated }) {
-  const [tab, setTab] = useState('general');
+export default function OrgSettings({ org, user, onClose, onOrgUpdated, permissions }) {
+  const isOwner = user?.id === org?.owner_id;
+  const isFullAdmin = isOwner || permissions?.can_manage_channels === true;
+
+  // Tabs visible to this user: full admins see everything; partial-permission
+  // users only see the tabs their permissions unlock.
+  const visibleTabs = TABS.filter(t => {
+    if (isFullAdmin) return true;
+    const check = TAB_PERMISSIONS[t];
+    return check ? check(permissions) : false;
+  });
+
+  const [tab, setTab] = useState(() => visibleTabs[0] || 'general');
 
   return (
     <div style={S.overlay} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -659,7 +680,7 @@ export default function OrgSettings({ org, user, onClose, onOrgUpdated }) {
           >✕</button>
         </div>
         <div style={S.tabs}>
-          {TABS.map(t => (
+          {visibleTabs.map(t => (
             <button key={t} onClick={() => setTab(t)} style={S.tab(tab === t)}>{t}</button>
           ))}
         </div>
