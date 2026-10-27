@@ -1,0 +1,9 @@
+{
+  "name": "@spectercoms/shared-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "peerDependencies": {
+    "react": "^18.2.0"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "scripts": {
+    "test": "npm run test:js && npm run test:rust",
+    "test:js": "npm run test:server && npm run test:web",
+    "test:server": "cd services/identity-node && npx vitest run --config vitest.contracts.config.ts",
+    "test:server:integration": "cd services/identity-node && npx vitest run",
+    "test:web": "vitest run && npm --prefix web-portal run test:mls && npm --prefix web-portal run test:freq",
+    "test:rust": "cargo test --manifest-path web-portal/mls-crypto/Cargo.toml && cargo test --manifest-path web-portal/wasm-crypto/Cargo.toml"
+  },
+  "devDependencies": {
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0",
+    "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "react-router-dom": "^7.13.1"
+  }
+}

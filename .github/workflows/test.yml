@@ -1,0 +1,58 @@
+name: Tests
+
+# Event contracts (shared/events/schema.js), the web-portal client tests and
+# the native mls-crypto / wasm-crypto tests. Needs no secrets: nothing here
+# builds the Tauri client, deploys, or talks to any live server.
+on:
+  push:
+    branches: [main, master, 'release-*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  js:
+    name: Contracts + client tests (Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            services/identity-node/package-lock.json
+            web-portal/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm ci --no-audit --no-fund
+        working-directory: services/identity-node
+      - run: npm ci --no-audit --no-fund
+        working-directory: web-portal
+      - name: Server event contracts (static publishEvent scan + messageController runtime)
+        run: npm run test:server
+      - name: Client contracts + web-portal node tests
+        run: npm run test:web
+      - name: identity-node typecheck (what the Docker build runs)
+        run: npx tsc --noEmit -p .
+        working-directory: services/identity-node
+
+  rust:
+    name: mls-crypto / wasm-crypto (native cargo test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            web-portal/mls-crypto
+            web-portal/wasm-crypto
+      - run: cargo test --manifest-path web-portal/mls-crypto/Cargo.toml
+      - run: cargo test --manifest-path web-portal/wasm-crypto/Cargo.toml

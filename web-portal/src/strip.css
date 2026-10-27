@@ -1,0 +1,161 @@
+/* Tray strip stylesheet (strip.html). A slim Tailwind entry instead of
+   index.css: index.css styles bare `body` / `button` / headings globally
+   (opaque background, text-shadow, hover glow, backdrop-filter helpers) for
+   the old main-window look. The strip window is transparent and clipped to its
+   panels, so it needs a transparent body and nothing else global — just the
+   tokens, Tailwind's preflight and the utilities components/ui uses.
+   A linked stylesheet (bundled by Vite), never a runtime <style> element:
+   Tauri's CSP nonce blocks those. */
+@import './styles/ui-tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#strip-root {
+  height: 100%;
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--ui-font);
+  color: var(--ui-text-main);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+input,
+textarea {
+  user-select: text;
+}
+
+/* Opaque panel surface shared by the bar and the cabinets. */
+.strip-panel {
+  background: #0b1d2e;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  /* Small on purpose: the window region (strip.rs) only extends 6px past
+     each panel, so a big shadow would be visibly cut off. */
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.4);
+}
+
+/* POLISH: a panel without chrome — its content floats over the desktop (the
+   event viewer's group tree). Still a window-region rect, so it captures
+   clicks across its whole box; the transparent parts just show the desktop. */
+.strip-float {
+  background: transparent;
+  border: 1px solid transparent; /* same box as .strip-panel */
+  border-radius: var(--ui-radius-lg);
+}
+
+/* POLISH: floating content's legibility on any wallpaper — cards get a soft
+   drop shadow (kept inside the region's 6px margin by the tree's padding),
+   lines a dark halo under a faint cyan glow, loose text a dark outer glow. */
+.strip-float-card { box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.6); }
+.strip-float-text { text-shadow: 0 0 3px rgba(0, 0, 0, 0.95), 0 1px 2px rgba(0, 0, 0, 0.9); }
+.strip-float-links { filter: drop-shadow(0 0 3px rgba(103, 218, 245, 0.45)); }
+/* Nodes near the edge of the tree's view fade out instead of being cut by an
+   invisible line. */
+.strip-float-fade {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent),
+    linear-gradient(to bottom, transparent, #000 14px, #000 calc(100% - 14px), transparent);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to right, transparent, #000 18px, #000 calc(100% - 18px), transparent),
+    linear-gradient(to bottom, transparent, #000 14px, #000 calc(100% - 14px), transparent);
+  mask-composite: intersect;
+}
+
+/* ── Cabinets ────────────────────────────────────────────────────────────
+   The window never resizes (see strip.rs): the cabinet's slot is clipped
+   (overflow hidden) and the panel slides out of the bar's edge into it. */
+.strip-cabinet-slot {
+  overflow: hidden;
+  /* room for the panel's shadow inside the clip */
+  padding: 0 4px;
+  margin: 0 -4px;
+}
+
+.strip-grow-up .strip-cabinet-slot { padding-top: 12px; margin-top: -12px; }
+.strip-grow-down .strip-cabinet-slot { padding-bottom: 12px; margin-bottom: -12px; }
+
+.strip-grow-up .strip-cabinet-enter   { animation: strip-slide-up-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.strip-grow-up .strip-cabinet-exit    { animation: strip-slide-up-out 140ms ease-in both; }
+.strip-grow-down .strip-cabinet-enter { animation: strip-slide-down-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.strip-grow-down .strip-cabinet-exit  { animation: strip-slide-down-out 140ms ease-in both; }
+/* Swapping one cabinet for another: no slide, just a quick fade. */
+.strip-cabinet-swap { animation: strip-fade-in 120ms ease-out both; }
+
+@keyframes strip-slide-up-in    { from { transform: translateY(100%); opacity: 0.4; } to { transform: none; opacity: 1; } }
+@keyframes strip-slide-up-out   { from { transform: none; opacity: 1; } to { transform: translateY(100%); opacity: 0.4; } }
+@keyframes strip-slide-down-in  { from { transform: translateY(-100%); opacity: 0.4; } to { transform: none; opacity: 1; } }
+@keyframes strip-slide-down-out { from { transform: none; opacity: 1; } to { transform: translateY(-100%); opacity: 0.4; } }
+@keyframes strip-fade-in        { from { opacity: 0; } to { opacity: 1; } }
+
+/* CH2: Channels cabinet switching between the channel list ("browse") and
+   the joined voice channel. The new view slides in from the side it lives on
+   (joined = forward, from the right; browse = back, from the left) while the
+   cabinet's height animates to the new view's (ChannelsCabinet). */
+.ch-view-fwd  { animation: ch-view-fwd 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.ch-view-back { animation: ch-view-back 200ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes ch-view-fwd  { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes ch-view-back { from { transform: translateX(-24px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* OPGROW: the op panel's secondary bar slides out of the main bar (and back
+   in on close); durations are set inline by WideOpFrame. */
+.strip-opbar-in-up    { animation: strip-opbar-up-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.strip-opbar-out-up   { animation: strip-opbar-up-out 140ms ease-in both; }
+.strip-opbar-in-down  { animation: strip-opbar-down-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.strip-opbar-out-down { animation: strip-opbar-down-out 140ms ease-in both; }
+@keyframes strip-opbar-up-in    { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes strip-opbar-up-out   { from { transform: none; opacity: 1; } to { transform: translateY(24px); opacity: 0; } }
+@keyframes strip-opbar-down-in  { from { transform: translateY(-24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes strip-opbar-down-out { from { transform: none; opacity: 1; } to { transform: translateY(-24px); opacity: 0; } }
+
+/* EVT2: the secondary bar's page-tools sub-row slides up / fades in under
+   the main row (duration set inline from WIDE.subMs). */
+.strip-subrow-in  { animation: strip-subrow-in 150ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.strip-subrow-out { animation: strip-subrow-out 150ms ease-in both; }
+@keyframes strip-subrow-in  { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes strip-subrow-out { from { transform: none; opacity: 1; } to { transform: translateY(8px); opacity: 0; } }
+
+/* BAR2: the bar's slot chips (StripBarSlots) fade/slide in and out. */
+.strip-slot-enter { animation: strip-slot-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.strip-slot-exit  { animation: strip-slot-out 150ms ease-in both; }
+@keyframes strip-slot-in  { from { transform: translateY(4px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes strip-slot-out { from { transform: none; opacity: 1; } to { transform: translateY(-4px); opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .strip-slot-enter,
+  .strip-slot-exit,
+  .strip-cabinet-enter,
+  .strip-cabinet-exit,
+  .strip-cabinet-swap,
+  .ch-view-fwd,
+  .ch-view-back,
+  .strip-opbar-in-up,
+  .strip-opbar-out-up,
+  .strip-opbar-in-down,
+  .strip-opbar-out-down,
+  .strip-subrow-in,
+  .strip-subrow-out { animation-duration: 1ms !important; }
+}
+
+/* First-run hint arrow, pointing at the bar. */
+.strip-hint-arrow {
+  position: absolute;
+  left: 28px;
+  width: 12px;
+  height: 12px;
+  background: inherit;
+  border: inherit;
+  transform: rotate(45deg);
+}
+.strip-grow-up .strip-hint-arrow   { bottom: -7px; border-top: 0; border-left: 0; }
+.strip-grow-down .strip-hint-arrow { top: -7px; border-bottom: 0; border-right: 0; }
+
+/* Scrollable cabinet body with a quiet scrollbar. */
+.strip-scroll { overflow-y: auto; scrollbar-width: thin; scrollbar-color: rgba(103, 218, 245, 0.25) transparent; }

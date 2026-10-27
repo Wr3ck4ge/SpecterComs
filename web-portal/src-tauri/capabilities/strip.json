@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "strip",
+  "description": "the tray strip window: events (core:default) plus opening the SpecterComs website for 'Create account'. Opening any other URL is denied - deliberately not opener:default, which allows every http(s) URL. Showing, hiding, positioning and clipping the strip are done from Rust (strip.rs commands), so no window permissions are granted here.",
+  "windows": [
+    "specter-strip"
+  ],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://spectercoms.net/*" }
+      ]
+    }
+  ]
+}

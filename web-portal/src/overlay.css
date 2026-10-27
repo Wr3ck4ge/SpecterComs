@@ -1,0 +1,217 @@
+/* Game overlay styles (overlay.html only).
+   - Imported by overlay.jsx, so Vite emits it as a linked same-origin
+     stylesheet. Tauri's CSP nonce blocks <style> elements the app creates at
+     runtime (see public/splash.css), which is why the old injected <style>
+     (TX pulse, hover states) is gone.
+   - Does NOT load index.css or Tailwind: their global rules (preflight, body
+     background/text-shadow, button:hover glow, backdrop-filters) would add
+     compositor work and leak into the HUD. Only the --ui-* variables are shared.
+   - Dimensions that feed the window size (header height, picker rows, picker
+     padding/gap) are set from JS constants in GameOverlayWindow.jsx — change
+     them there, not here. */
+@import './styles/ui-tokens.css';
+
+@keyframes sov-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+.sov-root,
+.sov-root * { box-sizing: border-box; }
+
+.sov-root {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Opaque — never add alpha/backdrop-filter (WebView2 transparent-window
+     compositing dropouts; blur would also smear the game behind the HUD). */
+  background: var(--ui-bg-surface);
+  border-radius: var(--ui-radius-md);
+  color: var(--ui-text-main);
+  font-family: var(--ui-font);
+  font-size: var(--ui-text-sm);
+  line-height: 18px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Bare button reset (no preflight in this window). */
+.sov-btn {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: color 0.12s, background-color 0.12s, border-color 0.12s;
+}
+.sov-btn:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: -2px; }
+
+/* ── Header ─────────────────────────────────────────────────────────── */
+.sov-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 8px;
+  flex-shrink: 0;
+}
+
+.sov-channel {
+  flex: 1 1 auto;
+  /* 32px keeps the icon visible and lets the full control row (chip + PASS +
+     grip + % + ✕) still fit at the 75% step (288px wide). */
+  min-width: 32px;
+  height: 28px;
+  padding: 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  border-radius: var(--ui-radius-sm);
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  color: var(--ui-text-main);
+  text-align: left;
+}
+.sov-channel:hover { background: rgba(255, 255, 255, 0.06); }
+.sov-channel-icon { flex-shrink: 0; font-size: 11px; color: var(--ui-accent); }
+.sov-channel-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sov-caret { flex-shrink: 0; font-size: 9px; color: var(--ui-text-subtle); }
+
+/* Speaker chip / TX / idle placeholder. Opacity + transition are inline (fade logic). */
+.sov-chip {
+  flex: 0 1 auto;
+  min-width: 72px;
+  height: 24px;
+  padding: 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-pill);
+}
+.sov-chip--speaker { background: rgba(34, 197, 94, 0.14); border-color: rgba(74, 222, 128, 0.45); }
+.sov-chip-dot { flex-shrink: 0; font-size: 8px; line-height: 1; }
+.sov-chip--speaker .sov-chip-dot { color: #4ade80; }
+.sov-chip-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+  color: #4ade80;
+}
+.sov-tx-dot { color: var(--ui-accent); animation: sov-pulse 0.8s ease-in-out infinite; }
+.sov-tx { font-size: var(--ui-text-xs); font-weight: 700; letter-spacing: 0.08em; color: var(--ui-accent); }
+.sov-idle { font-size: var(--ui-text-xs); color: var(--ui-text-subtle); opacity: 0.45; }
+
+.sov-pass {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border: 1px solid rgba(245, 158, 11, 0.5);
+  border-radius: var(--ui-radius-sm);
+  background: rgba(245, 158, 11, 0.14);
+  color: #fbbf24;
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.sov-grip {
+  flex-shrink: 0;
+  padding: 0 2px;
+  cursor: grab;
+  color: var(--ui-text-subtle);
+  font-size: 14px;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+.sov-grip:hover { color: var(--ui-text-main); }
+
+.sov-hdr-btn {
+  flex-shrink: 0;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ui-radius-sm);
+  color: var(--ui-text-subtle);
+  line-height: 1;
+}
+.sov-scale-btn {
+  min-width: 44px;
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.sov-scale-btn:hover { color: var(--ui-accent); background: rgba(34, 211, 238, 0.1); border-color: rgba(34, 211, 238, 0.3); }
+.sov-exit-btn { font-size: 14px; }
+.sov-exit-btn:hover { color: #f87171; background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.4); }
+
+/* ── Stream picker (Row pattern: icon + title + trailing) ───────────── */
+.sov-picker {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-top: 1px solid var(--ui-border);
+}
+.sov-pick-row {
+  flex-shrink: 0;
+  width: 100%;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: var(--ui-radius-row);
+  font-size: var(--ui-text-sm);
+  color: var(--ui-text-muted);
+  text-align: left;
+}
+.sov-pick-row:hover { background: rgba(255, 255, 255, 0.06); color: var(--ui-text-main); }
+.sov-pick-row[aria-current="true"] { background: rgba(6, 182, 212, 0.14); color: var(--ui-text-main); }
+.sov-pick-icon { flex-shrink: 0; width: 16px; text-align: center; font-size: 10px; color: var(--ui-text-subtle); }
+.sov-pick-row[aria-current="true"] .sov-pick-icon { color: var(--ui-accent); }
+.sov-pick-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sov-pick-trailing { flex-shrink: 0; font-size: var(--ui-text-xs); color: var(--ui-accent); }
+
+/* ── Video area ─────────────────────────────────────────────────────── */
+.sov-video { position: relative; flex-shrink: 0; overflow: hidden; background: #000; }
+.sov-video-divider { border-top: 1px solid var(--ui-border); }
+.sov-video-status-wrap {
+  position: absolute;
+  inset: 0;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.sov-video-status {
+  padding: 4px 10px;
+  border-radius: var(--ui-radius-sm);
+  background: rgba(0, 0, 0, 0.72);
+  color: #fca5a5;
+  font-size: var(--ui-text-xs);
+  line-height: 16px;
+  text-align: center;
+}
+.sov-stop-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  height: 26px;
+  padding: 0 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-color: rgba(239, 68, 68, 0.5);
+  border-radius: var(--ui-radius-sm);
+  background: rgba(0, 0, 0, 0.72);
+  color: #fca5a5;
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+}
+.sov-stop-btn:hover { background: rgba(127, 29, 29, 0.9); color: #fff; }

@@ -1,0 +1,6 @@
+{
+  "name": "@spectercoms/shared-events",
+  "private": true,
+  "type": "module",
+  "description": "Cross-package contracts (SSE event shapes). Plain ESM, no build step."
+}
