@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpecterComs Strip</title>
+    <!-- The tray strip window (src-tauri/src/strip.rs). Transparent window,
+         so no pre-React splash: nothing is drawn until React mounts, and the
+         window is only shown once the page calls strip_ready. Styles come
+         from src/strip.css via the bundle (no inline <style>: Tauri's CSP
+         nonce blocks it). -->
+  </head>
+  <body>
+    <div id="strip-root"></div>
+    <script type="module" src="/src/strip.jsx"></script>
+  </body>
+</html>

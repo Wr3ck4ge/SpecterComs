@@ -1,0 +1,43 @@
+[package]
+name = "tauri-plugin-specter-audio"
+version = "0.1.0"
+edition = "2021"
+links = "tauri-plugin-specter-audio"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+cpal = "0.15"
+audiopus = "0.3.0-rc.0"
+parking_lot = "0.12"
+base64 = "0.22"
+rubato = "2.0.0"
+dasp_interpolate = "0.11.0"
+dasp_ring_buffer = "0.11.0"
+dasp_signal = "0.11.0"
+dasp_sample = "0.11.0"
+nnnoiseless = { version = "0.5", default-features = false }
+
+# WASAPI process loopback for screen-share audio (src/loopback.rs). Same
+# windows-rs version as the app crate so the lockfile shares one copy;
+# windows-core is needed directly by the #[implement] macro's expansion.
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.58"
+windows = { version = "0.58", features = [
+  "implement",
+  "Win32_Foundation",
+  "Win32_Media",
+  "Win32_Media_Audio",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Performance",
+  "Win32_System_Threading",
+  "Win32_System_Variant",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Security",
+] }

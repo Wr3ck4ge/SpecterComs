@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en" class="specter-splash-html">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#000000" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpecterComs - Tactical Comms</title>
+    <!-- Body stays transparent for the transparent window's custom shape/shadow.
+         The #root pre-render below fills the viewport from the very first paint frame
+         so the OS window chrome never floats over an empty transparent body.
+         An external stylesheet, not an inline <style> tag or style="" attributes —
+         Tauri's runtime CSP nonce silently blocks inline styles the app authors
+         itself (see splash.css's header comment). -->
+    <link rel="stylesheet" href="/splash.css" />
+  </head>
+  <body class="specter-splash-body">
+    <!-- Pre-React splash: child div is replaced when React mounts.
+         IMPORTANT: styling must be on the inner div, NOT on #root — React replaces
+         children but preserves #root's attributes, so any style on #root would
+         persist and break the app layout after mount. -->
+    <div id="root"><div class="specter-splash">
+      <div class="specter-splash-title">SpecterComs</div>
+      <div class="specter-splash-status">Starting…</div>
+    </div></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

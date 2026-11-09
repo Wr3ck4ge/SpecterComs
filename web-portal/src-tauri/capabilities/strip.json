@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "strip",
+  "description": "the tray strip window: events (core:default) plus opening http(s) links in the system browser: the SpecterComs website for 'Create account', and links in a server's welcome panel (web-portal/src/utils/openExternal.js; the renderer, utils/safeMarkdown.js, only ever produces absolute http/https URLs). No other scheme (file:, mailto:, custom protocols) and no opener:allow-open-path. Showing, hiding, positioning and clipping the strip are done from Rust (strip.rs commands), so no window permissions are granted here.",
+  "windows": [
+    "specter-strip"
+  ],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://*" },
+        { "url": "http://*" }
+      ]
+    }
+  ]
+}

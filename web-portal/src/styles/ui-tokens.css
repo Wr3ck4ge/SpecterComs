@@ -1,0 +1,30 @@
+/* Redesign UI tokens as CSS variables — mirror tailwind.config.js / design-tokens.json.
+   components/ui uses the Tailwind classes; these are for hand-written CSS.
+   Shared by index.css (main window) and overlay.css (game overlay, which does
+   not load Tailwind or index.css), so keep this file variables-only. */
+:root {
+  --ui-font: "Segoe UI Variable", "Segoe UI", Inter, system-ui, sans-serif;
+  --ui-text-xs: 12px;
+  --ui-text-sm: 13px;
+  --ui-text-base: 14px;
+  --ui-text-lg: 16px;
+  --ui-text-xl: 20px;
+  --ui-radius-sm: 6px;
+  --ui-radius-row: 8px;
+  --ui-radius-md: 10px;
+  --ui-radius-lg: 14px;
+  --ui-radius-pill: 9999px;
+  --ui-text-subtle: #86a9bd;
+  --ui-border: rgba(95, 209, 240, 0.24);
+  --ui-border-strong: rgba(103, 218, 245, 0.34);
+  --ui-divider: rgba(255, 255, 255, 0.06);
+  --ui-focus: #22d3ee;
+
+  /* Colour mirrors of tailwind `specter.*` (already defined there). */
+  --ui-bg-deep: #020913;
+  --ui-bg-surface: #081828;
+  --ui-bg-panel: #10263a;
+  --ui-text-main: #ecf9ff;
+  --ui-text-muted: #b7d1df;
+  --ui-accent: #22d3ee;
+}

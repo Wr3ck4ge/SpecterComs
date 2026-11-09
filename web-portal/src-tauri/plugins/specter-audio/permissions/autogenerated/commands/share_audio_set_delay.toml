@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-share-audio-set-delay"
+description = "Enables the share_audio_set_delay command without any pre-configured scope."
+commands.allow = ["share_audio_set_delay"]
+
+[[permission]]
+identifier = "deny-share-audio-set-delay"
+description = "Denies the share_audio_set_delay command without any pre-configured scope."
+commands.deny = ["share_audio_set_delay"]

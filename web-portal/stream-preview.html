@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpecterComs stream viewer preview</title>
+  </head>
+  <body>
+    <!-- SV: dev-only gallery of the strip's stream viewer, fed by a mocked
+         frame source (a canvas test pattern encoded with WebCodecs). Not a
+         build input in vite.config.js, so it never ships; open
+         http://localhost:5173/stream-preview.html under `npm run dev`.
+         ?only=<scenario-id> renders one scenario; add &bare=1 to fill the
+         page (screenshots), &w=&h= to set the work area (default 1366x728). -->
+    <div id="root"></div>
+    <script type="module" src="/src/dev/streamPreview.jsx"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "mls-crypto",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "mls_crypto_bg.wasm",
+    "mls_crypto.js",
+    "mls_crypto.d.ts"
+  ],
+  "main": "mls_crypto.js",
+  "types": "mls_crypto.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

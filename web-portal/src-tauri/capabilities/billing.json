@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "billing",
+  "description": "the main window's server wallet (components/BillingPanel.jsx, behind VITE_BILLING_UI) opens Stripe Checkout in the system browser through the opener plugin. Only https://checkout.stripe.com URLs (session URLs end in a #fragment, hence the second pattern); nothing else, no open-path. Without this, openUrl from the main window is denied (default.json grants no opener permission; strip.json covers only the strip window).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://checkout.stripe.com/*" },
+        { "url": "https://checkout.stripe.com/*#*" }
+      ]
+    }
+  ]
+}
