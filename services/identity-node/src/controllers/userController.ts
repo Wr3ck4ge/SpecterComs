@@ -1,10 +1,10 @@
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { pool } from '../config/db.js';
-import { publishEvent } from '../config/nats.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -14,16 +14,65 @@ const AVATARS_DIR = path.join(UPLOADS_BASE, 'avatars');
 fs.mkdirSync(INTRO_SOUNDS_DIR, { recursive: true });
 fs.mkdirSync(AVATARS_DIR, { recursive: true });
 
+/**
+ * A stored upload path ("avatars/<name>") → its absolute path, but ONLY if it
+ * resolves to a file directly inside `dir`. Anything else ("../", another
+ * folder, absolute paths) → null. Every fs operation on a stored path goes
+ * through this.
+ */
+export function resolveUpload(rel: unknown, dir: string): string | null {
+  if (typeof rel !== 'string' || rel.length === 0 || rel.length > 512) return null;
+  const abs = path.resolve(UPLOADS_BASE, rel);
+  return path.dirname(abs) === path.resolve(dir) ? abs : null;
+}
+
+function removeUpload(rel: unknown, dir: string): void {
+  const abs = resolveUpload(rel, dir);
+  if (abs) fs.unlink(abs, () => {});
+}
+
+/**
+ * E1: uploads used to be named `<userId>.<ext>` under the public /uploads
+ * path, so anyone who knew a user's id could fetch their avatar or intro
+ * sound. New uploads get random names; this renames the old id-named files
+ * once at startup (idempotent: it only touches paths that still embed the
+ * owner's id).
+ */
+export async function randomizeLegacyUploadNames(): Promise<number> {
+  let renamed = 0;
+  for (const [col, dir, sub] of [
+    ['profile_image_path', AVATARS_DIR, 'avatars'],
+    ['intro_sound_path', INTRO_SOUNDS_DIR, 'intro-sounds'],
+  ] as const) {
+    const { rows } = await pool.query(
+      `SELECT id, ${col} AS p FROM users WHERE ${col} LIKE '${sub}/' || id::text || '.%'`
+    );
+    for (const r of rows) {
+      const from = resolveUpload(r.p, dir);
+      if (!from) continue;
+      const rel = `${sub}/${randomUUID()}${path.extname(from)}`;
+      try {
+        if (fs.existsSync(from)) fs.renameSync(from, path.resolve(UPLOADS_BASE, rel));
+        await pool.query(`UPDATE users SET ${col} = $1 WHERE id = $2 AND ${col} = $3`, [fs.existsSync(path.resolve(UPLOADS_BASE, rel)) ? rel : null, r.id, r.p]);
+        renamed++;
+      } catch (err) {
+        console.error(`[uploads] rename of ${col} for ${r.id} failed:`, err);
+      }
+    }
+  }
+  return renamed;
+}
+
 // ── Avatar upload multer config ───────────────────────────────────────────────
 const avatarStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, AVATARS_DIR),
-  filename: (req, file, cb) => {
-    const userId = (req as AuthRequest).user?.id ?? 'unknown';
+  // Random, not the user id (E1): a public /uploads URL must not be derivable.
+  filename: (_req, file, cb) => {
     const ext = file.mimetype === 'image/png' ? 'png'
       : file.mimetype === 'image/gif' ? 'gif'
       : file.mimetype === 'image/webp' ? 'webp'
       : 'jpg';
-    cb(null, `${userId}.${ext}`);
+    cb(null, `${randomUUID()}.${ext}`);
   },
 });
 
@@ -44,9 +93,8 @@ export const avatarUpload = multer({
 
 const introSoundStorage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, INTRO_SOUNDS_DIR),
-  filename: (req, _file, cb) => {
-    const userId = (req as AuthRequest).user?.id ?? 'unknown';
-    cb(null, `${userId}.mp3`);
+  filename: (_req, _file, cb) => {
+    cb(null, `${randomUUID()}.mp3`); // random, not the user id (E1)
   },
 });
 
@@ -69,7 +117,7 @@ export const getMyProfile = async (req: AuthRequest, res: Response): Promise<voi
   try {
     const userId = req.user!.id;
     const result = await pool.query(
-      'SELECT id, callsign, global_tag, timezone, profile_image_path, intro_sound_path, subscription_tier FROM users WHERE id = $1',
+      'SELECT id, callsign, global_tag, timezone, profile_image_path, intro_sound_path, subscription_tier, (email_verified_at IS NOT NULL) AS email_verified, (pending_email_hash IS NOT NULL) AS email_change_pending FROM users WHERE id = $1',
       [userId]
     );
     if (result.rows.length === 0) {
@@ -149,33 +197,21 @@ export const updateProfile = async (req: AuthRequest, res: Response): Promise<vo
     values.push(timezone);
   }
 
-  if (profile_image_path !== undefined) {
-    if (typeof profile_image_path !== 'string' || profile_image_path.length > 512) {
-      res.status(400).json({ message: 'Invalid profile image path' });
-      return;
-    }
-    updates.push(`profile_image_path = $${idx++}`);
-    values.push(profile_image_path || null);
+  // File paths are only ever set by the upload routes. This endpoint may
+  // CLEAR them (null / ''), never set them: it used to store any string, and
+  // the upload routes later passed that string to fs.unlink, so a client
+  // could delete arbitrary files ("../../…") or point at another user's file.
+  // A non-empty value is ignored (the legacy SettingsUI echoes its current
+  // path back), not rejected.
+  const clearAvatar = profile_image_path === null || profile_image_path === '';
+  const clearIntro = intro_sound_path === null || intro_sound_path === '';
+  let oldFiles: { profile_image_path: string | null; intro_sound_path: string | null } | null = null;
+  if (clearAvatar || clearIntro) {
+    const r = await pool.query('SELECT profile_image_path, intro_sound_path FROM users WHERE id = $1', [userId]);
+    oldFiles = r.rows[0] ?? null;
   }
-
-  if (intro_sound_path !== undefined) {
-    if (intro_sound_path !== null && (typeof intro_sound_path !== 'string' || intro_sound_path.length > 512)) {
-      res.status(400).json({ message: 'Invalid intro sound path' });
-      return;
-    }
-    // Setting a real path is gated the same as the dedicated /intro-sound
-    // upload route — this generic profile endpoint let any tier set it
-    // directly, bypassing that check entirely. Clearing it (null) stays free.
-    if (intro_sound_path) {
-      const tierRes = await pool.query('SELECT subscription_tier FROM users WHERE id = $1', [userId]);
-      if (!tierRes.rows.length || tierRes.rows[0].subscription_tier < 1) {
-        res.status(403).json({ message: 'Premium subscription required to set an intro sound' });
-        return;
-      }
-    }
-    updates.push(`intro_sound_path = $${idx++}`);
-    values.push(intro_sound_path || null);
-  }
+  if (clearAvatar) updates.push('profile_image_path = NULL');
+  if (clearIntro) updates.push('intro_sound_path = NULL');
 
   if (updates.length === 0) {
     res.status(400).json({ message: 'No fields to update' });
@@ -190,6 +226,8 @@ export const updateProfile = async (req: AuthRequest, res: Response): Promise<vo
       `UPDATE users SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, callsign, global_tag, timezone, profile_image_path, intro_sound_path, subscription_tier`,
       values
     );
+    if (clearAvatar) removeUpload(oldFiles?.profile_image_path, AVATARS_DIR);
+    if (clearIntro) removeUpload(oldFiles?.intro_sound_path, INTRO_SOUNDS_DIR);
     res.json({ user: result.rows[0] });
   } catch (err) {
     console.error('updateProfile error:', err);
@@ -197,50 +235,57 @@ export const updateProfile = async (req: AuthRequest, res: Response): Promise<vo
   }
 };
 
+// E2: per-user search rate limit (in memory, like friendController's).
+const searchCounts = new Map<string, { count: number; resetAt: number }>();
+function checkSearchRate(userId: string): boolean {
+  const now = Date.now();
+  const e = searchCounts.get(userId);
+  if (!e || now > e.resetAt) { searchCounts.set(userId, { count: 1, resetAt: now + 60_000 }); return true; }
+  if (e.count >= 30) return false;
+  e.count += 1;
+  return true;
+}
+
 export const searchUsers = async (req: AuthRequest, res: Response): Promise<void> => {
   const q = (req.query.q as string || '').trim();
   if (!q || q.length < 2) {
     res.status(400).json({ message: 'Query too short' });
     return;
   }
+  // E2: search used to prefix-match EVERY account, so anyone could list the
+  // whole user base two letters at a time. Now:
+  //   - prefix matches only among people who share a server with you;
+  //   - anyone, by their EXACT callsign (case-insensitive) — how you add a
+  //     friend you already know;
+  //   - rate-limited per user.
+  // (A per-user "discoverable" setting can widen/narrow this later.)
+  const userId = req.user!.id;
+  if (!checkSearchRate(userId)) {
+    res.status(429).json({ message: 'Too many searches. Try again in a minute.' });
+    return;
+  }
+  if (q.length > 64) { res.status(400).json({ message: 'Query too long' }); return; }
   try {
+    const like = `${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
     const result = await pool.query(
-      `SELECT id, callsign, global_tag
-       FROM users
-       WHERE callsign ILIKE $1
-       LIMIT 20`,
-      [`${q}%`]
+      `SELECT u.id, u.callsign, u.global_tag
+         FROM users u
+        WHERE u.id <> $3
+          AND (
+            lower(u.callsign) = lower($1)
+            OR (u.callsign ILIKE $2 AND EXISTS (
+                  SELECT 1 FROM org_members a
+                    JOIN org_members b ON b.org_id = a.org_id
+                   WHERE a.user_id = $3 AND b.user_id = u.id))
+          )
+        ORDER BY (lower(u.callsign) = lower($1)) DESC, u.callsign
+        LIMIT 20`,
+      [q, like, userId]
     );
     res.json({ users: result.rows });
   } catch (err) {
     console.error('Search users error:', err);
     res.status(500).json({ message: 'Server error' });
-  }
-};
-
-export const updatePresence = async (req: Request, res: Response): Promise<void> => {
-  try {
-    const userId = (req as any).user.id;
-    const { status, gameActivity } = req.body;
-    let presenceStatus = 0;
-    if (status === 'Away') presenceStatus = 1;
-    if (status === 'Busy') presenceStatus = 2;
-    if (status === 'Invisible') presenceStatus = 3;
-    
-    await pool.query(
-      'UPDATE users SET presence_status = $1, game_activity = $2 WHERE id = $3',
-      [presenceStatus, gameActivity || '', userId]
-    );
-    
-    await publishEvent(
-      'UserPresenceUpdated',
-      { userId, status, gameActivity }
-    );
-    
-    res.status(200).json({ message: 'Presence updated successfully' });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Internal server error' });
   }
 };
 
@@ -266,6 +311,9 @@ export const uploadIntroSound = async (req: AuthRequest, res: Response): Promise
   const relativePath = `intro-sounds/${path.basename(file.filename)}`;
 
   try {
+    const old = await pool.query('SELECT intro_sound_path FROM users WHERE id = $1', [userId]);
+    const oldPath = old.rows[0]?.intro_sound_path;
+    if (oldPath && oldPath !== relativePath) removeUpload(oldPath, INTRO_SOUNDS_DIR);
     await pool.query(
       'UPDATE users SET intro_sound_path = $1, updated_at = NOW() WHERE id = $2',
       [relativePath, userId]
@@ -283,16 +331,11 @@ export const deleteIntroSound = async (req: AuthRequest, res: Response): Promise
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
 
   try {
-    const result = await pool.query(
-      'UPDATE users SET intro_sound_path = NULL, updated_at = NOW() WHERE id = $1 RETURNING intro_sound_path',
-      [userId]
-    );
-    // Clean up file if it exists
-    const oldPath = result.rows[0]?.intro_sound_path;
-    if (oldPath) {
-      const abs = path.join(UPLOADS_BASE, oldPath);
-      fs.unlink(abs, () => {});
-    }
+    // Read the old path BEFORE clearing it (RETURNING gives the new value,
+    // NULL, so the file was never deleted).
+    const old = await pool.query('SELECT intro_sound_path FROM users WHERE id = $1', [userId]);
+    await pool.query('UPDATE users SET intro_sound_path = NULL, updated_at = NOW() WHERE id = $1', [userId]);
+    removeUpload(old.rows[0]?.intro_sound_path, INTRO_SOUNDS_DIR);
     res.json({ ok: true });
   } catch (err) {
     console.error('deleteIntroSound error:', err);
@@ -312,9 +355,7 @@ export const uploadAvatar = async (req: AuthRequest, res: Response): Promise<voi
   try {
     const old = await pool.query('SELECT profile_image_path FROM users WHERE id = $1', [userId]);
     const oldPath = old.rows[0]?.profile_image_path as string | null;
-    if (oldPath && oldPath !== `avatars/${file.filename}`) {
-      fs.unlink(path.join(UPLOADS_BASE, oldPath), () => {});
-    }
+    if (oldPath && oldPath !== `avatars/${file.filename}`) removeUpload(oldPath, AVATARS_DIR);
   } catch {}
 
   const relativePath = `avatars/${file.filename}`;

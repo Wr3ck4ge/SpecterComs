@@ -1,5 +1,5 @@
 import { SLOT_PRIORITY } from './barSlots';
-import { OverlayChip, SpeakerChip, StreamChip } from './StripVoiceControls';
+import { SpeakerChip, StreamChip } from './StripVoiceControls';
 
 /**
  * BAR2: the voice slots for the bar's slot row (StripBarSlots): the voice
@@ -36,12 +36,9 @@ export function voiceSlots({ engine, pickerOpen, transmitting = false, onOpenCha
       priority: SLOT_PRIORITY.stream,
       minWidth: state.voice.sharing ? 48 : 26,
       node: <StreamChip engine={engine} pickerOpen={pickerOpen} onClick={onShareClick} />,
-    }, {
-      id: 'overlay',
-      priority: SLOT_PRIORITY.overlay,
-      minWidth: 26,
-      node: <OverlayChip engine={engine} onClick={onToggleOverlay} />,
     });
+    // OVERLAYTAB: the Game HUD control moved off the slot row into a labelled
+    // "Overlay" tab on the stack's edge (StripView `overlayTab`).
   }
   return slots;
 }

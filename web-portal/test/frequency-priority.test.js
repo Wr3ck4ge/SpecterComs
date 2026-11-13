@@ -23,24 +23,27 @@ const data = {
 const orgMembers = [{ user_id: 'u-cmdr', callsign: 'Cmdr' }, { user_id: 'u-lead', callsign: 'Lead' }];
 
 describe('frequency whitelist + priority (planner)', () => {
-  it('the whitelist is exactly member_priorities; priority never read from the role', () => {
+  it('members = the whitelist ∪ accepted holders of its roles; priority never read from the role', () => {
     const { groups, frequencies } = mapEventGroups(data);
-    expect(frequencyMembers(frequencies[0], groups)).toEqual([{ user_id: 'u-lead', callsign: 'Lead', priority: 2 }]);
+    expect(frequencyMembers(frequencies[0], groups)).toEqual([{ user_id: 'u-lead', callsign: 'Lead', priority: 2, via_role: true }]);
     expect(frequencyMemberPriority(frequencies[0], 'u-lead')).toBe(2); // role priority is 5
     expect(isFrequencyMember(frequencies[0], 'u-cmdr')).toBe(false);
   });
 
-  it('role holders not on the net are suggestions, not members (accepted only)', () => {
+  it('FREQROLE: accepted holders of a role on the net are members automatically (pending ones are not)', () => {
     const { groups, frequencies } = mapEventGroups(data);
     const withRifle = [{ ...frequencies[0], role_refs: [...frequencies[0].role_refs, { group_index: 0, role_index: 1 }] }];
-    expect(frequencyMembers(withRifle[0], groups).map((m) => m.callsign)).toEqual(['Lead']);
+    const ms = frequencyMembers(withRifle[0], groups);
+    expect(ms.map((m) => m.callsign)).toEqual(['Lead', 'Rifle']);
+    expect(ms.find((m) => m.callsign === 'Rifle')).toMatchObject({ via_role: true, priority: FREQUENCY_DEFAULT_PRIORITY });
     expect(frequencyRoleHolderCandidates(withRifle[0], groups).map((m) => m.callsign)).toEqual(['Rifle']);
   });
 
-  it('adding a role through the planner adds its current holders', () => {
+  it('adding a role links it without copying holders onto the explicit whitelist', () => {
     const { groups, frequencies } = mapEventGroups(data);
     const f = addFrequencyRoleWithHolders(frequencies, 0, 0, 1, groups);
-    expect(f[0].member_priorities).toEqual({ 'u-lead': 2, 'u-rifle': FREQUENCY_DEFAULT_PRIORITY });
+    expect(f[0].member_priorities).toEqual({ 'u-lead': 2 });
+    expect(frequencyMembers(f[0], groups).map((m) => m.callsign)).toEqual(['Lead', 'Rifle']);
   });
 
   it('add an individual (the commander), set priority, remove — the payload carries the full whitelist', () => {

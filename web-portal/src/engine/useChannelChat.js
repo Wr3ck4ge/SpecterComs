@@ -15,6 +15,38 @@ import {
   parseBundle, pickRetryRows, selectReplyRows, syncReplyDelay, toBundleItem,
   bundleRowsToDm, dmConversationId, dmRelayMessage,
 } from './chatSyncCore';
+import { noteDecrypt as noteMlsHealth } from './mlsHealth'; // S3
+import { openFranked, reverifyRow, SCOPE_CHANNEL, SCOPE_DM, VERIFY_FAILED } from './frank'; // S7
+
+// S7: a decrypted plaintext → the fields to store. A v2 envelope is opened and
+// its commitment checked against the relayed frank with the SERVER-SUPPLIED
+// sender id (engine/frank.js); v1 raw text passes through unchanged. A row
+// that couldn't be decrypted keeps the relayed frank for its retry.
+async function openPlaintext(plaintext, { frank, scope, conversationId, senderId }) {
+  if (plaintext == null) return frank ? { plaintext: null, frank } : { plaintext: null };
+  try {
+    return await openFranked(plaintext, { frank, scope, conversationId, senderId });
+  } catch {
+    return { plaintext };
+  }
+}
+
+// S7: backfilled rows carry franking fields from the responder — re-verified
+// here, never trusted.
+const reverifyRows = (rows, scope, idOf) => Promise.all(rows.map((r) => (
+  reverifyRow(r, { scope, conversationId: idOf(r) }).catch(() => r)
+)));
+
+// S3: a live message from someone else, at this device's current epoch, says
+// something about our copy of the group: success, or 'corrupt' (key held,
+// decrypt failed). Other reasons (not a member, epoch gaps) don't count.
+function noteChatDecrypt(groupId, isOwnAccount, plaintext, err) {
+  try {
+    if (isOwnAccount) return; // own echoes fail by design
+    if (plaintext != null) noteMlsHealth(groupId, true);
+    else if (err instanceof MlsDecryptError && err.reason === 'corrupt') noteMlsHealth(groupId, false, { keyHeld: true });
+  } catch { /* health tracking must never break chat */ }
+}
 
 // Channel-chat delivery for the engine (P2A, reworked for 2.0.1 / MR2).
 //
@@ -137,15 +169,21 @@ function handleRelay(payload) {
     const isOwnAccount = payload.sender_id === me;
     let plaintext = null;
     let reason = null;
+    let decryptErr = null;
     try {
       plaintext = await decryptChannel(api, me, channelId, payload.encrypted_content, isOwnAccount);
     } catch (err) {
+      decryptErr = err;
       reason = failReason(err);
     }
+    noteChatDecrypt(channelId, isOwnAccount, plaintext, decryptErr); // S3
     // Own sends are already stored from send() — the decrypt above still had
     // to run to drain the FIFO own-echo recall queue in order; skip so a
     // stray failed recall can't touch the good local copy.
     if (isOwnAccount && engine.ownSentIds.has(payload.id)) return;
+    const opened = await openPlaintext(plaintext, {
+      frank: payload.frank, scope: SCOPE_CHANNEL, conversationId: channelId, senderId: payload.sender_id,
+    });
     const row = await saveChannelMessage({
       id:                payload.id,
       channel_id:        channelId,
@@ -153,8 +191,8 @@ function handleRelay(payload) {
       callsign:          payload.callsign ?? null,
       global_tag:        payload.global_tag ?? null,
       encrypted_content: payload.encrypted_content,
-      plaintext,
-      image_url:         payload.image_url ?? null,
+      ...opened,         // plaintext (+ S7 franking fields)
+      image_url:         null, // relay images bypass E2E; dropped
       timestamp:         payload.timestamp,
       fail_reason:       reason,
       attempts:          plaintext == null ? 1 : 0,
@@ -173,12 +211,14 @@ const KIND = {
     // isOwnAccount=false: the recall queue belongs to live echoes only.
     decrypt: (me, id, ct) => decryptChannel(api, me, id, ct, false),
     followUp: (id) => followUpCatchUp(id),
+    scope: SCOPE_CHANNEL,
   },
   dm: {
     rows: (id) => getDmMessages(id, STORE_WINDOW),
     save: (row) => saveDmMessage(row),
     decrypt: (me, id, ct) => decryptDmOrRecallOwn(api, me, id, ct, false),
     followUp: (id) => followUpDmCatchUp(id),
+    scope: SCOPE_DM,
   },
 };
 
@@ -210,8 +250,11 @@ function retryPending(kindName, id) {
       } catch (err) {
         reason = failReason(err);
       }
-      const written = await kind.save(plaintext != null
-        ? { ...row, plaintext }
+      const opened = plaintext != null
+        ? await openPlaintext(plaintext, { frank: row.frank, scope: kind.scope, conversationId: id, senderId: row.sender_id })
+        : null;
+      const written = await kind.save(opened
+        ? { ...row, ...opened }
         : { ...row, fail_reason: reason, attempts: (row.attempts ?? 0) + 1 }).catch(() => null);
       if (written) changed = true;
     }
@@ -404,8 +447,9 @@ function handleLegacySyncRequest(payload) {
   getChannelMessagesSince(payload.channel_id, payload.since).then((rows) => {
     const out = rows
       .filter((r) => r.encrypted_content)
-      .map(({ id, sender_id, callsign, global_tag, encrypted_content, image_url, timestamp }) => (
-        { id, sender_id, callsign, global_tag, encrypted_content, image_url, timestamp }
+      .map(({ id, sender_id, callsign, global_tag, encrypted_content, image_url, timestamp, frank }) => (
+        // S7: the relayed frank travels with the original ciphertext (never fk).
+        { id, sender_id, callsign, global_tag, encrypted_content, image_url, timestamp, ...(frank ? { frank } : {}) }
       ));
     if (out.length === 0) return;
     api.respondChannelSync(payload.org_id, payload.channel_id, payload.requester_id, out).catch(() => {});
@@ -434,7 +478,8 @@ function handleSyncResponse(payload, { isRetry = false } = {}) {
         }
         return;
       }
-      const rows = parseBundle(json, { channelId, relayedBy: payload.relayed_by ?? null });
+      const parsed = parseBundle(json, { channelId, relayedBy: payload.relayed_by ?? null });
+      const rows = await reverifyRows(parsed, SCOPE_CHANNEL, () => channelId); // S7
       const written = await saveChannelMessages(channelId, rows).catch(() => []);
       if (written.length) notifyChannel(channelId);
     });
@@ -461,7 +506,8 @@ function handleSyncResponse(payload, { isRetry = false } = {}) {
       } catch (err) {
         reason = failReason(err);
       }
-      out.push({ ...m, channel_id: channelId, plaintext, fail_reason: reason, attempts: plaintext == null ? 1 : 0, relayed_by: payload.relayed_by ?? null });
+      const opened = await openPlaintext(plaintext, { frank: m.frank, scope: SCOPE_CHANNEL, conversationId: channelId, senderId: m.sender_id }); // S7
+      out.push({ ...m, channel_id: channelId, ...opened, fail_reason: reason, attempts: plaintext == null ? 1 : 0, relayed_by: payload.relayed_by ?? null });
     }
     const written = await saveChannelMessages(channelId, out).catch(() => []);
     if (written.length) notifyChannel(channelId);
@@ -493,14 +539,20 @@ function handleDmRelay(payload) {
     const isOwnAccount = msg.sender_id === me;
     let plaintext = null;
     let reason = null;
+    let decryptErr = null;
     try {
       plaintext = await decryptDmOrRecallOwn(api, me, convId, msg.encrypted_content, isOwnAccount);
     } catch (err) {
+      decryptErr = err;
       reason = failReason(err);
     }
+    noteChatDecrypt(convId, isOwnAccount, plaintext, decryptErr); // S3
     // Own sends from this device are already stored by sendDm (same rule as
     // channels: the decrypt above still drains the own-echo recall queue).
     if (isOwnAccount && engine.ownSentIds.has(msg.id)) return;
+    const opened = await openPlaintext(plaintext, {
+      frank: msg.frank, scope: SCOPE_DM, conversationId: convId, senderId: msg.sender_id,
+    }); // S7
     const row = await saveDmMessage({
       id: msg.id,
       conversation_id: convId,
@@ -508,7 +560,7 @@ function handleDmRelay(payload) {
       to_user_id: msg.to_user_id ?? null,
       callsign: msg.callsign ?? null,
       encrypted_content: msg.encrypted_content,
-      plaintext,
+      ...opened,
       timestamp: msg.timestamp,
       fail_reason: reason,
       attempts: plaintext == null ? 1 : 0,
@@ -519,7 +571,8 @@ function handleDmRelay(payload) {
     if (row && !isOwnAccount) {
       const note = {
         id: msg.id, partnerId: msg.sender_id, callsign: msg.callsign ?? null,
-        text: plaintext, timestamp: msg.timestamp,
+        // S7 (D2): an unverifiable message is never previewed.
+        text: opened.verify === VERIFY_FAILED ? null : opened.plaintext, timestamp: msg.timestamp,
       };
       for (const cb of dmListeners) {
         try { cb(note); } catch { /* a listener's bug isn't the engine's */ }
@@ -662,7 +715,8 @@ function handleDmSyncResponse(payload, { isRetry = false } = {}) {
       }
       return;
     }
-    const rows = bundleRowsToDm(parseBundle(json, { channelId: null, relayedBy: partnerId }), { convId, me, partnerId });
+    const parsed = bundleRowsToDm(parseBundle(json, { channelId: null, relayedBy: partnerId }), { convId, me, partnerId });
+    const rows = await reverifyRows(parsed, SCOPE_DM, () => convId); // S7
     const written = await saveDmMessages(convId, rows).catch(() => []);
     if (written.length) notifyChannel(convId);
   });

@@ -57,3 +57,6 @@ export const forgotPasswordRateLimiter = createRateLimiter(60 * 60_000, 5, 'Too 
 // typed by a human, so it needs more headroom than login — but still bounded
 // per IP against abuse of the endpoint itself.
 export const refreshRateLimiter = createRateLimiter(15 * 60_000, 30, 'Too many refresh attempts. Try again later.');
+// L2: verification link consumption and resend (resend also has a per-account cooldown).
+export const verifyEmailRateLimiter = createRateLimiter(15 * 60_000, 20, 'Too many verification attempts. Try again later.');
+export const resendVerificationRateLimiter = createRateLimiter(60 * 60_000, 5, 'Too many verification emails requested. Try again later.');

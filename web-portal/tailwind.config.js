@@ -39,6 +39,18 @@ export default {
             strong: "rgba(103, 218, 245, 0.34)",
             divider: "rgba(255, 255, 255, 0.06)",
             focus: "#22d3ee"
+          },
+          // BRAND (2026-11-12 refresh): the brand pack's palette. `ink` is the
+          // strip's panel surface; `cyan` is the accent for active states only.
+          // Contrast on ink: text.subtle 7.1:1, steel 5.0:1, error 5.6:1.
+          brand: {
+            night: "#050B10",   // near-black
+            ink: "#0A1A24",     // blue-black: strip panels
+            steel: "#7A8B97",   // steel-gray: idle chrome
+            cyan: "#00E5FF",    // accent: active / selected
+            error: "#FF5266",   // semantic muted / error
+            tile: "rgba(122, 139, 151, 0.30)",       // tile border, idle
+            "tile-hover": "rgba(122, 139, 151, 0.55)", // tile border, hover
           }
         },
         'command-gold': '#ffd700',

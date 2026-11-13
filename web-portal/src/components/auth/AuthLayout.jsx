@@ -1,10 +1,12 @@
 import { Lock } from 'lucide-react';
 import { cx, focusRing } from '../ui/styles';
+// BRAND: the approved detailed app badge (transparent hexagon). Imported so
+// Vite hashes it. This is the APP's identity; a server's own logo stays in
+// HexBadge (the bar).
+import LOGO_SRC from '../../assets/brand/app-badge-256.png';
 
 // Shared pieces for the signed-out screens (login, register, recovery,
 // unsupported browser) and the startup splash.
-
-const LOGO_SRC = '/android-chrome-192x192.png';
 
 /**
  * SpecterComs logo + wordmark.
@@ -14,7 +16,7 @@ export function BrandMark({ size = 'lg', tagline = 'Secure voice and text', clas
   if (size === 'sm') {
     return (
       <div className={cx('flex items-center gap-2.5 font-ui', className)}>
-        <img src={LOGO_SRC} alt="" aria-hidden="true" className="h-8 w-8 rounded-ui-sm border border-specter-border" />
+        <img src={LOGO_SRC} alt="" aria-hidden="true" className="h-9 w-9 object-contain" />
         <div className="min-w-0 leading-tight">
           <div className="text-ui-base font-semibold text-specter-text-main">SpecterComs</div>
           {tagline && <div className="text-ui-xs text-specter-text-subtle">{tagline}</div>}
@@ -28,7 +30,7 @@ export function BrandMark({ size = 'lg', tagline = 'Secure voice and text', clas
         src={LOGO_SRC}
         alt=""
         aria-hidden="true"
-        className="h-20 w-20 rounded-ui-lg border border-specter-border-strong shadow-[0_0_28px_rgba(6,182,212,0.22)]"
+        className="h-24 w-24 object-contain drop-shadow-[0_0_18px_rgba(0,229,255,0.22)]"
       />
       <div className="space-y-0.5">
         <h1 className="text-[26px] leading-8 font-semibold tracking-[0.04em] text-specter-text-main">

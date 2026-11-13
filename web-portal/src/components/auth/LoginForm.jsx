@@ -17,10 +17,57 @@ import { TextLink } from './AuthLayout';
  *                             links in a row under the button
  * onForgotPassword()          shows a "Forgot password?" link when given
  * onCreateAccount()           shows a "Create account" link when given
+ * onResendVerification()      when given, the error Alert gets a "Resend email" link
+ *                             (EMAIL_NOT_VERIFIED); resendNote shows its outcome
  * autoFocus                   focus the email field on mount (default true)
  * idPrefix                    prefix for input ids, if two forms share a page
+ * twoFactor                   L3: when set, the form is the second step instead:
+ *                             { code, onCodeChange(event), useRecovery,
+ *                               onToggleRecovery(), onCancel() }; onSubmit
+ *                             then submits the code
  */
-export default function LoginForm({
+export default function LoginForm(props) {
+  if (props.twoFactor) return <TwoFactorStep {...props} />;
+  return <PasswordStep {...props} />;
+}
+
+function TwoFactorStep({ twoFactor, onSubmit, loading = false, error = null, compact = false, idPrefix = 'login' }) {
+  const { code, onCodeChange, useRecovery, onToggleRecovery, onCancel } = twoFactor;
+  return (
+    <form onSubmit={onSubmit} className={cx('font-ui', compact ? 'space-y-3' : 'space-y-4')} aria-busy={loading || undefined}>
+      <p className="text-ui-sm text-specter-text-muted">
+        {useRecovery
+          ? 'Enter one of the recovery codes you saved when you turned on two-factor authentication. Each works once.'
+          : 'Enter the 6-digit code from your authenticator app.'}
+      </p>
+      <Input
+        label={useRecovery ? 'Recovery code' : 'Authentication code'}
+        id={`${idPrefix}-2fa-code`}
+        type="text"
+        value={code}
+        onChange={onCodeChange}
+        placeholder={useRecovery ? 'XXXX-XXXX-XXXX' : '123456'}
+        inputMode={useRecovery ? 'text' : 'numeric'}
+        autoComplete="one-time-code"
+        maxLength={useRecovery ? 20 : 7}
+        required
+        autoFocus
+      />
+      {error && <Alert variant="error">{error}</Alert>}
+      <Button type="submit" full disabled={loading || !String(code || '').trim()}>
+        {loading ? 'Checking…' : 'Verify'}
+      </Button>
+      <div className="flex items-center justify-between gap-3">
+        <TextLink onClick={onToggleRecovery} disabled={loading}>
+          {useRecovery ? 'Use an authenticator code' : 'Use a recovery code'}
+        </TextLink>
+        <TextLink onClick={onCancel} disabled={loading}>Back</TextLink>
+      </div>
+    </form>
+  );
+}
+
+function PasswordStep({
   email,
   password,
   onEmailChange,
@@ -32,6 +79,8 @@ export default function LoginForm({
   compact = false,
   onForgotPassword,
   onCreateAccount,
+  onResendVerification,
+  resendNote = null,
   autoFocus = true,
   idPrefix = 'login',
 }) {
@@ -70,7 +119,17 @@ export default function LoginForm({
         {!compact && forgotLink && <div className="text-right">{forgotLink}</div>}
       </div>
 
-      {error && <Alert variant="error">{error}</Alert>}
+      {error && (
+        <Alert variant="error">
+          {error}
+          {onResendVerification && (
+            <>
+              {' '}<TextLink onClick={onResendVerification} disabled={loading}>Resend email</TextLink>
+              {resendNote && <div className="mt-1 opacity-80">{resendNote}</div>}
+            </>
+          )}
+        </Alert>
+      )}
       {notice && <Alert variant="success">{notice}</Alert>}
 
       <Button type="submit" full disabled={loading}>

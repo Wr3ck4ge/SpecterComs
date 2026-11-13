@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { z } from 'zod';
 import { pool } from '../config/db.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
+import { recordWireCaps } from '../utils/wireCaps.js';
 
 // Auto-revoke devices nobody has (re-)registered in a long time, rather than
 // letting last_seen_at sit as an indefinitely-retained per-device activity
@@ -120,6 +121,10 @@ export const registerDevice = async (req: AuthRequest, res: Response) => {
         message: 'This device id is registered to another account — generate a new one and retry',
       });
     }
+    // S7: the wire formats this device can read (X-Specter-Wire-Caps; absent =
+    // an older client = 0). Best-effort and separate from the upsert above so
+    // registration never depends on migration 000086 having run yet.
+    await recordWireCaps(device_id, userId, req.headers?.['x-specter-wire-caps']);
     res.status(201).json({ ok: true });
   } catch (err) {
     console.error('registerDevice error:', err);

@@ -4,20 +4,37 @@ import crypto from 'crypto';
 import { pool } from '../config/db.js';
 import { publishEvent } from '../config/nats.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
+import { adultRegionRefusal } from '../utils/adultAccess.js'; // L11
 import { getChannelScope, canUseChannel, channelMemberUserIds } from '../utils/eventChannelAccess.js'; // EVMLS
+import { parseFrankInput, issueFrank } from '../utils/franking.js';
 
-const IMAGE_URL_MAX = 700_000; // ~512 KB base64
+// Owner decision 2026-11-12: no transmissions are stored on the server, and the
+// relay carries no plaintext attachments either. Old clients may still send
+// image_url: null (or omit it); anything else is refused.
+const ATTACHMENTS_NOT_SUPPORTED = {
+  message: 'Attachments are not supported',
+  code: 'ATTACHMENTS_NOT_SUPPORTED',
+};
+const noAttachment = z.unknown().optional();
+const hasAttachment = (v: unknown) => v !== undefined && v !== null;
+
+// 6400 (was 6000): room for the S7 franking envelope (~+110 chars of base64).
+export const ENCRYPTED_CONTENT_MAX = 6400;
 
 const sendMessageSchema = z.object({
-  encrypted_content: z.string().max(6000),
-  image_url: z.string()
-    .max(IMAGE_URL_MAX, 'Image too large (max 512 KB)')
-    .refine(val => {
-      try { new URL(val); return true; } catch { return false; }
-    }, 'Must be a valid URL or data URI')
-    .nullable()
-    .optional(),
+  encrypted_content: z.string().max(ENCRYPTED_CONTENT_MAX),
+  image_url: noAttachment,
+  // S7 franking: validated by parseFrankInput (32-byte commitment).
+  frank: z.unknown().optional(),
 });
+
+// A relayed frank as peers pass it on in legacy per-channel sync responses.
+const relayedFrankSchema = z.object({
+  v: z.number().int(),
+  c: z.string().max(64),
+  kid: z.string().max(32).optional(),
+  tag: z.string().max(64).optional(),
+}).optional();
 
 /**
  * POST /orgs/:orgId/channels/:chanId/messages
@@ -29,6 +46,7 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
 
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
 
+  if (hasAttachment(req.body?.image_url)) return res.status(400).json(ATTACHMENTS_NOT_SUPPORTED);
   const parsed = sendMessageSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -36,7 +54,9 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
       errors: parsed.error.errors.map(e => ({ field: e.path.join('.'), message: e.message })),
     });
   }
-  const { encrypted_content, image_url } = parsed.data;
+  const { encrypted_content } = parsed.data;
+  const frankIn = parseFrankInput(parsed.data.frank);
+  if (!frankIn.ok) return res.status(400).json({ message: frankIn.message, code: 'BAD_FRANK' });
 
   try {
     // Membership gate
@@ -53,6 +73,8 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
     if (!scope) {
       return res.status(404).json({ message: 'Channel not found' });
     }
+    const adultNo = await adultRegionRefusal(scope, req.ip); // L11
+    if (adultNo) return res.status(403).json(adultNo);
     // EVMLS: event channels are for their signed-up audience only
     // (utils/eventChannelAccess) — the same people who hold its MLS key.
     if (!(await canUseChannel(scope, userId))) {
@@ -66,6 +88,11 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
 
     const msg_id = crypto.randomUUID();
     const timestamp = new Date().toISOString();
+    // S7: the server's franking tag over (commitment, sender, channel, id,
+    // time) travels with the message; nothing is stored (utils/franking.ts).
+    const frank = frankIn.frank
+      ? issueFrank(frankIn.frank, { senderId: userId, conversationId: String(chanId), msgId: msg_id, timestamp })
+      : undefined;
 
     const relayPayload = {
       id: msg_id,
@@ -80,8 +107,9 @@ export const sendMessage = async (req: AuthRequest, res: Response) => {
       callsign: userRes.rows[0]?.callsign ?? null,
       global_tag: userRes.rows[0]?.global_tag ?? null,
       encrypted_content,
-      image_url: image_url ?? null,
+      image_url: null, // always null: kept only because the shared event contract / old clients expect the key
       timestamp,
+      ...(frank ? { frank } : {}),
     };
 
     // Fields at the top level for the client's SSE handlers (useEventStream
@@ -169,9 +197,10 @@ const syncResponseSchema = z.object({
     sender_id: z.string(),
     callsign: z.string().nullable().optional(),
     global_tag: z.string().nullable().optional(),
-    encrypted_content: z.string().max(6000),
-    image_url: z.string().max(IMAGE_URL_MAX).nullable().optional(),
+    encrypted_content: z.string().max(ENCRYPTED_CONTENT_MAX),
+    image_url: noAttachment,
     timestamp: z.string(),
+    frank: relayedFrankSchema,
   })).max(SYNC_MESSAGES_MAX),
 });
 
@@ -186,6 +215,9 @@ export const respondChannelSync = async (req: AuthRequest, res: Response) => {
   const { orgId, chanId } = req.params;
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
 
+  if (Array.isArray(req.body?.messages) && req.body.messages.some((m: any) => hasAttachment(m?.image_url))) {
+    return res.status(400).json(ATTACHMENTS_NOT_SUPPORTED);
+  }
   const parsed = syncResponseSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ message: 'Validation failed' });
 
@@ -216,7 +248,7 @@ export const respondChannelSync = async (req: AuthRequest, res: Response) => {
       channel_id: chanId,
       org_id: orgId,
       relayed_by: userId,
-      messages: parsed.data.messages,
+      messages: parsed.data.messages.map(({ image_url: _drop, ...m }) => m),
     });
 
     res.status(202).json({ ok: true });

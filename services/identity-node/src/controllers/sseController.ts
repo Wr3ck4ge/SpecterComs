@@ -7,8 +7,69 @@ import jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
 import { getJwtSecret } from '../config/jwtSecret.js';
 import { markStreamOpen, markStreamClosed } from '../utils/onlineUsers.js';
+import { getChannelScope, canUseChannel } from '../utils/eventChannelAccess.js'; // B5
 
 const sc = StringCodec();
+
+// ── B5: live-stream registry ────────────────────────────────────────────────
+// A user who loses access to a channel (kick, ban, demotion, a rank lowered or
+// deleted, a visibility raise — utils/audienceNarrowing) used to keep that
+// channel's specter.msg.channel.<id> subscription on every open stream until
+// they reconnected. Each open stream registers its revocation hooks here so
+// the narrowing path can drop them immediately, on every device. Nothing is
+// sent to the user (no event that could hint at who else is in the channel).
+
+/** One open SSE stream's revocation hooks. */
+export interface LiveStream {
+  /** Unsubscribe these channel subjects and keep them off until access is re-checked. */
+  revokeChannels(channelIds: string[]): void;
+  /** Drop the org's event subject and all of its channel subjects (kick / ban). */
+  revokeOrg(orgId: string): void;
+}
+
+const liveStreams = new Map<string, Set<LiveStream>>();
+
+/** Registers an open stream; returns its unregister function (idempotent). */
+export function registerLiveStream(userId: string, stream: LiveStream): () => void {
+  let set = liveStreams.get(userId);
+  if (!set) { set = new Set(); liveStreams.set(userId, set); }
+  set.add(stream);
+  return () => {
+    const s = liveStreams.get(userId);
+    if (!s) return;
+    s.delete(stream);
+    if (s.size === 0) liveStreams.delete(userId);
+  };
+}
+
+function eachStream(userId: string, fn: (s: LiveStream) => void): number {
+  const set = liveStreams.get(userId);
+  if (!set) return 0;
+  for (const s of [...set]) {
+    try { fn(s); } catch (err) { console.error('SSE: revoke failed', err); }
+  }
+  return set.size;
+}
+
+/**
+ * B5: drop `channelIds` from every open stream of `userId` (0, 1 or several
+ * devices). Returns how many streams were touched. Safe with no stream open.
+ */
+export function revokeChannelSubscriptions(userId: string, channelIds: Iterable<string>): number {
+  const ids = [...new Set(channelIds)];
+  if (ids.length === 0) return 0;
+  return eachStream(userId, (s) => s.revokeChannels(ids));
+}
+
+/** B5: drop an org (its event subject + every channel subject of it) from every open stream of `userId`. */
+export function revokeOrgSubscriptions(userId: string, orgId: string): number {
+  return eachStream(userId, (s) => s.revokeOrg(orgId));
+}
+
+/** Test hook: how many streams `userId` has registered. */
+export function liveStreamCount(userId: string): number {
+  return liveStreams.get(userId)?.size ?? 0;
+}
 
 /**
  * POST /events/ticket
@@ -64,8 +125,34 @@ export const eventStream = async (req: AuthRequest, res: Response) => {
   const uncount = () => { if (counted) { counted = false; markStreamClosed(userId); } };
   req.on('close', uncount); // early, so a failure below can't leak the count
 
-  // ── Determine which orgs the user belongs to ──────────────────────────────
+  // ── Per-stream subscription state (declared up front so B5 revocations
+  // that arrive while the stream is still being set up apply too) ─────────
   let orgIds: string[] = [];
+  const orgSubs = new Map<string, Subscription>();
+  // Channel message subjects: channelId → its subscription + org.
+  const chanSubs = new Map<string, { sub: Subscription; orgId: string }>();
+  // B5: channels revoked on this stream. syncChannelSubs only re-subscribes
+  // one after canUseChannel passes again (its broad query includes every
+  // event channel of the org, so it would otherwise re-add them).
+  const revoked = new Set<string>();
+  let closed = false;
+  const dropChannel = (id: string) => {
+    const entry = chanSubs.get(id);
+    if (entry) { entry.sub.unsubscribe(); chanSubs.delete(id); }
+  };
+  const revokeOrg = (orgId: string) => {
+    orgIds = orgIds.filter((o) => o !== orgId);
+    orgSubs.get(orgId)?.unsubscribe();
+    orgSubs.delete(orgId);
+    for (const [id, entry] of [...chanSubs]) if (entry.orgId === orgId) dropChannel(id);
+  };
+  const unregister = registerLiveStream(userId, {
+    revokeChannels: (ids) => { for (const id of ids) { revoked.add(id); dropChannel(id); } },
+    revokeOrg,
+  });
+  req.on('close', unregister);
+
+  // ── Determine which orgs the user belongs to ──────────────────────────────
   try {
     const result = await pool.query(
       'SELECT org_id FROM org_members WHERE user_id = $1',
@@ -91,8 +178,6 @@ export const eventStream = async (req: AuthRequest, res: Response) => {
   // until a decrypt failure happened to trigger a heal. OPTREE: re-synced on
   // every channel_created / event_launched / channel_deleted / operation_ended
   // org event that passes through this stream.
-  const chanSubs = new Map<string, Subscription>();
-  let closed = false;
   let syncing: Promise<void> | null = null;
   let resyncQueued = false;
   const syncChannelSubs = async (): Promise<void> => {
@@ -103,7 +188,7 @@ export const eventStream = async (req: AuthRequest, res: Response) => {
         const chanResult = await pool.query(
           // Rank-restricted org channels (visible_min_level) only for members
           // at/above the threshold, and the owner (utils/orgAuthority).
-          `SELECT c.id FROM channels c
+          `SELECT c.id, c.org_id FROM channels c
            JOIN org_members om ON om.org_id = c.org_id
            JOIN organizations o ON o.id = c.org_id
            LEFT JOIN org_roles r ON r.id = om.role_id
@@ -113,15 +198,32 @@ export const eventStream = async (req: AuthRequest, res: Response) => {
           [userId]
         );
         if (closed) return;
-        const want = new Set<string>(chanResult.rows.map((r: any) => r.id));
-        for (const id of want) {
-          if (chanSubs.has(id)) continue;
+        const inOrgs = new Set(orgIds);
+        const want = new Map<string, string>();
+        for (const r of chanResult.rows as { id: string; org_id: string }[]) {
+          if (inOrgs.has(r.org_id)) want.set(r.id, r.org_id);
+        }
+        // B5: a revoked channel comes back only once the shared rule allows it again.
+        const regained = new Set<string>();
+        for (const [id, orgId] of want) {
+          if (!revoked.has(id)) continue;
+          try {
+            const scope = await getChannelScope(id, orgId);
+            if (scope && (await canUseChannel(scope, userId))) regained.add(id);
+          } catch (err) {
+            console.error('SSE: access re-check failed', err);
+          }
+        }
+        if (closed) return;
+        for (const id of regained) revoked.delete(id);
+        for (const [id, orgId] of want) {
+          if (chanSubs.has(id) || revoked.has(id)) continue;
           const chanSub = nc.subscribe(`specter.msg.channel.${id}`);
-          chanSubs.set(id, chanSub);
+          chanSubs.set(id, { sub: chanSub, orgId });
           forward(chanSub);
         }
-        for (const [id, sub] of chanSubs) {
-          if (!want.has(id)) { sub.unsubscribe(); chanSubs.delete(id); }
+        for (const id of [...chanSubs.keys()]) {
+          if (!want.has(id) || revoked.has(id)) dropChannel(id);
         }
       } catch (err) {
         console.error('SSE: failed to subscribe to channel message subjects', err);
@@ -157,9 +259,12 @@ export const eventStream = async (req: AuthRequest, res: Response) => {
 
     // Org-scoped events
     for (const orgId of orgIds) {
+      if (closed) break;
       const orgSub = nc.subscribe(`specter.event.org.${orgId}`);
-      subs.push(orgSub);
+      orgSubs.set(orgId, orgSub);
       forward(orgSub, (payload) => {
+        // B5: kicked / banned / left — this stream stops following the org now.
+        if (payload?.type === 'member_removed' && payload.userId === userId) { revokeOrg(orgId); return; }
         if (CHANNEL_SET_CHANGES.has(payload?.type)) void syncChannelSubs();
       });
     }
@@ -191,7 +296,9 @@ export const eventStream = async (req: AuthRequest, res: Response) => {
     closed = true;
     clearInterval(keepalive);
     for (const sub of subs) sub.unsubscribe();
-    for (const sub of chanSubs.values()) sub.unsubscribe();
+    for (const sub of orgSubs.values()) sub.unsubscribe();
+    orgSubs.clear();
+    for (const { sub } of chanSubs.values()) sub.unsubscribe();
     chanSubs.clear();
   });
 };

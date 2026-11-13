@@ -15,7 +15,7 @@ import {
   removeRoleFromFrequencies, toggleLeadershipRole,
   // FREQPRIO / FREQWL
   FREQUENCY_DEFAULT_PRIORITY, addFrequencyMembers, addFrequencyRoleWithHolders, frequencyMembers,
-  frequencyRoleHolderCandidates, removeFrequencyMember, setFrequencyMemberPriority,
+  removeFrequencyMember, setFrequencyMemberPriority,
 } from '../../utils/eventGroups';
 import { addShipToComposition, useShipCrewRoles, useShipSearch } from '../../utils/plannerHooks';
 import StripGroupTree from './StripGroupTree';
@@ -537,7 +537,6 @@ export function CommsPage({ groups, frequencies, setFrequencies, members }) {
       {frequencies.map((freq, fi) => {
         const { allRoles, authorized, available } = describeFrequency(freq, groups, members);
         const netMembers = frequencyMembers(freq, groups, members); // FREQWL: the whitelist
-        const holderCandidates = frequencyRoleHolderCandidates(freq, groups, members);
         const addable = (members || []).filter((m) => m?.user_id && !netMembers.some((n) => n.user_id === m.user_id))
           .sort((a, b) => String(a.callsign).localeCompare(String(b.callsign)));
         const isLead = fi === leadIdx; // LEADFREQ
@@ -566,7 +565,7 @@ export function CommsPage({ groups, frequencies, setFrequencies, members }) {
                   Add {missingLeaders} leader role{missingLeaders === 1 ? '' : 's'}
                 </Button>
               )}
-              {authorized.length === 0 && <p className="text-ui-xs text-specter-text-subtle">No roles on it. Roles are a shortcut for adding their holders.</p>}
+              {authorized.length === 0 && <p className="text-ui-xs text-specter-text-subtle">No roles on it. Everyone who signs up to a role on it joins the net automatically.</p>}
               <div className="flex flex-wrap gap-1">
                 {authorized.map(({ gi, ri, g, r }) => (
                   <Chip key={`${gi}-${ri}`} tone="green" selected title="Remove this role"
@@ -599,26 +598,24 @@ export function CommsPage({ groups, frequencies, setFrequencies, members }) {
                 <ul className="space-y-1">
                   {netMembers.map((m) => (
                     <li key={m.user_id} className="flex items-center justify-between gap-2">
-                      <span className="min-w-0 truncate text-ui-xs text-specter-primary-neon">{m.callsign}</span>
+                      <span className="min-w-0 truncate text-ui-xs text-specter-primary-neon">
+                        {m.callsign}
+                        {m.via_role && <span className="ml-1 text-specter-text-subtle" title="On this net through their role. Remove the role to take them off.">· via role</span>}
+                      </span>
                       <div className="flex items-center gap-0.5 shrink-0" role="radiogroup" aria-label={`${m.callsign} priority on ${freq.name}`}>
                         {[1, 2, 3, 4, 5].map((p) => (
                           <Chip key={p} selected={m.priority === p} tone={p >= 4 ? 'amber' : 'cyan'}
                             title={`Priority ${p}: ${PRIORITY_LABELS[p]}${p === FREQUENCY_DEFAULT_PRIORITY ? ' (default)' : ''}`} className="!px-1.5"
                             onClick={() => setFrequencies((prev) => setFrequencyMemberPriority(prev, fi, m.user_id, p))}>{p}</Chip>
                         ))}
-                        <IconButton size="sm" variant="danger" icon={<X size={12} />} label={`Remove ${m.callsign} from ${freq.name}`}
-                          onClick={() => setFrequencies((prev) => removeFrequencyMember(prev, fi, m.user_id))} />
+                        {!m.via_role && (
+                          <IconButton size="sm" variant="danger" icon={<X size={12} />} label={`Remove ${m.callsign} from ${freq.name}`}
+                            onClick={() => setFrequencies((prev) => removeFrequencyMember(prev, fi, m.user_id))} />
+                        )}
                       </div>
                     </li>
                   ))}
                 </ul>
-                {holderCandidates.length > 0 && (
-                  <Button size="sm" variant="secondary" icon={<Plus size={14} />}
-                    title={holderCandidates.map((c) => c.callsign).join(', ')}
-                    onClick={() => setFrequencies((prev) => addFrequencyMembers(prev, fi, holderCandidates.map((c) => c.user_id)))}>
-                    Add {holderCandidates.length} role holder{holderCandidates.length === 1 ? '' : 's'}
-                  </Button>
-                )}
                 {addable.length > 0 && (
                   <select className={inputClass} value="" aria-label={`Add a member to ${freq.name}`}
                     onChange={(e) => { const uid = e.target.value; if (uid) setFrequencies((prev) => addFrequencyMembers(prev, fi, [uid])); }}>
@@ -685,7 +682,7 @@ export function ReviewPage({ event, groups, frequencies, onDelete }) {
     ['Access', (event.access_mode || 'open') === 'open' ? 'Anyone can sign up' : 'Planners assign'],
     ['Groups', `${groups.length} in ${tiers} tier${tiers === 1 ? '' : 's'}`],
     ['Roles', `${roles.length} · ${slots} sign-up slot${slots === 1 ? '' : 's'}`],
-    ['Ships', ships ? `${ships}` : '—'],
+    ...(event.game === 'star_citizen' ? [['Ships', ships ? `${ships}` : '—']] : []), // SCSHIPS
     ['Frequencies', frequencies.length ? frequencies.map((f) => f.name).join(', ') : '—'],
     ['Commander', commander ? `${commander.group} › ${commander.name || 'Unnamed'}` : '—'],
   ];

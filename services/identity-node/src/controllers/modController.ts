@@ -7,6 +7,7 @@ import { getRequesterInfo } from './roleController.js';
 import { channelPresence } from './channelController.js';
 import { getOrgAuthority, has, outranks, canViewRoster, canSeeOrgChannel, memberStatus, ORG_PERMISSION_KEYS } from '../utils/orgAuthority.js';
 import { isUserOnline } from '../utils/onlineUsers.js';
+import { watchAudience } from '../utils/audienceNarrowing.js'; // B3
 
 // permissions is stored as a JSONB object with named boolean flags (see
 // ADMIN_PERMISSIONS/OFFICER_PERMISSIONS/MEMBER_PERMISSIONS in orgController.ts),
@@ -71,6 +72,8 @@ export const banMember = async (req: AuthRequest, res: Response) => {
         if (targetUserId === ownerId) return res.status(403).json({ message: 'Cannot ban the organization owner' });
         if (await outranksModerator(orgId, adminId, targetUserId)) return res.status(403).json({ message: 'Forbidden: That member outranks you' });
 
+        // B3: every channel they were on loses them → re-key those groups (after COMMIT).
+        const narrowing = await watchAudience(orgId, { includeOpen: true });
         await client.query('BEGIN');
 
         // Delete from org_members
@@ -87,6 +90,7 @@ export const banMember = async (req: AuthRequest, res: Response) => {
         );
 
         await client.query('COMMIT');
+        await narrowing();
 
         // Publish NATS audit event
         await publishEvent('specter.moderation.ban', {
@@ -134,9 +138,12 @@ export const kickMember = async (req: AuthRequest, res: Response) => {
         if (targetUserId === ownerId) return res.status(403).json({ message: 'Cannot kick the organization owner' });
         if (await outranksModerator(orgId, adminId, targetUserId)) return res.status(403).json({ message: 'Forbidden: That member outranks you' });
 
+        // B3: every channel they were on loses them → re-key those groups.
+        const narrowing = await watchAudience(orgId, { includeOpen: true });
         // Delete from org_members (removes from server entirely)
         const result = await pool.query(`DELETE FROM org_members WHERE org_id = $1 AND user_id = $2 RETURNING *`, [orgId, targetUserId]);
         if (result.rows.length === 0) return res.status(404).json({ message: 'Member not found' });
+        await narrowing();
 
         // Also remove any channel subscriptions so voice is dropped immediately
         await pool.query(`DELETE FROM channel_subscriptions WHERE user_id = $1 AND org_id = $2`, [targetUserId, orgId]);
@@ -429,10 +436,13 @@ export const assignMemberRole = async (req: AuthRequest, res: Response) => {
             }
         }
 
+        // B3: a demotion can drop them from rank-restricted / op channels → re-key those.
+        const narrowing = await watchAudience(orgId);
         await pool.query(
             `UPDATE org_members SET role_id = $1 WHERE org_id = $2 AND user_id = $3`,
             [role_id || null, orgId, targetUserId]
         );
+        await narrowing();
 
         // SSE: notify org so member list refreshes with new role
         await publishEvent(`specter.event.org.${orgId}`, { type: 'member_updated', userId: targetUserId });

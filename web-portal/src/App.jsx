@@ -9,12 +9,14 @@ import TitleBar from './components/TitleBar';
 import UpdateBanner from './components/UpdateBanner';
 import AuthLayout, { BrandMark, TextLink } from './components/auth/AuthLayout';
 import LoginForm from './components/auth/LoginForm';
+import useTwoFactorLogin from './auth/useTwoFactorLogin';
 import ForgotPasswordForm from './components/auth/ForgotPasswordForm';
 import { Alert, Button, Card, Input } from './components/ui';
 import { cx, focusRing } from './components/ui/styles';
 import { invoke } from '@tauri-apps/api/core';
 import { saveChannelMessages, setMessageStoreUser } from './messageStore';
 import { countCachedMessages } from './engine/unreadStore';
+import { openFranked, SCOPE_CHANNEL } from './engine/frank';
 
 // Drains whatever the Rust background sync task (tray_light mode) collected
 // into msgcache.rs while the window was closed, into messageStore.js's
@@ -34,7 +36,14 @@ async function drainMessageCache(userId) {
     const channelIds = Object.keys(byChannel || {});
     if (channelIds.length === 0) return;
     for (const channelId of channelIds) {
-      await saveChannelMessages(channelId, byChannel[channelId]);
+      // S7: background_sync.rs caches a v2 envelope as-is (plus the relayed
+      // frank); open and verify it here like the live path does.
+      const rows = await Promise.all((byChannel[channelId] || []).map(async (r) => (
+        typeof r?.plaintext === 'string'
+          ? { ...r, ...(await openFranked(r.plaintext, { frank: r.frank, scope: SCOPE_CHANNEL, conversationId: channelId, senderId: r.sender_id }).catch(() => ({}))) }
+          : r
+      )));
+      await saveChannelMessages(channelId, rows);
     }
     await invoke('msgcache_clear_all');
     // P2A: what arrived while the engine was closed counts as unread in the
@@ -72,10 +81,20 @@ function AuthScreen({ onLogin, compact = false, onCreateAccount, onForgotPasswor
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [unverified, setUnverified] = useState(false); // login hit EMAIL_NOT_VERIFIED
+  const [resendNote, setResendNote] = useState(null);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const switchMode = (m) => { setMode(m); setError(null); setSuccess(null); };
+  const tfa = useTwoFactorLogin(); // L3
+  const switchMode = (m) => { setMode(m); setError(null); setSuccess(null); setUnverified(false); setResendNote(null); tfa.cancel(); };
+
+  const handleResend = async () => {
+    setLoading(true);
+    const { error } = await session.resendVerification({ email: form.email, password: form.password });
+    setLoading(false);
+    setResendNote(error || 'If that matches an account awaiting verification, a new email is on its way.');
+  };
 
   const handleForgotSubmit = async (e) => {
     e.preventDefault();
@@ -92,6 +111,8 @@ function AuthScreen({ onLogin, compact = false, onCreateAccount, onForgotPasswor
     e.preventDefault();
     setError(null);
     setSuccess(null);
+    setUnverified(false);
+    setResendNote(null);
     setLoading(true);
 
     if (mode === 'register') {
@@ -106,13 +127,23 @@ function AuthScreen({ onLogin, compact = false, onCreateAccount, onForgotPasswor
         }
         return setError(error);
       }
-      setSuccess(`Operator ${data.user.callsign} registered. Proceed to login.`);
+      setSuccess(data.verification_required
+        ? `Operator ${data.user.callsign} registered. ${session.verifyInboxMessage(data.masked_email)}`
+        : `Operator ${data.user.callsign} registered. Proceed to login.`);
       setMode('login');
       setForm({ callsign: '', global_tag: '', email: form.email, password: '' });
-    } else {
-      const { user, error } = await session.login({ email: form.email, password: form.password });
+    } else if (tfa.active) {
+      // L3: second step (authenticator or recovery code).
+      const { user, error } = await tfa.submit();
       setLoading(false);
       if (error) return setError(error);
+      onLogin(user);
+    } else {
+      const { user, error, code, masked_email, twoFactor } = await session.login({ email: form.email, password: form.password });
+      setLoading(false);
+      if (code === 'EMAIL_NOT_VERIFIED') { setUnverified(true); return setError(session.verifyInboxMessage(masked_email)); }
+      if (error) return setError(error);
+      if (twoFactor) { setForm((f) => ({ ...f, password: '' })); return tfa.begin(twoFactor.challenge); }
       onLogin(user);
     }
   };
@@ -174,9 +205,12 @@ function AuthScreen({ onLogin, compact = false, onCreateAccount, onForgotPasswor
         loading={loading}
         error={error}
         notice={success}
+        onResendVerification={unverified ? handleResend : undefined}
+        resendNote={resendNote}
         compact={compact}
         onForgotPassword={goForgot}
         onCreateAccount={compact ? goRegister : undefined}
+        twoFactor={tfa.twoFactor && { ...tfa.twoFactor, onCancel: () => { tfa.cancel(); setError(null); } }}
       />
     );
   }

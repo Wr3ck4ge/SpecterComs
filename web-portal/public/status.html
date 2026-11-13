@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SpecterComs Status</title>
+<style>
+  :root { --bg:#0b0d10; --fg:#e6e8eb; --muted:#8b929a; --card:#14181d; --ok:#3ecf8e; --warn:#f5a524; --bad:#f0524f; --info:#5aa9ff; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f6f7f9; --fg:#14181d; --muted:#5b636c; --card:#fff; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:20px; margin:0 0 20px; }
+  .card { background:var(--card); border-radius:10px; padding:16px; margin-bottom:12px; }
+  .state { font-size:22px; font-weight:600; display:flex; align-items:center; gap:10px; }
+  .dot { width:12px; height:12px; border-radius:50%; background:var(--muted); flex:none; }
+  .ok .dot { background:var(--ok); } .degraded .dot { background:var(--warn); }
+  .outage .dot { background:var(--bad); } .maintenance .dot { background:var(--info); }
+  .row { display:flex; justify-content:space-between; padding:6px 0; }
+  .muted { color:var(--muted); font-size:14px; }
+  .notice { border-left:4px solid var(--info); }
+  .notice.degraded { border-color:var(--warn); } .notice.outage { border-color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>SpecterComs Status</h1>
+  <div id="overall" class="card"><div class="state"><span class="dot"></span><span id="label">Checking...</span></div></div>
+  <div id="notice" class="card notice" hidden></div>
+  <div id="components" class="card" hidden></div>
+  <p class="muted" id="foot"></p>
+</main>
+<script>
+(function () {
+  var API = 'https://spectercoms.net/api/status';
+  var LABELS = { ok: 'All systems operational', degraded: 'Degraded service', outage: 'Service outage', maintenance: 'Scheduled maintenance' };
+  var NAMES = { database: 'Accounts and data', messaging: 'Messaging', voice_video: 'Voice and video' };
+  var CSTATE = { ok: 'Operational', degraded: 'Degraded', outage: 'Down' };
+  function $(id) { return document.getElementById(id); }
+  function text(el, t) { el.textContent = t; }
+  function render(s) {
+    var o = $('overall'); o.className = 'card ' + s.state;
+    text($('label'), LABELS[s.state] || 'Unknown');
+    var n = $('notice');
+    if (s.notice) {
+      n.hidden = false; n.className = 'card notice ' + s.notice.severity; n.textContent = '';
+      var m = document.createElement('div'); text(m, s.notice.message); n.appendChild(m);
+      if (s.notice.eta) { var e = document.createElement('div'); e.className = 'muted'; text(e, 'Expected back by ' + new Date(s.notice.eta).toLocaleString()); n.appendChild(e); }
+    } else n.hidden = true;
+    var c = $('components'); c.textContent = ''; c.hidden = false;
+    Object.keys(s.components || {}).forEach(function (k) {
+      var r = document.createElement('div'); r.className = 'row';
+      var a = document.createElement('span'); text(a, NAMES[k] || k);
+      var b = document.createElement('span'); text(b, CSTATE[s.components[k]] || s.components[k]);
+      r.appendChild(a); r.appendChild(b); c.appendChild(r);
+    });
+    text($('foot'), 'Last checked ' + new Date(s.checkedAt).toLocaleTimeString() + '. This page refreshes every minute.');
+  }
+  function load() {
+    fetch(API, { cache: 'no-store' }).then(function (r) { if (!r.ok) throw 0; return r.json(); }).then(render).catch(function () {
+      $('overall').className = 'card outage'; text($('label'), 'Cannot reach SpecterComs');
+      text($('foot'), 'The status service did not answer. Check again in a minute.');
+    });
+  }
+  load(); setInterval(load, 60000);
+})();
+</script>
+</body>
+</html>

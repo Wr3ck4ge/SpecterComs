@@ -4,6 +4,7 @@ import { AuthRequest } from '../middleware/authMiddleware.js';
 import { publishEvent } from '../config/nats.js';
 import { TEXT_LIMITS, tooLong } from '../utils/validation.js';
 import { getOrgAuthority, ungrantablePermissions } from '../utils/orgAuthority.js';
+import { watchAudience } from '../utils/audienceNarrowing.js'; // B3
 
 interface RequesterInfo {
     isOwner: boolean;
@@ -151,6 +152,12 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
             WHERE id = $4 AND org_id = $5
             RETURNING *
         `;
+        // B3: a lower level (rank-restricted channels) or a dropped
+        // can_create_events / can_manage_channels (op organisers) can remove
+        // its holders from channels → re-key those.
+        const narrowing = (typeof level === 'number' && level < targetLevel) || permissions != null
+            ? await watchAudience(orgId)
+            : null;
         const result = await pool.query(updateQuery, [
             name,
             permissions != null ? JSON.stringify(permissions) : null,
@@ -158,6 +165,7 @@ export const updateRole = async (req: AuthRequest, res: Response) => {
             roleId,
             orgId,
         ]);
+        await narrowing?.();
 
         if (result.rows.length === 0) {
             return res.status(404).json({ message: 'Role not found' });
@@ -201,12 +209,14 @@ export const deleteRole = async (req: AuthRequest, res: Response) => {
 
         // Members holding the rank fall back to no rank (and invites / the
         // join default stop pointing at it), instead of the foreign keys
-        // refusing the delete.
+        // refusing the delete. B3: that can drop them from channels → re-key.
+        const narrowing = await watchAudience(orgId);
         await pool.query(`UPDATE org_members SET role_id = NULL WHERE org_id = $1 AND role_id = $2`, [orgId, roleId]);
         await pool.query(`UPDATE org_invites SET assigned_role_id = NULL WHERE org_id = $1 AND assigned_role_id = $2`, [orgId, roleId]);
         await pool.query(`UPDATE organizations SET default_role_id = NULL WHERE id = $1 AND default_role_id = $2`, [orgId, roleId]);
         const deleteQuery = `DELETE FROM org_roles WHERE id = $1 AND org_id = $2 RETURNING id`;
         const result = await pool.query(deleteQuery, [roleId, orgId]);
+        await narrowing();
 
         if (result.rows.length === 0) {
             return res.status(404).json({ message: 'Role not found' });

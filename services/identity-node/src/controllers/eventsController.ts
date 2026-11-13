@@ -1513,14 +1513,21 @@ export const launchEvent = async (req: AuthRequest, res: Response) => {
  * role's group, so every possible cascade recipient is already covered here.
  */
 export const getEventParticipants = async (req: AuthRequest, res: Response) => {
-  const { eventId } = req.params;
+  const { orgId, eventId } = req.params;
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ message: 'Unauthorized' });
 
   try {
+    // B6: same gate as the event group's commit / catch-up routes
+    // (mlsGroupController resolveEventGroup): the event must belong to this
+    // org and the caller must be in its audience. It used to answer any
+    // signed-in user, for any event id.
+    const eventCheck = await pool.query('SELECT 1 FROM events WHERE id = $1 AND org_id = $2', [eventId, orgId]);
+    if (eventCheck.rows.length === 0) return res.status(404).json({ message: 'Event not found' });
     // EVMLS: accepted participants + the event's staff — the same audience
     // submitEventGroupCommit accepts commits/welcomes for.
     const ids = await eventCascadeMemberUserIds(String(eventId));
+    if (!ids.includes(userId)) return res.status(403).json({ message: 'Not a participant of this event' });
     const result = ids.length
       ? await pool.query(`SELECT id AS user_id, callsign FROM users WHERE id = ANY($1::uuid[])`, [ids])
       : { rows: [] as any[] };

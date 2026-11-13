@@ -181,6 +181,10 @@ export const getBillingStatus = async (req: AuthRequest, res: Response) => {
         is_contributor:   viewer.isContributor,
       },
       payments: paymentsInfo(orgId),
+      // L9: the strip shows "Wallet & usage" when this is true, so it can be
+      // turned on from the server without a client rebuild. Read-only while
+      // payments are off (the pane shows "Funding not available yet").
+      ui_visible: process.env.BILLING_UI_VISIBLE === 'true',
       plans: plansInfo(),
       enforcement_active: billingEnforced(orgId),
       // Visible to every member: members are the ones who can top the pool

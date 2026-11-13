@@ -1,9 +1,13 @@
 //! tray_activity.rs — the tray icon shows whether you're in a voice channel.
 //!
-//! idle    the normal icon, tooltip "SpecterComs"
-//! active  the icon with a green status dot (bottom-right), tooltip
-//!         "SpecterComs — in <channel> (<server>)"
-//! muted   the same with a red dot, tooltip "… — muted"
+//! idle    tray-idle,            tooltip "SpecterComs"
+//! active  tray-in-voice,        tooltip "SpecterComs — in <channel> (<server>)"
+//! muted   tray-mic-muted,       tooltip "… — in <channel>, muted"
+//! live    tray-streaming-live,  tooltip "… — in <channel>, sharing your screen"
+//!         (+ ", muted" when that applies too)
+//!
+//! Precedence for the icon: Live > Muted > Active > Idle. The tooltip lists
+//! every state that applies ("in Alpha, sharing your screen, muted").
 //!
 //! The engine (WarRoom in the hidden main window — the only place that knows
 //! for sure whether voice is up) calls `set_tray_activity` whenever that
@@ -18,29 +22,37 @@
 //! the meantime, so a voice reconnect (active → idle → active within a second)
 //! never makes the icon flicker. Resets (logout, engine gone) apply at once.
 //!
-//! The dotted variants are drawn at runtime from the app's own icon (the same
-//! image the tray is built with), at whatever size that is, so there are no
-//! extra assets to keep in sync with the logo and the dot scales with the
-//! icon Windows downsamples for the tray.
+//! BRAND: the icons are the brand pack's tray set (src-tauri/icons/tray/),
+//! decoded at compile time by `include_image!` (the same codegen that embeds
+//! the default window icon). 32px up to 150% display scaling, 64px above;
+//! Windows downsamples to its tray size.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use tauri::image::Image;
-use tauri::{AppHandle, Manager};
+use tauri::{include_image, AppHandle, Manager};
 
 use crate::lock_ignore_poison;
 
 pub const TRAY_ID: &str = "specter-tray";
 pub const BASE_TOOLTIP: &str = "SpecterComs";
 const DEBOUNCE: Duration = Duration::from_millis(600);
-/// Windows tray tooltips are capped at 128 UTF-16 units; keep the label short.
-const MAX_LABEL_CHARS: usize = 90;
+/// Windows tray tooltips are capped at 128 UTF-16 units; keep the label short
+/// (it now shares the tip with ", sharing your screen, muted").
+const MAX_LABEL_CHARS: usize = 70;
+/// Above this display scale the 64px icons are used.
+const HIDPI_SCALE: f64 = 1.5;
 
-const DOT_ACTIVE: [u8; 3] = [0x22, 0xc5, 0x5e]; // green-500
-const DOT_MUTED: [u8; 3] = [0xef, 0x44, 0x44]; // red-500
-const DOT_RING: [u8; 3] = [0x0b, 0x1d, 0x2e]; // the strip's panel colour
+const IDLE_32: Image<'static> = include_image!("icons/tray/tray-idle-32.png");
+const IDLE_64: Image<'static> = include_image!("icons/tray/tray-idle-64.png");
+const VOICE_32: Image<'static> = include_image!("icons/tray/tray-in-voice-32.png");
+const VOICE_64: Image<'static> = include_image!("icons/tray/tray-in-voice-64.png");
+const MUTED_32: Image<'static> = include_image!("icons/tray/tray-mic-muted-32.png");
+const MUTED_64: Image<'static> = include_image!("icons/tray/tray-mic-muted-64.png");
+const LIVE_32: Image<'static> = include_image!("icons/tray/tray-streaming-live-32.png");
+const LIVE_64: Image<'static> = include_image!("icons/tray/tray-streaming-live-64.png");
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -48,33 +60,100 @@ pub enum Activity {
     Idle,
     Active,
     Muted,
+    /// Sharing the screen (in voice).
+    Live,
+}
+
+/// Everything the tray shows about voice. `activity()` picks the icon.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TrayFlags {
+    pub in_voice: bool,
+    pub muted: bool,
+    pub sharing: bool,
+}
+
+impl TrayFlags {
+    /// From the engine's request: `state` is the engine's own pick; the
+    /// explicit flags win over what `state` alone implies. Muted / sharing
+    /// never apply outside voice.
+    pub fn from_request(state: Activity, muted: Option<bool>, sharing: Option<bool>) -> Self {
+        let in_voice = state != Activity::Idle;
+        Self {
+            in_voice,
+            muted: in_voice && muted.unwrap_or(state == Activity::Muted),
+            sharing: in_voice && sharing.unwrap_or(state == Activity::Live),
+        }
+    }
+
+    /// Precedence: Live > Muted > Active > Idle. Pure.
+    pub fn activity(self) -> Activity {
+        if !self.in_voice {
+            Activity::Idle
+        } else if self.sharing {
+            Activity::Live
+        } else if self.muted {
+            Activity::Muted
+        } else {
+            Activity::Active
+        }
+    }
 }
 
 #[derive(Default)]
 pub struct TrayActivityState {
     generation: AtomicU64,
     /// What the tray currently shows (None = never changed = idle).
-    applied: Mutex<Option<(Activity, String)>>,
-    /// The tray's base icon, RGBA + size (captured when the tray is built).
-    base: Mutex<Option<(Vec<u8>, u32, u32)>>,
+    applied: Mutex<Option<(TrayFlags, String)>>,
+    /// The display scale the tray was built at (picks 32 vs 64px icons).
+    scale: Mutex<Option<f64>>,
 }
 
-/// lib.rs setup: remember the icon the tray was built with.
-pub fn init(app: &AppHandle, icon: &Image<'_>) {
-    let st = app.state::<TrayActivityState>();
-    *lock_ignore_poison(&st.base) = Some((icon.rgba().to_vec(), icon.width(), icon.height()));
+/// The tray icon for a state at a display scale.
+pub fn icon_for(activity: Activity, scale: f64) -> Image<'static> {
+    let hi = scale > HIDPI_SCALE;
+    match (activity, hi) {
+        (Activity::Idle, false) => IDLE_32,
+        (Activity::Idle, true) => IDLE_64,
+        (Activity::Active, false) => VOICE_32,
+        (Activity::Active, true) => VOICE_64,
+        (Activity::Muted, false) => MUTED_32,
+        (Activity::Muted, true) => MUTED_64,
+        (Activity::Live, false) => LIVE_32,
+        (Activity::Live, true) => LIVE_64,
+    }
+}
+
+/// lib.rs setup: remember the display scale; returns the idle icon to build
+/// the tray with.
+pub fn init(app: &AppHandle) -> Image<'static> {
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    *lock_ignore_poison(&app.state::<TrayActivityState>().scale) = Some(scale);
+    icon_for(Activity::Idle, scale)
 }
 
 /// The tooltip for a state. Pure.
-pub fn tooltip_for(activity: Activity, label: &str) -> String {
-    let label = clean_label(label);
-    match (activity, label.is_empty()) {
-        (Activity::Idle, _) => BASE_TOOLTIP.to_string(),
-        (Activity::Active, true) => format!("{BASE_TOOLTIP} — in voice"),
-        (Activity::Active, false) => format!("{BASE_TOOLTIP} — in {label}"),
-        (Activity::Muted, true) => format!("{BASE_TOOLTIP} — in voice, muted"),
-        (Activity::Muted, false) => format!("{BASE_TOOLTIP} — in {label}, muted"),
+pub fn tooltip_for(flags: TrayFlags, label: &str) -> String {
+    if !flags.in_voice {
+        return BASE_TOOLTIP.to_string();
     }
+    let label = clean_label(label);
+    let mut t = if label.is_empty() {
+        format!("{BASE_TOOLTIP} — in voice")
+    } else {
+        format!("{BASE_TOOLTIP} — in {label}")
+    };
+    if flags.sharing {
+        t.push_str(", sharing your screen");
+    }
+    if flags.muted {
+        t.push_str(", muted");
+    }
+    t
 }
 
 /// Control characters out, whitespace collapsed, capped with an ellipsis.
@@ -94,85 +173,32 @@ fn clean_label(label: &str) -> String {
     }
 }
 
-/// The base icon with a status dot in its bottom-right corner: a filled
-/// circle ~42% of the icon wide with a dark ring, anti-aliased, composited
-/// over the source pixels. Pure (unit-tested below).
-pub fn badge_rgba(rgba: &[u8], w: u32, h: u32, color: [u8; 3]) -> Vec<u8> {
-    let mut out = rgba.to_vec();
-    if w == 0 || h == 0 || rgba.len() < (w * h * 4) as usize {
-        return out;
-    }
-    let size = w.min(h) as f64;
-    let r = (size * 0.21).max(1.5);
-    let ring = (size * 0.06).max(1.0);
-    let cx = w as f64 - r - ring;
-    let cy = h as f64 - r - ring;
-    let reach = r + ring + 1.0;
-    let x0 = (cx - reach).floor().max(0.0) as u32;
-    let y0 = (cy - reach).floor().max(0.0) as u32;
-    for y in y0..h {
-        for x in x0..w {
-            let d = ((x as f64 + 0.5 - cx).powi(2) + (y as f64 + 0.5 - cy).powi(2)).sqrt();
-            let outer = (r + ring + 0.5 - d).clamp(0.0, 1.0);
-            if outer <= 0.0 {
-                continue;
-            }
-            let inner = (r + 0.5 - d).clamp(0.0, 1.0);
-            let i = ((y * w + x) * 4) as usize;
-            // Ring first, then the dot over it.
-            blend(&mut out[i..i + 4], DOT_RING, outer);
-            blend(&mut out[i..i + 4], color, inner);
-        }
-    }
-    out
-}
-
-fn blend(px: &mut [u8], color: [u8; 3], a: f64) {
-    if a <= 0.0 {
-        return;
-    }
-    let src_a = px[3] as f64 / 255.0;
-    let out_a = a + src_a * (1.0 - a);
-    for c in 0..3 {
-        let v = (color[c] as f64 * a + px[c] as f64 * src_a * (1.0 - a)) / out_a.max(1e-6);
-        px[c] = v.round().clamp(0.0, 255.0) as u8;
-    }
-    px[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
-}
-
-fn apply(app: &AppHandle, activity: Activity, label: &str) {
+fn apply(app: &AppHandle, flags: TrayFlags, label: &str) {
     let st = app.state::<TrayActivityState>();
-    let key = (activity, if activity == Activity::Idle { String::new() } else { clean_label(label) });
+    let key = (flags, if flags.in_voice { clean_label(label) } else { String::new() });
     {
         let applied = lock_ignore_poison(&st.applied);
-        let current = applied.clone().unwrap_or((Activity::Idle, String::new()));
+        let current = applied.clone().unwrap_or((TrayFlags::default(), String::new()));
         if current == key {
             return;
         }
     }
     let Some(tray) = app.tray_by_id(TRAY_ID) else { return };
-    let base = lock_ignore_poison(&st.base).clone();
-    if let Some((rgba, w, h)) = base {
-        let pixels = match activity {
-            Activity::Idle => rgba,
-            Activity::Active => badge_rgba(&rgba, w, h, DOT_ACTIVE),
-            Activity::Muted => badge_rgba(&rgba, w, h, DOT_MUTED),
-        };
-        let _ = tray.set_icon(Some(Image::new_owned(pixels, w, h)));
-    }
-    let _ = tray.set_tooltip(Some(tooltip_for(activity, label)));
+    let scale = lock_ignore_poison(&st.scale).unwrap_or(1.0);
+    let _ = tray.set_icon(Some(icon_for(flags.activity(), scale)));
+    let _ = tray.set_tooltip(Some(tooltip_for(flags, label)));
     *lock_ignore_poison(&st.applied) = Some(key);
 }
 
 /// Debounced change: applied after DEBOUNCE unless a newer one came in.
-pub fn request(app: &AppHandle, activity: Activity, label: String) {
+pub fn request(app: &AppHandle, flags: TrayFlags, label: String) {
     let st = app.state::<TrayActivityState>();
     let generation = st.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(DEBOUNCE);
         if app.state::<TrayActivityState>().generation.load(Ordering::SeqCst) == generation {
-            apply(&app, activity, &label);
+            apply(&app, flags, &label);
         }
     });
 }
@@ -181,51 +207,68 @@ pub fn request(app: &AppHandle, activity: Activity, label: String) {
 /// debounced change.
 pub fn reset(app: &AppHandle) {
     app.state::<TrayActivityState>().generation.fetch_add(1, Ordering::SeqCst);
-    apply(app, Activity::Idle, "");
+    apply(app, TrayFlags::default(), "");
 }
 
-/// The engine's voice state for the tray. `label` is "<channel> (<server>)".
+/// The engine's voice state for the tray. `label` is "<channel> (<server>)";
+/// `muted` / `sharing` are the separate flags (the tooltip lists them all).
 #[tauri::command]
-pub fn set_tray_activity(app: AppHandle, state: Activity, label: Option<String>) {
-    request(&app, state, label.unwrap_or_default());
+pub fn set_tray_activity(app: AppHandle, state: Activity, label: Option<String>, muted: Option<bool>, sharing: Option<bool>) {
+    request(&app, TrayFlags::from_request(state, muted, sharing), label.unwrap_or_default());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const fn f(in_voice: bool, muted: bool, sharing: bool) -> TrayFlags {
+        TrayFlags { in_voice, muted, sharing }
+    }
+
     #[test]
     fn tooltips() {
-        assert_eq!(tooltip_for(Activity::Idle, "Alpha (Ghost Fleet)"), "SpecterComs");
-        assert_eq!(tooltip_for(Activity::Active, "Alpha (Ghost Fleet)"), "SpecterComs — in Alpha (Ghost Fleet)");
-        assert_eq!(tooltip_for(Activity::Muted, " Alpha\n(Ghost  Fleet) "), "SpecterComs — in Alpha (Ghost Fleet), muted");
-        assert_eq!(tooltip_for(Activity::Active, ""), "SpecterComs — in voice");
+        assert_eq!(tooltip_for(f(false, true, true), "Alpha (Ghost Fleet)"), "SpecterComs");
+        assert_eq!(tooltip_for(f(true, false, false), "Alpha (Ghost Fleet)"), "SpecterComs — in Alpha (Ghost Fleet)");
+        assert_eq!(tooltip_for(f(true, true, false), " Alpha\n(Ghost  Fleet) "), "SpecterComs — in Alpha (Ghost Fleet), muted");
+        assert_eq!(tooltip_for(f(true, false, false), ""), "SpecterComs — in voice");
+        assert_eq!(tooltip_for(f(true, false, true), "Alpha"), "SpecterComs — in Alpha, sharing your screen");
+        assert_eq!(tooltip_for(f(true, true, true), "Alpha"), "SpecterComs — in Alpha, sharing your screen, muted");
         let long = "x".repeat(300);
-        let t = tooltip_for(Activity::Active, &long);
-        assert!(t.chars().count() < 128, "{}", t.chars().count());
-        assert!(t.ends_with('…'));
+        let t = tooltip_for(f(true, true, true), &long);
+        assert!(t.encode_utf16().count() < 128, "{}", t.encode_utf16().count());
+        assert!(t.contains('…'));
     }
 
     #[test]
-    fn badge_paints_the_bottom_right_corner_only() {
-        let (w, h) = (32u32, 32u32);
-        let src = vec![0u8; (w * h * 4) as usize]; // fully transparent
-        let out = badge_rgba(&src, w, h, DOT_ACTIVE);
-        let px = |x: u32, y: u32| &out[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize];
-        // Top-left untouched.
-        assert_eq!(px(2, 2), &[0, 0, 0, 0]);
-        // The dot's centre is opaque green.
-        let r = 32.0 * 0.21;
-        let ring = (32.0f64 * 0.06).max(1.0);
-        let c = (32.0 - r - ring) as u32;
-        assert_eq!(px(c, c), &[DOT_ACTIVE[0], DOT_ACTIVE[1], DOT_ACTIVE[2], 255]);
-        // Same size in, same size out.
-        assert_eq!(out.len(), src.len());
+    fn precedence_live_muted_active_idle() {
+        assert_eq!(f(false, false, false).activity(), Activity::Idle);
+        assert_eq!(f(false, true, true).activity(), Activity::Idle);
+        assert_eq!(f(true, false, false).activity(), Activity::Active);
+        assert_eq!(f(true, true, false).activity(), Activity::Muted);
+        assert_eq!(f(true, false, true).activity(), Activity::Live);
+        assert_eq!(f(true, true, true).activity(), Activity::Live);
     }
 
     #[test]
-    fn badge_ignores_bad_input() {
-        assert_eq!(badge_rgba(&[1, 2, 3], 4, 4, DOT_MUTED), vec![1, 2, 3]);
-        assert!(badge_rgba(&[], 0, 0, DOT_MUTED).is_empty());
+    fn request_flags() {
+        // Explicit flags win; the state alone implies its own flag.
+        assert_eq!(TrayFlags::from_request(Activity::Live, Some(true), Some(true)), f(true, true, true));
+        assert_eq!(TrayFlags::from_request(Activity::Muted, None, None), f(true, true, false));
+        assert_eq!(TrayFlags::from_request(Activity::Live, None, None), f(true, false, true));
+        assert_eq!(TrayFlags::from_request(Activity::Active, Some(false), Some(false)), f(true, false, false));
+        // Nothing applies outside voice.
+        assert_eq!(TrayFlags::from_request(Activity::Idle, Some(true), Some(true)), TrayFlags::default());
+    }
+
+    #[test]
+    fn icons_per_state_and_scale() {
+        for a in [Activity::Idle, Activity::Active, Activity::Muted, Activity::Live] {
+            let lo = icon_for(a, 1.0);
+            let hi = icon_for(a, 2.0);
+            assert_eq!((lo.width(), lo.height()), (32, 32));
+            assert_eq!((hi.width(), hi.height()), (64, 64));
+            assert_eq!(lo.rgba().len(), 32 * 32 * 4);
+        }
+        assert_ne!(icon_for(Activity::Idle, 1.0).rgba(), icon_for(Activity::Live, 1.0).rgba());
     }
 }

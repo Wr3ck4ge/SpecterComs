@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
-  Bell, BookOpen, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, RefreshCw, Settings, X,
+  BookOpen, Check, ChevronDown, ChevronRight, ChevronUp, RefreshCw, Settings, X,
   Gamepad2, // P2C
-  Compass, KeyRound, Link2, Users, Shield,
+  Compass, KeyRound, Link2, Shield,
 } from 'lucide-react';
+import { ScFriends, ScNotifications, ScOperations } from '../icons/brand'; // BRAND
 import { DiscoverPane, InvitesPane, JoinWithCode, ToolRow, canManageInvites } from './ServerTools';
-import { WALLET_UI_ENABLED, WalletPane, WalletToolRow } from './WalletPane';
+import { WalletPane, WalletToolRow } from './WalletPane';
 import { MembersPane, canViewMembers } from './MembersPane';
+import { OwnershipPane, OwnershipToolRow, OwnershipNotice } from './OwnershipPane'; // L13
 import { Alert, Button, IconButton } from '../ui';
 import { cx, focusRing } from '../ui/styles';
 import { BrandMark } from '../auth/AuthLayout';
@@ -43,11 +45,13 @@ const orgLogo = (org) => (org?.logo_url ? `${UPLOADS_BASE_URL}${org.logo_url}` :
 // further from the bar (the first-run hint now, ambient cards later) goes
 // before the cabinet in the markup.
 
+// BRAND: Channels / Operations / Friends / Notifications use the brand pack;
+// Games and Settings keep their Lucide icons (owner, 2026-11-12).
 const CABINETS = {
   channels:      { title: 'Channels',      Icon: CHANNELS_ICON }, // CH2: was Hash
-  operations:    { title: 'Operations',    Icon: CalendarClock },
-  friends:       { title: 'Friends',       Icon: Users },
-  notifications: { title: 'Notifications', Icon: Bell },
+  operations:    { title: 'Operations',    Icon: ScOperations },
+  friends:       { title: 'Friends',       Icon: ScFriends },
+  notifications: { title: 'Notifications', Icon: ScNotifications },
   games:         { title: 'Games',         Icon: Gamepad2 }, // P2C: Supported games → tools
   settings:      { title: 'Settings',      Icon: Settings },
 };
@@ -155,7 +159,14 @@ function ServerCabinet({ orgs, orgsLoading, orgsError, activeOrgId, onSelectOrg,
       </div>
     );
   }
-  if (view === 'wallet' && activeOrg && WALLET_UI_ENABLED) {
+  if (view === 'ownership' && activeOrg && activeOrg.owner_id === userId) {
+    return (
+      <div className="flex flex-col max-h-[460px]">
+        <div className="strip-scroll min-h-0 flex-1 pt-3"><OwnershipPane org={activeOrg} userId={userId} onBack={back} onChanged={() => onRefreshOrgs?.()} /></div>
+      </div>
+    );
+  }
+  if (view === 'wallet' && activeOrg) {
     return (
       <div className="flex flex-col max-h-[460px]">
         <div className="strip-scroll min-h-0 flex-1 pt-3"><WalletPane org={activeOrg} onBack={back} /></div>
@@ -237,10 +248,12 @@ function ServerCabinet({ orgs, orgsLoading, orgsError, activeOrgId, onSelectOrg,
             <ToolRow icon={<Link2 size={16} aria-hidden="true" />} title="Invite links"
               subtitle={`Create or revoke invites for ${orgName(activeOrg)}`} onClick={() => setView('invites')} />
           )}
-          {WALLET_UI_ENABLED && activeOrg && (
+          <OwnershipToolRow org={activeOrg} userId={userId} onClick={() => setView('ownership')} />
+          {activeOrg && (
             <WalletToolRow key={activeOrg.id} org={activeOrg} onClick={() => setView('wallet')} />
           )}
         </div>
+        <OwnershipNotice key={activeOrg?.id} org={activeOrg} userId={userId} onChanged={() => onRefreshOrgs?.()} />
         <WelcomeEntry org={orgs.find((o) => o.id === activeOrgId) || null} onOpen={onOpenWelcome} />
       </div>
     </div>
@@ -351,10 +364,11 @@ function Bar({ activeOrg, activeOrgIndex, cabinet, onToggleCabinet, grow, badges
           ))}
         </div>
       </div>
-      <div className="shrink-0 flex items-center gap-0.5">
+      <div className={cx('shrink-0 flex items-center', compact ? 'gap-0.5' : 'gap-1')}>
         {Object.entries(CABINETS).map(([id, { title, Icon }]) => (
-          <span key={id} className="relative inline-flex">
+          <span key={id} className="relative inline-flex" data-cabinet-button={id /* TAB: CabinetTab finds the open cabinet's button by this */}>
             <IconButton
+              variant="tile" // BRAND: framed tiles; the open cabinet's tile is cyan
               size={compact ? 'sm' : 'md'}
               icon={id === 'channels' && ChannelsIconOverride ? <ChannelsIconOverride size={compact ? 16 : 18} /> : <Icon size={compact ? 16 : 18} /> /* CH2 */}
               label={badges[id]?.label ? `${title} (${badges[id].label})` : title}
@@ -367,6 +381,160 @@ function Bar({ activeOrg, activeOrgIndex, cabinet, onToggleCabinet, grow, badges
         ))}
       </div>
     </div>
+  );
+}
+
+// ── TAB: the open cabinet grows out of its bar button ─────────────────────
+// One SVG outline, drawn between the cabinet and the bar (DOM order matters:
+// after the cabinet so it paints over its bottom border, before the bar's
+// positioned button wrapper so the icon stays on top). The outline leaves
+// the panel's edge through concave fillets of the panel's own radius, runs
+// down a neck as wide as the button, and wraps the button with the button's
+// radius, so the button reads as a selected extension of the panel. A side
+// that would land inside the panel's rounded corner goes flush instead and
+// squares that corner off. Fixed-positioned in viewport coordinates, the
+// same space getBoundingClientRect measures in; pointer-events none, and the
+// gap it spans (gap-2) is inside both panels' 6px window-region margins.
+// BRAND: the bar buttons are framed tiles, so the outline now runs ON the
+// active tile's own 1px cyan border (its centre line, same radius) and carries
+// that cyan up the neck to the fillets, where the panel's own border meets it.
+const TAB_INSET = 0.5; // px: the centre of the tile's 1px border
+const TAB_FILLET_MAX = 10;
+const TAB_STROKE_FALLBACK = '#00E5FF'; // --brand-cyan
+
+// TABSEQ (owner 2026-11-13): the tab draws first and the panel slides in
+// after it, so the tab is measured against the panel's RESTING place: the
+// enter slide's translate (on the panel or a wrapper up to the slot) is taken
+// back out of the measured rect.
+function restingRect(el, stopEl) {
+  const r = el.getBoundingClientRect();
+  let tx = 0;
+  let ty = 0;
+  for (let n = el; n && n !== stopEl; n = n.parentElement) {
+    const t = getComputedStyle(n).transform;
+    if (t && t !== 'none' && typeof DOMMatrixReadOnly !== 'undefined') {
+      const m = new DOMMatrixReadOnly(t);
+      tx += m.m41;
+      ty += m.m42;
+    }
+  }
+  return { left: r.left - tx, right: r.right - tx, top: r.top - ty, bottom: r.bottom - ty, width: r.width, height: r.height };
+}
+
+function tabGeometry(btnEl, panelEl, grow, stopEl = null) {
+  const btn = btnEl.querySelector('button') || btnEl;
+  const b = btn.getBoundingClientRect();
+  const p = restingRect(panelEl, stopEl);
+  if (!b.width || !p.width || b.right <= p.left || b.left >= p.right) return null;
+  const pcs = getComputedStyle(panelEl);
+  const panelR = parseFloat(pcs.borderBottomLeftRadius) || 0;
+  const rb = Math.max(0, (parseFloat(getComputedStyle(btn).borderTopLeftRadius) || 0) - TAB_INSET);
+  const up = grow !== 'down'; // cabinet above the bar
+  const d = up ? 1 : -1;      // screen-y direction from the panel edge toward the bar
+  const edge = up ? p.bottom : p.top;
+  const far = up ? b.bottom - TAB_INSET : b.top + TAB_INSET;
+  const tE = (far - edge) * d; // local depth of the tab's far edge
+  if (tE <= rb + 2) return null;
+  const f = Math.min(panelR, TAB_FILLET_MAX);
+  let x0 = b.left + TAB_INSET;
+  let x1 = b.right - TAB_INSET;
+  // A fillet needs room on the flat part of the panel edge; otherwise go flush.
+  const leftFlush = x0 - f < p.left + panelR;
+  const rightFlush = x1 + f > p.right - panelR;
+  if (leftFlush) x0 = p.left + 0.5;
+  if (rightFlush) x1 = p.right - 0.5;
+  if (x1 - x0 < 2 * rb) return null;
+  const Y = (t) => edge + d * t;
+  const sw = (s) => (up ? s : 1 - s); // mirroring flips every arc's sweep
+  const P = (x, t) => `${x.toFixed(2)} ${Y(t).toFixed(2)}`;
+  const s = -0.5; // centre of the panel's 1px border line
+  // Open outline (stroke): left side → around the button → right side.
+  const left = leftFlush
+    ? `M ${P(x0, -panelR)}`
+    : `M ${P(x0 - f, s)} A ${f} ${f} 0 0 ${sw(1)} ${P(x0, s + f)}`;
+  const body = `L ${P(x0, tE - rb)} A ${rb} ${rb} 0 0 ${sw(0)} ${P(x0 + rb, tE)} `
+    + `L ${P(x1 - rb, tE)} A ${rb} ${rb} 0 0 ${sw(0)} ${P(x1, tE - rb)}`;
+  const right = rightFlush
+    ? `L ${P(x1, -panelR)}`
+    : `L ${P(x1, s + f)} A ${f} ${f} 0 0 ${sw(1)} ${P(x1 + f, s)}`;
+  const stroke = `${left} ${body} ${right}`;
+  // Fill: the same outline closed just inside the panel, so it erases the
+  // panel's border across the neck (and squares off a flush corner).
+  const inner = -1.5;
+  const closeRight = rightFlush ? `L ${P(x1 - panelR, -panelR)} L ${P(x1 - panelR, inner)}` : `L ${P(x1 + f - 1, inner)}`;
+  const closeLeft = leftFlush ? `L ${P(x0 + panelR, inner)} L ${P(x0 + panelR, -panelR)}` : `L ${P(x0 - f + 1, inner)}`;
+  const fill = `${stroke} ${closeRight} ${closeLeft} Z`;
+  return {
+    stroke, fill,
+    fillColor: pcs.backgroundColor,
+    strokeColor: pcs.getPropertyValue('--brand-cyan').trim() || TAB_STROKE_FALLBACK, // BRAND: the tile's cyan
+    // tint runs from the button (strong) to the panel edge (none)
+    g1: { y: Y(tE) }, g2: { y: Y(0) },
+    // TABSEQ: the reveal grows from the tile toward the panel.
+    reveal: { x: Math.min(x0 - f, p.left) - 2, w: Math.max(x1 + f, p.right) - Math.min(x0 - f, p.left) + 4,
+      y: Math.min(Y(-panelR), Y(tE)) - 2, h: Math.abs(Y(tE) - Y(-panelR)) + 4, origin: up ? 'bottom' : 'top' },
+  };
+}
+
+function CabinetTab({ cabinetId, barRef, slotRef, grow }) {
+  const [geo, setGeo] = useState(null);
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    const slot = slotRef.current;
+    if (!bar || !slot) return undefined;
+    let raf = 0;
+    const measure = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const btn = bar.querySelector(`[data-cabinet-button="${cabinetId}"]`);
+        const panel = slot.querySelector('.strip-panel');
+        setGeo(btn && panel ? tabGeometry(btn, panel, grow, slot) : null);
+      });
+    };
+    measure();
+    // The enter slide moves the panel: settle on animationend. The Channels
+    // cabinet also grows sideways (transitionend), and anything can resize.
+    slot.addEventListener('animationend', measure);
+    slot.addEventListener('transitionend', measure);
+    window.addEventListener('resize', measure);
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(measure);
+      ro.observe(bar);
+      ro.observe(slot);
+    }
+    return () => {
+      cancelAnimationFrame(raf);
+      slot.removeEventListener('animationend', measure);
+      slot.removeEventListener('transitionend', measure);
+      window.removeEventListener('resize', measure);
+      ro?.disconnect();
+    };
+  }, [cabinetId, barRef, slotRef, grow]);
+  if (!geo) return null;
+  const gid = `strip-tab-tint-${cabinetId}`;
+  const cid = `strip-tab-reveal-${cabinetId}`;
+  const rv = geo.reveal;
+  return (
+    <svg key={cabinetId} aria-hidden="true" className="strip-cabinet-tab"
+      style={{ position: 'fixed', left: 0, top: 0, width: '100vw', height: '100vh', pointerEvents: 'none', overflow: 'visible' }}>
+      <defs>
+        <linearGradient id={gid} gradientUnits="userSpaceOnUse" x1="0" y1={geo.g1.y} x2="0" y2={geo.g2.y}>
+          <stop offset="0" stopColor="rgb(0, 229, 255)" stopOpacity="0.14" />
+          <stop offset="1" stopColor="rgb(0, 229, 255)" stopOpacity="0" />
+        </linearGradient>
+        {/* TABSEQ: a clip that grows from the tile to the panel edge — the tab draws first. */}
+        <clipPath id={cid} clipPathUnits="userSpaceOnUse">
+          <rect className="strip-cabinet-tab-reveal" x={rv.x} y={rv.y} width={rv.w} height={rv.h}
+            style={{ transformBox: 'fill-box', transformOrigin: `center ${rv.origin}` }} />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${cid})`}>
+        <path d={geo.fill} fill={geo.fillColor} />
+        <path d={geo.fill} fill={`url(#${gid})`} />
+        <path d={geo.stroke} fill="none" stroke={geo.strokeColor} strokeWidth="1" />
+      </g>
+    </svg>
   );
 }
 
@@ -448,7 +616,7 @@ export default function StripView({
   onCabinetSlotTransitionEnd,
   viewportWidth,  // P2B dev preview only: the frame's width
   opsCabinetInitial, // P2B dev preview only: { initialTab, initialDay } for OpsCabinet
-  channelsIcon = null, // CH2 dev preview only: override the Channels bar icon (icon candidates)
+  channelsIcon = null, // CH2: override the Channels bar icon (BRAND: StripApp passes voice-active while in voice; dev preview: icon candidates)
   // SV: the stream viewer, as ({ mode, bar, vw, vh, grow }) => node (StripStreamViewer).
   // mode: 'full' (panel above the bar) | 'mini' (a cabinet / the picker is open:
   // a row stacked above it) | 'hidden' (the wide op panel is open).
@@ -457,6 +625,8 @@ export default function StripView({
   // LIVE: the live-op notice beside the bar, as ({ bar, vw }) => node
   // (LiveOpNotice). Stays up while collapsed: it's one of the always-on panels.
   liveNotice = null,
+  // OVERLAYTAB: the labelled "Overlay" tab, as ({ grow, onRegionChange }) => node, in voice only.
+  overlayTab = null,
 }) {
   const shown = useCabinetTransition(auth === 'in' ? cabinet : null, instantClose, onRegionChange);
   // P2B: window size + the main bar's rect drive the wide op panel.
@@ -469,6 +639,7 @@ export default function StripView({
   const rootRef = useRef(null);
   const barRef = useRef(null);
   const originRef = useRef(null);
+  const slotRef = useRef(null); // TAB: the cabinet slot CabinetTab measures
   const [barRect, setBarRect] = useState(null);
   // P2B: measure the bar relative to the fixed-position origin (the window;
   // in the dev preview, the transformed frame). Runs after every render on
@@ -537,8 +708,11 @@ export default function StripView({
           loading={login.loading}
           error={login.error}
           notice={login.notice}
+          onResendVerification={login.onResendVerification}
+          resendNote={login.resendNote}
           onForgotPassword={login.onForgotPassword}
           onCreateAccount={login.onCreateAccount}
+          twoFactor={login.twoFactor}
         />
       </div>
     );
@@ -642,6 +816,8 @@ export default function StripView({
       {/* SV: the stream viewer (fixed above the bar, or a row above the cabinet). */}
       {auth === 'in' && liveNotice?.({ bar: barRect, vw })}
       {auth === 'in' && streamViewer?.({ mode: collapsed ? 'full' /* POLISH */ : panelOpen ? 'hidden' : shown || stackPanel ? 'mini' : 'full', bar, vw, vh, grow, onRegion: onRegionChange })}
+      {/* OVERLAYTAB: on the outer edge of the stack (the bar, or the open cabinet / picker). */}
+      {auth === 'in' && !collapsed && overlayTab?.({ grow, onRegionChange })}
       {/* POLISH: collapsed (SV) no longer closes the op panel / picker /
           cabinet: they stay mounted but invisible and out of the window region
           (data-region-off), and come back as they were on strip-shown. */}
@@ -652,15 +828,19 @@ export default function StripView({
         {stackPanel /* P2A */}
       </div>
       {shown && (
-        <div data-strip-region={panelOpen || collapsed ? undefined : ''} aria-hidden={collapsed || undefined}
+        <div ref={slotRef} data-strip-region={panelOpen || collapsed ? undefined : ''} aria-hidden={collapsed || undefined}
           className={cx('strip-cabinet-slot', panelOpen && 'hidden', collapsed && 'invisible')}
-          style={shown.id === 'channels' ? cabinetSlotStyle : undefined}
+          style={shown.id === 'channels' || shown.id === 'games' ? cabinetSlotStyle : undefined /* GAMEFIT: games widens too */}
           onTransitionEnd={shown.id === 'channels' ? onCabinetSlotTransitionEnd : undefined}>
           <section key={shown.id} aria-label={cabinetTitle(shown.id)}
             className={cx('strip-panel', animClass)}>
             {cabinetBody}
           </section>
         </div>
+      )}
+      {/* TAB: only for cabinets with a bar button, never while closing. */}
+      {shown && shown.anim !== 'exit' && CABINETS[shown.id] && !panelOpen && !collapsed && auth === 'in' && (
+        <CabinetTab cabinetId={shown.id} barRef={barRef} slotRef={slotRef} grow={grow} />
       )}
       {/* SV: collapsed keeps the bar's place (so the viewer doesn't move) but out of sight and the region. */}
       <div ref={barRef} data-strip-region={collapsed ? undefined : ''} aria-hidden={collapsed || undefined}

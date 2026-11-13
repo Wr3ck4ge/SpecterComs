@@ -155,7 +155,10 @@ describe('Leadership frequency + event channel access', () => {
   };
 
   it('MLS members: Leadership net = leaders (its assigned roles\' accepted members) + organisers', async () => {
-    const m = await members(leadChan, outsider);
+    // B6: only the channel's audience may read its list.
+    const denied = await request(app).get(`/orgs/${orgId}/channels/${leadChan}/mls/members`).set(auth(outsider));
+    expect(denied.status).toBe(403);
+    const m = await members(leadChan, lead);
     expect(m.scope).toBe('event');
     expect(m.kind).toBe('frequency');
     expect(new Set(m.user_ids)).toEqual(new Set([lead.userId, owner.userId]));

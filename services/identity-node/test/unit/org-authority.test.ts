@@ -98,7 +98,7 @@ const SCHEMA = `
   CREATE TABLE channels (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(), org_id UUID, event_id UUID, name TEXT,
     type INT DEFAULT 0, channel_kind INT DEFAULT 0, min_tier INT DEFAULT 0, ducking_level REAL DEFAULT 0,
-    is_frequency BOOLEAN NOT NULL DEFAULT FALSE, visible_min_level INT NOT NULL DEFAULT 0,
+    is_frequency BOOLEAN NOT NULL DEFAULT FALSE, visible_min_level INT NOT NULL DEFAULT 0, is_adult BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT clock_timestamp()
   );
   CREATE TABLE events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), launched BOOLEAN DEFAULT FALSE, command_channel_id UUID);

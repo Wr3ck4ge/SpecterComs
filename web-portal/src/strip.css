@@ -33,10 +33,11 @@ textarea {
   user-select: text;
 }
 
-/* Opaque panel surface shared by the bar and the cabinets. */
+/* Opaque panel surface shared by the bar and the cabinets.
+   BRAND: blue-black surface, steel-gray hairline (cyan is for active states). */
 .strip-panel {
-  background: #0b1d2e;
-  border: 1px solid var(--ui-border);
+  background: var(--brand-blue-black);
+  border: 1px solid var(--brand-panel-border);
   border-radius: var(--ui-radius-lg);
   /* Small on purpose: the window region (strip.rs) only extends 6px past
      each panel, so a big shadow would be visibly cut off. */
@@ -82,10 +83,15 @@ textarea {
 .strip-grow-up .strip-cabinet-slot { padding-top: 12px; margin-top: -12px; }
 .strip-grow-down .strip-cabinet-slot { padding-bottom: 12px; margin-bottom: -12px; }
 
-.strip-grow-up .strip-cabinet-enter   { animation: strip-slide-up-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+/* TABSEQ (owner 2026-11-13): the tab draws out of the tile FIRST
+   (.strip-cabinet-tab-reveal, 0–130 ms), then the cabinet slides open from it
+   (enter starts at 110 ms, so the two just overlap). */
+.strip-grow-up .strip-cabinet-enter   { animation: strip-slide-up-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) 110ms both; }
 .strip-grow-up .strip-cabinet-exit    { animation: strip-slide-up-out 140ms ease-in both; }
-.strip-grow-down .strip-cabinet-enter { animation: strip-slide-down-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+.strip-grow-down .strip-cabinet-enter { animation: strip-slide-down-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) 110ms both; }
 .strip-grow-down .strip-cabinet-exit  { animation: strip-slide-down-out 140ms ease-in both; }
+.strip-cabinet-tab-reveal { animation: strip-tab-reveal 130ms cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@keyframes strip-tab-reveal { from { transform: scaleY(0); } to { transform: none; } }
 /* Swapping one cabinet for another: no slide, just a quick fade. */
 .strip-cabinet-swap { animation: strip-fade-in 120ms ease-out both; }
 
@@ -151,7 +157,9 @@ textarea {
   .strip-opbar-in-down,
   .strip-opbar-out-down,
   .strip-subrow-in,
-  .strip-subrow-out { animation-duration: 1ms !important; }
+  .strip-subrow-out,
+  .strip-cabinet-tab-reveal { animation-duration: 1ms !important; }
+  .strip-cabinet-enter { animation-delay: 0ms !important; }
 }
 
 /* First-run hint arrow, pointing at the bar. */

@@ -267,6 +267,241 @@ export class SFrameCrypto {
 if (Symbol.dispose) SFrameCrypto.prototype[Symbol.dispose] = SFrameCrypto.prototype.free;
 
 /**
+ * Receive side for v2 share frames under one 'video' export. Replay windows
+ * are per (sharer, kind, session); call reset() when a new subscription
+ * starts (media-rust re-sends its cached keyframe to every new viewer).
+ */
+export class ShareFrameReceiver {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        ShareFrameReceiverFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_shareframereceiver_free(ptr, 0);
+    }
+    /**
+     * @param {Uint8Array} video_secret
+     * @returns {boolean}
+     */
+    matches_secret(video_secret) {
+        const ptr0 = passArray8ToWasm0(video_secret, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframereceiver_matches_secret(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get max_skew_ms() {
+        const ret = wasm.shareframereceiver_max_skew_ms(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @param {Uint8Array} video_secret
+     */
+    constructor(video_secret) {
+        const ptr0 = passArray8ToWasm0(video_secret, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframereceiver_new(ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        ShareFrameReceiverFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Authenticate + replay-check + skew-check (vs Date.now()) + decrypt one
+     * v2 payload. `outer_flags` / `outer_ts` are the wire unit's (or
+     * datagram's) flags byte and u32 timestamp; `sharer_user_id` is the
+     * sharer this subscription targets (UUID string). `expected_kind` 0 =
+     * any accepted kind, else the frame's kind must equal it. Errors are
+     * stable codes: "unsupported-version", "unsupported-kind", "malformed",
+     * "bad-user-id", "replay", "auth-failed", "stale-timestamp".
+     * @param {Uint8Array} frame
+     * @param {number} outer_flags
+     * @param {number} outer_ts
+     * @param {string} sharer_user_id
+     * @param {number} expected_kind
+     * @returns {Uint8Array}
+     */
+    open(frame, outer_flags, outer_ts, sharer_user_id, expected_kind) {
+        const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(sharer_user_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframereceiver_open(this.__wbg_ptr, ptr0, len0, outer_flags, outer_ts, ptr1, len1, expected_kind);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
+    }
+    /**
+     * open() with an explicit receiver clock (tests).
+     * @param {Uint8Array} frame
+     * @param {number} outer_flags
+     * @param {number} outer_ts
+     * @param {string} sharer_user_id
+     * @param {number} expected_kind
+     * @param {number} now_ms
+     * @returns {Uint8Array}
+     */
+    open_at(frame, outer_flags, outer_ts, sharer_user_id, expected_kind, now_ms) {
+        const ptr0 = passArray8ToWasm0(frame, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(sharer_user_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframereceiver_open_at(this.__wbg_ptr, ptr0, len0, outer_flags, outer_ts, ptr1, len1, expected_kind, now_ms);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
+    }
+    reset() {
+        wasm.shareframereceiver_reset(this.__wbg_ptr);
+    }
+    /**
+     * A sender for this user's own share under the same secret (S8), so the
+     * JS side never needs to hold the raw export.
+     * @param {number} kind
+     * @param {string} sharer_user_id
+     * @returns {ShareFrameSender}
+     */
+    sender(kind, sharer_user_id) {
+        const ptr0 = passStringToWasm0(sharer_user_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframereceiver_sender(this.__wbg_ptr, kind, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ShareFrameSender.__wrap(ret[0]);
+    }
+    /**
+     * @returns {number}
+     */
+    get session_count() {
+        const ret = wasm.shareframereceiver_session_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+}
+if (Symbol.dispose) ShareFrameReceiver.prototype[Symbol.dispose] = ShareFrameReceiver.prototype.free;
+
+/**
+ * One sending session for one kind (0x01 video, 0x02 share audio) of one
+ * share: fresh random session id, own derived key and 64-bit counter.
+ */
+export class ShareFrameSender {
+    static __wrap(ptr) {
+        const obj = Object.create(ShareFrameSender.prototype);
+        obj.__wbg_ptr = ptr;
+        ShareFrameSenderFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        ShareFrameSenderFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_shareframesender_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    get kind() {
+        const ret = wasm.shareframesender_kind(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @param {Uint8Array} video_secret
+     * @returns {boolean}
+     */
+    matches_secret(video_secret) {
+        const ptr0 = passArray8ToWasm0(video_secret, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframesender_matches_secret(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
+     * `video_secret`: the 32-byte MLS 'video' export (or the op key);
+     * `sharer_user_id`: this user's id (UUID string).
+     * @param {Uint8Array} video_secret
+     * @param {number} kind
+     * @param {string} sharer_user_id
+     */
+    constructor(video_secret, kind, sharer_user_id) {
+        const ptr0 = passArray8ToWasm0(video_secret, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(sharer_user_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframesender_new(ptr0, len0, kind, ptr1, len1);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0];
+        ShareFrameSenderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Seals `payload` for the wire unit `[size][outer_flags][outer_ts][payload]`
+     * (or the share-audio datagram), stamped with Date.now().
+     * @param {Uint8Array} payload
+     * @param {number} outer_flags
+     * @param {number} outer_ts
+     * @returns {Uint8Array}
+     */
+    seal(payload, outer_flags, outer_ts) {
+        const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframesender_seal(this.__wbg_ptr, ptr0, len0, outer_flags, outer_ts);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v2;
+    }
+    /**
+     * seal() with an explicit sender clock (tests).
+     * @param {Uint8Array} payload
+     * @param {number} outer_flags
+     * @param {number} outer_ts
+     * @param {number} now_ms
+     * @returns {Uint8Array}
+     */
+    seal_at(payload, outer_flags, outer_ts, now_ms) {
+        const ptr0 = passArray8ToWasm0(payload, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.shareframesender_seal_at(this.__wbg_ptr, ptr0, len0, outer_flags, outer_ts, now_ms);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v2;
+    }
+    /**
+     * @returns {Uint8Array}
+     */
+    get session_id() {
+        const ret = wasm.shareframesender_session_id(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+}
+if (Symbol.dispose) ShareFrameSender.prototype[Symbol.dispose] = ShareFrameSender.prototype.free;
+
+/**
  * Generates a secure random 32-byte key for group rotation
  * @returns {Uint8Array}
  */
@@ -406,6 +641,12 @@ const RelayAudioSenderFinalization = (typeof FinalizationRegistry === 'undefined
 const SFrameCryptoFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_sframecrypto_free(ptr, 1));
+const ShareFrameReceiverFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_shareframereceiver_free(ptr, 1));
+const ShareFrameSenderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_shareframesender_free(ptr, 1));
 
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
@@ -450,6 +691,43 @@ function passArray8ToWasm0(arg, malloc) {
     return ptr;
 }
 
+function passStringToWasm0(arg, malloc, realloc) {
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7F) break;
+        mem[ptr + offset] = code;
+    }
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = cachedTextEncoder.encodeInto(arg, view);
+
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
 function takeFromExternrefTable0(idx) {
     const value = wasm.__wbindgen_externrefs.get(idx);
     wasm.__externref_table_dealloc(idx);
@@ -468,6 +746,19 @@ function decodeText(ptr, len) {
         numBytesDecoded = len;
     }
     return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+}
+
+const cachedTextEncoder = new TextEncoder();
+
+if (!('encodeInto' in cachedTextEncoder)) {
+    cachedTextEncoder.encodeInto = function (arg, view) {
+        const buf = cachedTextEncoder.encode(arg);
+        view.set(buf);
+        return {
+            read: arg.length,
+            written: buf.length
+        };
+    };
 }
 
 let WASM_VECTOR_LEN = 0;

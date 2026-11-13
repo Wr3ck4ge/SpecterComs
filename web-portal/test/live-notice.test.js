@@ -115,10 +115,14 @@ describe('engine live ops', () => {
 
 describe('tray activity', () => {
   it('idle outside voice, active / muted in it, label "<channel> (<server>)"', () => {
-    expect(trayActivityFor({ inVoice: false, channelName: 'Alpha' })).toEqual({ state: 'idle', label: '' });
-    expect(trayActivityFor({ inVoice: true, channelName: 'Alpha', orgName: 'Ghost Fleet' })).toEqual({ state: 'active', label: 'Alpha (Ghost Fleet)' });
-    expect(trayActivityFor({ inVoice: true, muted: true, channelName: 'Alpha' })).toEqual({ state: 'muted', label: 'Alpha' });
-    expect(trayActivityFor({ inVoice: true })).toEqual({ state: 'active', label: 'voice' });
+    expect(trayActivityFor({ inVoice: false, channelName: 'Alpha' })).toEqual({ state: 'idle', label: '', muted: false, sharing: false });
+    expect(trayActivityFor({ inVoice: true, channelName: 'Alpha', orgName: 'Ghost Fleet' })).toEqual({ state: 'active', label: 'Alpha (Ghost Fleet)', muted: false, sharing: false });
+    expect(trayActivityFor({ inVoice: true, muted: true, channelName: 'Alpha' })).toEqual({ state: 'muted', label: 'Alpha', muted: true, sharing: false });
+    expect(trayActivityFor({ inVoice: true })).toEqual({ state: 'active', label: 'voice', muted: false, sharing: false });
+    // BRAND: precedence live > muted > active > idle; the flags ride along for the tooltip.
+    expect(trayActivityFor({ inVoice: true, sharing: true, channelName: 'Alpha' })).toEqual({ state: 'live', label: 'Alpha', muted: false, sharing: true });
+    expect(trayActivityFor({ inVoice: true, sharing: true, muted: true, channelName: 'Alpha' })).toEqual({ state: 'live', label: 'Alpha', muted: true, sharing: true });
+    expect(trayActivityFor({ inVoice: false, sharing: true, muted: true }).state).toBe('idle');
   });
 });
 

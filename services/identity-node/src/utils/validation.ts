@@ -84,3 +84,12 @@ export const textLength = (v: unknown): number => (typeof v === 'string' ? Array
 export function tooLong(label: string, v: unknown, max: number): string | null {
   return textLength(v) > max ? `${label} can be at most ${max} characters` : null;
 }
+
+export const verifyEmailSchema = z.object({
+  token: z.string().length(64).regex(/^[0-9a-f]+$/),
+});
+
+export const changeEmailSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1).max(100),
+});

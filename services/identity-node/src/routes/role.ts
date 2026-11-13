@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { createRole, getRoles, updateRole, deleteRole } from '../controllers/roleController.js';
+import { requireOwnerTwoFactor } from '../controllers/twoFactorController.js'; // L3
 import { authenticateTokenStrict } from '../middleware/authMiddleware.js';
 
 const router = Router({ mergeParams: true });
@@ -7,9 +8,10 @@ const router = Router({ mergeParams: true });
 // Protect all routes
 router.use(authenticateTokenStrict);
 
-router.post('/', createRole);
+// L3: owner-only rank admin needs 2FA while REQUIRE_2FA_FOR_PRIVILEGED is on.
+router.post('/', requireOwnerTwoFactor, createRole);
 router.get('/', getRoles);
-router.put('/:roleId', updateRole);
-router.delete('/:roleId', deleteRole);
+router.put('/:roleId', requireOwnerTwoFactor, updateRole);
+router.delete('/:roleId', requireOwnerTwoFactor, deleteRole);
 
 export default router;

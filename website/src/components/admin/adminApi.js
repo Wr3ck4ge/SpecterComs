@@ -57,7 +57,8 @@ export function createAdminApi(hooks = {}) {
       return { response: null, error: 'Network error — is the server reachable?', status: 0 };
     }
 
-    if (response.status === 401 && endpoint !== '/login' && endpoint !== '/reauth') {
+    // '/login' and '/login/2fa' (L3) answer 401 for a wrong password / code, not an ended session.
+    if (response.status === 401 && !endpoint.startsWith('/login') && endpoint !== '/reauth') {
       const json = await response.json().catch(() => ({}));
       hooks.onSessionExpired?.(json.message || 'Admin session expired.');
       return { response, error: json.message || 'Admin session expired.', status: 401, code: json.code };
@@ -65,6 +66,8 @@ export function createAdminApi(hooks = {}) {
 
     if (response.status === 403 && !retried) {
       const json = await response.clone().json().catch(() => ({}));
+      // L3: REQUIRE_2FA_FOR_PRIVILEGED is on and this admin has no 2FA yet.
+      if (json.code === 'TWO_FACTOR_REQUIRED') hooks.onTwoFactorRequired?.(json.message);
       if (json.code === 'REAUTH_REQUIRED' && hooks.requestReauth) {
         const ok = await hooks.requestReauth();
         if (ok) return raw(endpoint, { method, body, retried: true });
@@ -95,8 +98,17 @@ export function createAdminApi(hooks = {}) {
     raw,
     login:          (username, password) => call('/login', { method: 'POST', body: { username, password } }),
     logout:         () => call('/logout', { method: 'POST', body: {} }),
-    reauth:         (password) => call('/reauth', { method: 'POST', body: { password } }),
+    // code: authenticator code, needed when this admin has 2FA on (L3).
+    reauth:         (password, code) => call('/reauth', { method: 'POST', body: { password, ...(code ? { code } : {}) } }),
     me:             () => call('/me'),
+
+    // L3: two-factor authentication (login second step + the admin's own setup)
+    loginTwoFactor: (challenge, { code, recovery_code }) => call('/login/2fa', { method: 'POST', body: { challenge, ...(recovery_code ? { recovery_code } : { code }) } }),
+    twoFactorStatus:   () => call('/2fa'),
+    twoFactorEnroll:   (password) => call('/2fa/enroll', { method: 'POST', body: { password } }),
+    twoFactorConfirm:  (code) => call('/2fa/confirm', { method: 'POST', body: { code } }),
+    twoFactorDisable:  (body) => call('/2fa/disable', { method: 'POST', body }),
+    twoFactorRecoveryCodes: (body) => call('/2fa/recovery-codes', { method: 'POST', body }),
 
     overview:       () => call('/overview'),
     traffic:        (days) => call(`/traffic${qs({ days })}`),
@@ -104,6 +116,9 @@ export function createAdminApi(hooks = {}) {
     listUsers:      (params) => call(`/users${qs(params)}`),
     getUser:        (id) => call(`/users/${encodeURIComponent(id)}`),
     revealEmail:    (id, reason) => call(`/users/${encodeURIComponent(id)}/reveal-email`, { method: 'POST', body: { reason } }),
+    // L12: platform ban appeals
+    listAppeals:    (state) => call(`/appeals${qs({ state })}`),
+    decideAppeal:   (id, decision, note) => call(`/appeals/${encodeURIComponent(id)}/decide`, { method: 'POST', body: { decision, note } }),
     banUser:        (id, body) => call(`/users/${encodeURIComponent(id)}/ban`, { method: 'POST', body }),
     erasurePreview: (id) => call(`/users/${encodeURIComponent(id)}/erasure-preview`),
     exportUser:     (id, body) => call(`/users/${encodeURIComponent(id)}/export`, { method: 'POST', body }),
@@ -143,6 +158,20 @@ export function createAdminApi(hooks = {}) {
     billingConfig:        () => call('/billing/config'),
     billingConfigVersion: (v) => call(`/billing/config/versions/${encodeURIComponent(v)}`),
     saveBillingConfig:    (body) => call('/billing/config', { method: 'PUT', body }),
+
+    // D1: bug reports (owner only; descriptions are sealed, opened in BugReportsSection)
+    listBugReportKeys: () => call('/bug-reports/keys'),
+    setBugReportKey:   (key) => call('/bug-reports/key', { method: 'PUT', body: key }),
+    listBugReports:    (params) => call(`/bug-reports${qs(params)}`),
+    // resolution: the reply the reporter sees in the app; undefined = leave it as it is.
+    updateBugReport:   (id, status, ownerNote, resolution) => call(`/bug-reports/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: { status, owner_note: ownerNote, ...(resolution !== undefined ? { resolution } : {}) },
+    }),
+    deleteBugReport:   (id) => call(`/bug-reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    // L6: user data requests; running the export / erasure uses exportUser / eraseUser above
+    listDataRequests:  (status) => call(`/data-requests${qs({ status })}`),
+    completeDataRequest: (id, note) => call(`/data-requests/${encodeURIComponent(id)}/complete`, { method: 'POST', body: { note } }),
 
     listVoiceReports:  (params) => call(`/voice-reports${qs(params)}`),
     updateVoiceReport: (id, status, adminNotes) => call(`/voice-reports/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status, admin_notes: adminNotes } }),

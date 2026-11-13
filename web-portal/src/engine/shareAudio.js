@@ -108,6 +108,19 @@ export function decodeShareAudioInner(bytes) {
   return { seq: v.getUint32(1), durationMs: v.getUint16(5), opus: bytes.subarray(INNER_HEADER_LEN) };
 }
 
+/**
+ * S7: one received audio payload → { seq, durationMs, opus } | null, for either
+ * wire format of the stream (its header's `fv`): v1 = openV1(payload) (the
+ * SFrameCrypto decrypt), v2 = openV2(payload, flags, tsMs) (share_frame.rs,
+ * kind audio — flags/ts are the in-stream unit's, or SHARE_AUDIO_FLAGS for a
+ * datagram, whose first byte is that same flags value). Throws what the
+ * opener throws.
+ */
+export function openShareAudioPayload({ fv, payload, flags = SHARE_AUDIO_FLAGS, tsMs, openV1, openV2 }) {
+  const inner = fv === 2 ? openV2(payload, flags, tsMs >>> 0) : openV1(payload);
+  return decodeShareAudioInner(inner);
+}
+
 /** [4B size][1B flags][4B ts][payload] — the share stream's frame framing. */
 export function frameShareUnit(flags, timestampMs, payload) {
   const frameSize = 1 + 4 + payload.length;

@@ -256,7 +256,7 @@ export default function StripGroupTree({
                   dropTarget ? 'bg-specter-primary-cyan/30 border-specter-primary-neon ring-2 ring-specter-primary-neon/60'
                     : selected ? 'bg-specter-primary-cyan/20 border-specter-primary-neon'
                       : mine ? 'bg-specter-state-success/10 border-specter-state-success/60 hover:bg-specter-state-success/15'
-                        : 'bg-[#0b1d2e] border-specter-border hover:border-specter-border-strong',
+                        : 'bg-specter-brand-ink border-specter-border hover:border-specter-border-strong',
                   dragging && 'opacity-40',
                 )}
                 style={{ left: n.x, top: flipY(n), width: n.w, height: n.h }}
@@ -283,7 +283,7 @@ export default function StripGroupTree({
         <div
           ref={rootZoneRef}
           className={cx('absolute left-2 right-2 bottom-2 flex items-center justify-center rounded-ui-sm border-2 border-dashed text-ui-xs font-semibold',
-            drag.over === 'root' ? 'border-specter-primary-neon bg-specter-primary-cyan/15 text-specter-primary-neon' : 'border-specter-border-strong text-specter-text-subtle bg-[#0b1d2e]/90')}
+            drag.over === 'root' ? 'border-specter-primary-neon bg-specter-primary-cyan/15 text-specter-primary-neon' : 'border-specter-border-strong text-specter-text-subtle bg-specter-brand-ink/90')}
           style={{ height: ROOT_ZONE_ROOM - 12 }}
         >
           Drop here to make it a top-tier group

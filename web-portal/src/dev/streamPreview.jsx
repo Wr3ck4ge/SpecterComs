@@ -15,7 +15,7 @@ import StripView from '../components/strip/StripView';
 import ChannelsCabinet from '../components/strip/ChannelsCabinet';
 import { StripFrame, MAIN_WIDTH } from '../components/strip/StripSidePanel';
 import { voiceSlots } from '../components/strip/voiceSlots';
-import { streamWatchSlots } from '../components/strip/streamSlots';
+import { StreamsPanel, streamWatchSlots } from '../components/strip/streamSlots';
 import StripStreamViewer from '../components/strip/StripStreamViewer';
 import { EMPTY_STATE } from '../engine/bridge';
 
@@ -126,6 +126,7 @@ function Scenario({ s, w, h, bare }) {
   const [cabinet, setCabinet] = useState(s.cabinet ?? null);
   const [expanded, setExpanded] = useState(Boolean(s.expanded));
   const [open, setOpen] = useState(!s.noViewer);
+  const [streams, setStreams] = useState(Boolean(s.streamsPanel)); // C2
   // sv-ended: let a few frames draw first, then the sharer "stops".
   const [voiceOver, setVoiceOver] = useState(s.delayVoice ? null : s.voice || null);
   useLayoutEffect(() => {
@@ -153,7 +154,7 @@ function Scenario({ s, w, h, bare }) {
   const grow = s.grow || 'up';
   const slots = [
     ...voiceSlots({ engine: eng, pickerOpen: false, onOpenChannels: noop, onToggleOverlay: noop, onShareClick: noop }),
-    ...streamWatchSlots({ engine: eng, viewerOpen: open, onWatch: () => setOpen(true), onOpenChannels: () => setCabinet('channels') }),
+    ...streamWatchSlots({ engine: eng, viewerOpen: open, panelOpen: streams, onToggle: () => setStreams((x) => !x) }),
   ];
   const v = eng.state.voice;
   const main = (
@@ -167,6 +168,10 @@ function Scenario({ s, w, h, bare }) {
       viewportWidth={w} viewportHeight={h}
       barSlots={slots}
       collapsed={Boolean(s.collapsed)}
+      stackPanel={streams && !open ? (
+        <StreamsPanel engine={eng} onClose={() => setStreams(false)}
+          onPick={(c, dest) => { if (dest.id === 'bar') setOpen(true); return Promise.resolve(); }} />
+      ) : null}
       renderCabinet={(id, { onClose }) => (id === 'channels' ? (
         <ChannelsCabinet engine={eng} onCommand={noop} focus={null} onFocus={noop}
           onCreateChannel={async () => ({ error: null })} onDeleteChannel={async () => ({ error: null })}
@@ -175,7 +180,7 @@ function Scenario({ s, w, h, bare }) {
       streamViewer={open ? (ctx) => (
         <StripStreamViewer callsign="Kestrel" voice={v} channelName={v.channelName} {...ctx}
           expanded={expanded} onToggleExpand={() => setExpanded((x) => !x)}
-          onOpenOverlay={() => setOpen(false)} onClose={() => setOpen(false)} onRetry={noop}
+          onSwitch={() => setOpen(false)} onClose={() => setOpen(false)} onRetry={noop}
           onShow={() => setCabinet(null)} source={s.source} />
       ) : null}
     />

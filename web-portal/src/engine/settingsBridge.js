@@ -62,6 +62,11 @@ export const SOP = Object.freeze({
   REQUEST_MIC: 'requestMic',
   MIC_TEST: 'micTest',
   DIAGNOSTICS: 'diagnostics',
+  BUG_REPORT: 'bugReport', // D1: { category, text, attachDiagnostics, appVersion } → { id, redactions, diagnosticsError }
+  MLS_DIAGNOSTICS: 'mlsDiagnostics', // S2: {} → mlsSession.getMlsDiagnostics() (read-only: ids, epochs, labels — no keys)
+  // S5: {} → mlsSession.resetEncryptionIdentity() → { oldLabel, newLabel, registered, oldDeviceDropped, warnings, restarting }
+  // then the engine window reloads itself. The strip leaves voice first.
+  RESET_MLS_IDENTITY: 'resetMlsIdentity',
 });
 
 export const MIC_TEST_LEASE_MS = 10_000;
@@ -93,6 +98,7 @@ export const SETTINGS_DEFAULTS = Object.freeze({
   specter_share_app_key: null,
   specter_overlay_corner: 'top-right',
   specter_overlay_safe_mode: null, // '1' = on; removed = off
+  specter_mls_auto_repair: '1', // S4: engine/mlsRepair.js ('0' = off)
 });
 export const SETTINGS_KEYS = Object.freeze(Object.keys(SETTINGS_DEFAULTS));
 

@@ -36,6 +36,7 @@ const stub = {
     return { device_state: enc({ self: label, groups: {} }), key_package: enc({ label }) };
   },
   group_exists: (s, g) => !!dec(s).groups[gidStr(g)],
+  group_ids: (s) => Object.keys(dec(s).groups),
   // Evicted (a processed commit removed us) = held but no longer a member.
   group_is_active(s, g) {
     const st = dec(s);
@@ -146,11 +147,15 @@ const workDir = mkdtempSync(join(tmpdir(), 'mls-session-test-'));
 const stubFile = join(workDir, 'mls-crypto-stub.mjs');
 writeFileSync(stubFile, `const s = globalThis.__mlsStub;
 export default s.default;
-export const { generate_identity, generate_key_package, key_package_usable, group_exists, group_is_active, delete_group, group_epoch, group_member_labels, create_group, create_solo_group, add_member,
+export const { generate_identity, generate_key_package, key_package_usable, group_exists, group_ids, group_is_active, delete_group, group_epoch, group_member_labels, create_group, create_solo_group, add_member,
   remove_member, join_from_welcome, process_commit, encrypt, decrypt, export_secret, frame_key_packages,
   sign_bytes, own_public_key, verify_bytes, device_credential, message_epoch, export_group_info,
   join_external, resync_external } = s;\n`);
-const src = readFileSync(sessionPath, 'utf8').replace(/from\s+'mls-crypto'/, `from ${JSON.stringify(pathToFileURL(stubFile).href)}`);
+// The copy runs from workDir, so its relative imports (./engine/…, ./utils/…)
+// are pointed back at the real files next to mlsSession.js.
+const src = readFileSync(sessionPath, 'utf8')
+  .replace(/from\s+'mls-crypto'/, `from ${JSON.stringify(pathToFileURL(stubFile).href)}`)
+  .replace(/from\s+'(\.\.?\/[^']+)'/g, (_, rel) => `from ${JSON.stringify(pathToFileURL(join(dirname(sessionPath), rel)).href)}`);
 const modFile = join(workDir, 'mlsSession.under-test.mjs');
 writeFileSync(modFile, src);
 let instance = 0;

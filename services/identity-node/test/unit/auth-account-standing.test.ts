@@ -60,7 +60,7 @@ describe('login: account standing', () => {
     const res = mockRes();
     await login({ body: { email: 'g@x.io', password: 'right-password' } } as any, res);
     expect(res.statusCode).toBe(403);
-    expect(res.body).toEqual({ message: 'Account access has been revoked' });
+    expect(res.body).toEqual({ message: 'Account access has been revoked. To appeal, visit https://spectercoms.net/appeal' });
     expect(db.query.mock.calls.some(([sql]) => /INSERT INTO refresh_tokens/.test(sql))).toBe(false);
   });
 
@@ -117,7 +117,7 @@ describe('refresh: account standing', () => {
       const res = mockRes();
       await refresh(req, res);
       expect(res.statusCode).toBe(403);
-      expect(res.body).toEqual({ message: 'Account access has been revoked' });
+      expect(res.body).toEqual({ message: 'Account access has been revoked. To appeal, visit https://spectercoms.net/appeal' });
       const sqls = db.clientQuery.mock.calls.map(([s]) => s as string);
       expect(sqls.some((s) => /INSERT INTO refresh_tokens/.test(s))).toBe(false);
       expect(sqls.some((s) => /UPDATE refresh_tokens SET revoked_at = NOW\(\) WHERE user_id = \$1/.test(s))).toBe(true);

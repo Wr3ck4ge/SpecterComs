@@ -1,5 +1,6 @@
 import { api } from '../api';
 import { getLastNetReport } from '../engine/netDiagnostics';
+import { formatMlsDiagnostics } from './mlsDiagnosticsReport';
 
 // Bundles capture perf stats + all client-side diagnostic logs (setup errors,
 // capture errors, capture breadcrumbs, capture debug log, app log, audio
@@ -25,6 +26,14 @@ export async function collectAndSubmitDiagnostics(appVersion) {
     // plugin/crate entirely). See lib.rs's write_audio_log doc comment.
     safeInvoke('plugin:specter-audio|get_audio_pipeline_log'),
   ]);
+  // S2: this device's MLS groups (ids, epochs, member labels — no keys). Best-effort.
+  let mlsReport = null;
+  try {
+    const { getMlsDiagnostics } = await import('../mlsSession');
+    mlsReport = formatMlsDiagnostics(await getMlsDiagnostics());
+  } catch (err) {
+    mlsReport = `MLS diagnostics unavailable: ${String(err?.message ?? err).slice(0, 200)}`;
+  }
   return api.submitDiagnostics({
     appVersion,
     perf: trimPerf(perf),
@@ -36,6 +45,7 @@ export async function collectAndSubmitDiagnostics(appVersion) {
     audioPipelineLog: tail(audioPipelineLog, LOG_TAIL_CHARS.small),
     // The Repair panel's last diagnosis, repair steps and plain-text report.
     netReport: getLastNetReport(),
+    mlsReport: tail(mlsReport, LOG_TAIL_CHARS.small),
   });
 }
 

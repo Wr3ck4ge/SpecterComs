@@ -29,7 +29,9 @@ import { nextWatchTarget, mergeWatchableSharers, reconcileWatchTarget } from '..
 import { notifyGroupKeyChange } from '../voiceRelayAudio';
 import useEngineBridgeHost from '../engine/useEngineBridgeHost';
 import { useEngineWindowVisible, useSampledVoiceLevels } from '../engine/voiceLevels';
+import { UNVERIFIED_TEXT } from '../engine/frank'; // S7
 import { CMD, EV, STRIP_WINDOW, bridgeEmit, buildChatRows, buildEngineState, buildLevelsFrame, engineChannel, LEVELS_HZ } from '../engine/bridge';
+import { stuckGroups as mlsHealthStuckGroups, subscribe as mlsHealthSubscribe, reset as mlsHealthReset } from '../engine/mlsHealth'; // S3
 import { joinBlockedReason, isListedChannel } from './strip/channelTree';
 import { createRepairHandlers } from '../engine/repairHandlers'; // NET
 // P2A: channel chat logic (headless, shared by TextChat and the strip), unread
@@ -53,7 +55,11 @@ import {
   handleChannelCommit, handleChannelWelcome,
   ensureEventGroup, handleEventGroupCommit, handleEventGroupWelcome,
   ensureChannelGroup, // EVMLS
+  groupEpoch, // B3
+  repairGroupStep, mlsLog, // S4
 } from '../mlsSession';
+import { startMlsAutoRepair } from '../engine/mlsRepair'; // S4
+import { createNarrowingReconciler } from '../engine/narrowingReconcile'; // B3
 import { barColor, fmtBytes, fmtTime, fmtDayLabel as fmtDate } from '../utils/format';
 import { getOpsBadge, msUntilNextOpsChange, operationEndedMovesMe } from '../utils/opsEvents';
 import { canEditOp, canLaunchOp, canScheduleOps, canViewOpsCalendar } from '../utils/opsPermissions';
@@ -527,7 +533,7 @@ function DmCabinet({ friend, onBack, currentUserId }) {
                   {/* A row with no `plaintext` key at all predates E2E — encrypted_content
                       was genuinely plaintext back then, so show it as-is. A row where
                       plaintext is explicitly null means it can't be read yet (MR2: pending). */}
-                  {msg.plaintext !== undefined ? (msg.plaintext ?? 'Waiting for key…') : msg.encrypted_content}
+                  {msg.verify === 'failed' ? <em>{UNVERIFIED_TEXT}</em> /* S7 D2 */ : msg.plaintext !== undefined ? (msg.plaintext ?? 'Waiting for key…') : msg.encrypted_content}
                   <span style={{ display: 'block', fontSize: 9, color: '#0e7490', marginTop: 2, textAlign: mine ? 'right' : 'left' }}>
                     {fmtTime(msg.timestamp)}
                   </span>
@@ -905,17 +911,8 @@ function TextChat({ chat, channel }) {
               )}
               {(msg.plaintext !== undefined ? msg.plaintext : msg.encrypted_content) != null && (
                 <span style={{ fontSize: 13, color: '#e5e7eb', wordBreak: 'break-word', fontFamily: 'monospace' }}>
-                  <MessageContent text={msg.plaintext !== undefined ? (msg.plaintext ?? '[unable to decrypt]') : msg.encrypted_content} />
+                  <MessageContent text={msg.verify === 'failed' ? UNVERIFIED_TEXT /* S7 D2 */ : msg.plaintext !== undefined ? (msg.plaintext ?? '[unable to decrypt]') : msg.encrypted_content} />
                 </span>
-              )}
-              {msg.image_url && (
-                <img
-                  src={resolveImageUrl(msg.image_url)}
-                  alt="attachment"
-                  onClick={() => setExpandedImg(resolveImageUrl(msg.image_url))}
-                  className="mt-1 rounded border border-[#0e2233] cursor-pointer hover:border-[#0891b2] transition-colors"
-                  style={{ maxWidth: 320, maxHeight: 240, objectFit: 'contain' }}
-                />
               )}
             </div>
           </div>
@@ -1388,6 +1385,21 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
   // E2EV: CommLink's voice key / version-gate state ({ keyState, error } | null).
   const [voiceE2e,           setVoiceE2e]           = useState(null);
   const [voiceConnect,       setVoiceConnect]       = useState(null); // NET
+  // S3: MLS groups this device looks stuck in (engine/mlsHealth.js).
+  const [mlsStuck,           setMlsStuck]           = useState(() => mlsHealthStuckGroups());
+  useEffect(() => mlsHealthSubscribe(setMlsStuck), []);
+  // S4: automatic per-group repair ladder for stuck groups (engine/mlsRepair.js;
+  // off when specter_mls_auto_repair = '0').
+  const [mlsRepairing,       setMlsRepairing]       = useState([]);
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    const userId = user.id;
+    return startMlsAutoRepair({
+      repairStep: (groupId, step) => repairGroupStep(api, userId, groupId, step),
+      log: mlsLog,
+      onRepairingChange: setMlsRepairing,
+    });
+  }, [user?.id]);
   // SA: CommLink's share-audio report (see bridge.js state.voice.shareAudio).
   const [voiceShareAudio,    setVoiceShareAudio]    = useState(null);
   // 'excellent' | 'good' | 'fair' | 'poor' — rolling drop/reconnect count from
@@ -1414,8 +1426,6 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
   }, []);
   // Ref to CommLink action functions (toggleMic, startScreenShare, etc.)
   const commLinkActionsRef = useRef({});
-  // Ref for CommLink's text chat relay (used only when CommLink renders a text channel)
-  const commLinkRelayRef = useRef(null);
   // Ref for CommLink's MLS video/audio key re-derive — see the mls_commit
   // handler below for why this needs to fire on top of handleChannelCommit.
   const commLinkMlsCommitRef = useRef(null);
@@ -1824,6 +1834,8 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
       voiceRoster: activeNet.kind !== 'group' ? activeNetRoster : voiceRoster,
       activeSharers: sharersForOverlay,
       userCallsign: localCallsign,
+      // C4: my own share is live → the HUD shows a small LIVE pip.
+      selfSharing: Boolean(voiceSharing),
       // Frequency bar inputs (older overlays ignore these).
       freqSpeakers,
       activeNetInfo: { kind: activeNet.kind, txNetId: activeNet.txNetId || null },
@@ -1968,24 +1980,30 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
     let unlisten;
     let disposed = false;
     let busy = false;
-    import('@tauri-apps/api/event').then(({ listen }) => {
+    import('@tauri-apps/api/event').then(({ listen, emit }) => {
       if (disposed) return;
+      // C4: tell the Game HUD what the hotkey did (a short notice in its
+      // header). Local IPC only; the app name never goes into logs.
+      const notice = (text, kind = 'info') => emit('overlay-notice', { text, kind }).catch(() => {});
       listen('specter://share-app', async () => {
         if (!oneShotListenerGate('share-app') || busy) return;
         const { inComms: connected, voiceSharing: sharing } = shareAppRef.current;
         const actions = commLinkActionsRef.current;
         busy = true;
         try {
-          if (sharing) { await actions?.stopScreenShare?.(); traceLog('share-app hotkey: stopped share'); return; }
-          if (!connected || !actions?.startScreenShare) { traceLog('share-app hotkey: not in voice, ignored'); return; }
-          if (!nativeCaptureAvailable()) { traceLog('share-app hotkey: native capture off, ignored'); return; }
+          if (sharing) { await actions?.stopScreenShare?.(); traceLog('share-app hotkey: stopped share'); notice('Stream stopped'); return; }
+          if (!connected || !actions?.startScreenShare) { traceLog('share-app hotkey: not in voice, ignored'); notice('Join a voice channel to stream', 'error'); return; }
+          if (!nativeCaptureAvailable()) { traceLog('share-app hotkey: native capture off, ignored'); notice('Streaming needs native capture', 'error'); return; }
           const { invoke } = await import('@tauri-apps/api/core');
           const target = await invoke('share_app_target');
-          if (!target?.source_id) { traceLog('share-app hotkey: no application window to share'); return; }
+          if (!target?.source_id) { traceLog('share-app hotkey: no application window to share'); notice('No app window to stream', 'error'); return; }
           const r = await actions.startScreenShare({ presetSource: { id: target.source_id, name: target.name || 'Application' } });
-          traceLog(`share-app hotkey: start ${r && !r.ok ? `failed (${r.error || 'unknown'})` : 'ok'}`);
+          const failed = r && !r.ok;
+          traceLog(`share-app hotkey: start ${failed ? `failed (${r.error || 'unknown'})` : 'ok'}`);
+          notice(failed ? "Couldn't start the stream" : `Streaming ${target.name || 'your app'}`, failed ? 'error' : 'live');
         } catch (e) {
           console.warn('[share-app] hotkey failed:', e);
+          notice("Couldn't start the stream", 'error');
         } finally { busy = false; }
       }).then(fn => { if (disposed) fn(); else unlisten = fn; });
     });
@@ -2409,6 +2427,15 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
   // (EngineState.liveOps; fed by the SSE handlers below).
   const liveOpsHost = useLiveOps({ userId: user?.id || null, orgs });
 
+  // B3: a channel's audience narrowed → re-key its MLS group (engine/narrowingReconcile).
+  const narrowingRef = useRef(null);
+  if (!narrowingRef.current) {
+    narrowingRef.current = createNarrowingReconciler({
+      isHeld: (channelId) => groupEpoch(channelId) !== null,
+      reconcile: (orgId, channelId, userId) => ensureChannelGroup(api, userId, orgId, channelId),
+    });
+  }
+
   useEventStream({
     // Org list changed (created, joined, kicked, dissolved)
     orgs_changed:     refreshOrgs,
@@ -2422,6 +2449,9 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
     channel_created:  refreshChannelsCb,
     channel_deleted:  refreshChannelsCb,
     channel_updated:  refreshChannelsCb, // rename / visibility (rank-restricted channels)
+    // B3: someone lost access to a channel I'm still on — commit their removal
+    // (new epoch, new key). Any org, not just the selected one.
+    channel_audience_narrowed: (payload) => { narrowingRef.current(payload, user?.id); },
     member_joined:    refreshMembers,
     member_removed:   refreshMembers,
     // My own rank changed: my permissions and which rank-restricted channels
@@ -2573,7 +2603,6 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
       noteUnreadRelay(payload); // P2A: unread badges in the strip
       _textChatRelayRef.current?.(payload);
       _dmCabinetRelayRef.current?.(payload);
-      commLinkRelayRef.current?.(payload);
     },
     // Peer backfill sync (see messageStore.js / messageController.ts) — these
     // were previously unwired here, so TextChat/DmCabinet's carefully
@@ -2927,12 +2956,15 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
     freqs: availableFreqs, activeFreqIdx, monitorStatus, // LEADFREQ
     shareAudio: voiceShareAudio, // SA
     liveOps: liveOpsHost.liveOps, // LIVE
+    mlsStuck, // S3
+    mlsRepairing, // S4
   });
-  // TRAY: the tray icon shows I'm in voice (green dot, red while muted).
+  // TRAY: the tray icon shows I'm in voice (BRAND: in-voice / muted / live icons).
   const trayVoiceOrg = (voiceChannel?.org_id && orgs.find(o => o.id === voiceChannel.org_id)) || selectedOrg;
   useTrayActivity({
     inVoice: Boolean(inComms && voiceChannel),
     muted: Boolean(voiceMuted),
+    sharing: Boolean(voiceSharing), // BRAND: live (screen share) wins in the tray
     channelName: voiceChannel?.name || null,
     orgName: trayVoiceOrg?.callsign || trayVoiceOrg?.name || null,
   });
@@ -3014,7 +3046,10 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
       [CMD.SERVER_RESYNC_ENCRYPTION]: async ({ orgId }) => {
         const id = orgId || selectedOrg?.id;
         if (!id || !orgs.some(o => o.id === id)) throw new Error('Unknown server');
-        return resyncOrgEncryption(id);
+        const result = await resyncOrgEncryption(id);
+        // S3: the resync rebuilt this device's copies; start detection afresh.
+        mlsHealthReset();
+        return result;
       },
       [CMD.CHAT_SEND]: async ({ channelId, text }) => {
         const ch = findBridgeChannel(channelId, 'text');
@@ -4098,7 +4133,6 @@ export default function WarRoom({ user, onLogout, initialConnectOrgId, forceSett
                 embedded
                 overlayActive={isOverlay}
                 stripViewerActive={stripViewer && Boolean(watchTarget) /* SV */}
-                onRelayRef={commLinkRelayRef}
                 onMlsCommitRef={commLinkMlsCommitRef}
               />
             </div>

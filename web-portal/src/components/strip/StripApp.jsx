@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import * as session from '../../auth/session.js';
+import useTwoFactorLogin from '../../auth/useTwoFactorLogin.js'; // L3
 import { api } from '../../api.js';
 import StripView from './StripView';
 import ChannelsCabinet, { UnreadPill, VoiceChannelPanel } from './ChannelsCabinet';
 import useEngine from './useEngine';
 import { CMD, RESYNC_COMMAND_TIMEOUT_MS, SLOW_COMMAND_TIMEOUT_MS, memberCommand, totalUnread } from '../../engine/bridge.js';
 // P2A: full-work-area window, fluid channels pane, chat, voice bar buttons.
-import { StripFrame } from './StripSidePanel';
+import { MAIN_WIDTH, StripFrame } from './StripSidePanel';
 import StripChat from './StripChat';
-import { SharePicker } from './StripVoiceControls';
+import { OverlayTab, SharePicker } from './StripVoiceControls';
 import { voiceSlots } from './voiceSlots'; // BAR2 (was VoiceBarButtons)
 import useFluidExpand, { fluidSlotStyle } from './useFluidExpand';
 import { useViewportHeight } from './stripOpsLayout';
@@ -24,20 +25,22 @@ import { setUser as setSessionUser } from '../../auth/tokenStore.js';
 import useSettings from './useSettings';
 import GamesCabinet from './GamesCabinet';
 import FriendsCabinet from './FriendsCabinet';
-import GameToolDock from './games/GameToolDock';
 // SV: the stream viewer (watch a sharer without the overlay).
 import StripStreamViewer from './StripStreamViewer';
-import { streamWatchSlots } from './streamSlots';
+import { StreamsPanel, streamWatchSlots } from './streamSlots';
 import { warmStreamListener } from './useStripStream';
 // The server welcome panel (cabinet 'welcome'; see welcome/WelcomeCabinet.jsx).
 import WelcomeCabinet from './welcome/WelcomeCabinet';
 import { markWelcomeSeen, shouldAutoShowWelcome } from './welcome/welcomeModel';
 
 const SettingsCabinet = lazy(() => import('./SettingsCabinet'));
-import { repairSlot } from './repairSlot'; // NET
+import { repairSlot, encryptionSyncSlot, bugReplySlot } from './repairSlot'; // NET, S3
+import useBugReportReplies from './useBugReportReplies';
 // LIVE: the live-op notice beside the bar (from the engine's liveOps).
 import LiveOpNotice from './LiveOpNotice';
+import StatusBanner from './StatusBanner'; // L7
 import useLiveNotices from './useLiveNotices';
+import { ScVoiceActive } from '../icons/brand'; // BRAND
 
 // The tray strip's container: session, servers, update state, the window
 // region, and the Tauri events that tie the strip to Rust (strip.rs) and to
@@ -77,6 +80,7 @@ const REGION_PAD = 6; // px of shadow kept around each panel; matches the root's
 // cabinet's minimum height then (clamped to the free side / work area).
 const VOICE_PANE_W = 320;
 const CHAT_PANE_W = 440;
+const GAME_TOOL_W = 1000; // GAMEFIT: the hangar's full width, bar column included, when the screen has room
 const VOICE_PANE_MIN_H = 360;
 const CHAT_PANE_MIN_H = 560;
 
@@ -154,6 +158,7 @@ export default function StripApp() {
   const [loggedOutView, setLoggedOutView] = useState('login');
   const [form, setForm] = useState({ email: '', password: '' });
   const [loginState, setLoginState] = useState({ loading: false, error: null, notice: null });
+  const tfa = useTwoFactorLogin(); // L3: login's code step
   const [forgotState, setForgotState] = useState({ loading: false, error: null, success: null });
 
   const [orgs, setOrgs] = useState([]);
@@ -457,6 +462,19 @@ export default function StripApp() {
     if (!error) engineCommand(CMD.CHANNELS_REFRESH, {});
     return { error };
   }, [engineOrgId, engineCommand]);
+  // L11: adult channels. Available = the server says this requester's region
+  // allows them (nothing is shown otherwise); attest = my one-time 18+ confirm.
+  const loadAdultAvailable = useCallback(async () => {
+    if (!engineOrgId) return false;
+    const { data } = await api.getChannels(engineOrgId);
+    return data?.adult_available === true;
+  }, [engineOrgId]);
+  const attestAdult = useCallback(async () => {
+    if (!engineOrgId) return { error: 'No server selected' };
+    const { error } = await api.attestAdult(engineOrgId);
+    if (!error) engineCommand(CMD.CHANNELS_REFRESH, {});
+    return { error };
+  }, [engineOrgId, engineCommand]);
   const loadRanks = useCallback(async () => {
     if (!engineOrgId) return [];
     const { data } = await api.getRoles(engineOrgId);
@@ -482,7 +500,11 @@ export default function StripApp() {
   const paneTarget = auth === 'in' && cabinet === 'channels' && focusChannel
     ? Math.max(0, Math.min(isChatPane(focusChannel) ? CHAT_PANE_W : VOICE_PANE_W, freeW))
     : 0;
-  const fluid = useFluidExpand(paneTarget, reportRegion);
+  // GAMEFIT (owner 2026-11-13): an open game tool replaces the game list in
+  // the Games cabinet and widens it the same way, never past the free side.
+  const barW = layout?.barRect?.w || MAIN_WIDTH;
+  const gameToolTarget = gameToolOpen ? Math.max(0, Math.min(GAME_TOOL_W - barW, freeW)) : 0;
+  const fluid = useFluidExpand(paneTarget || gameToolTarget, reportRegion);
   // While the pane slides shut its channel has already been unfocused; keep
   // showing it until the slide finishes.
   const lastPaneRef = useRef(null);
@@ -641,6 +663,8 @@ export default function StripApp() {
       onDeleteChannel={deleteChannel}
       onUpdateChannel={updateChannel}
       onLoadRanks={loadRanks}
+      onLoadAdultAvailable={loadAdultAvailable}
+      onAttestAdult={attestAdult}
       onClose={onClose}
       pane={pane}
       paneWidth={fluid.laid}
@@ -654,7 +678,10 @@ export default function StripApp() {
 
   // ── P2A: voice controls on the bar + screen-share picker ───────────────
   const inVoice = auth === 'in' && Boolean(engine.state.voice.channelId);
-  useEffect(() => { if (!inVoice) setPicker(null); }, [inVoice]);
+  // C2: the Streams panel (bar chip → who's sharing → where to watch).
+  const [streamsOpen, setStreamsOpen] = useState(false);
+  const closeStreams = useCallback(() => setStreamsOpen(false), []);
+  useEffect(() => { if (!inVoice) { setPicker(null); setStreamsOpen(false); } }, [inVoice]);
   useEffect(() => { setBarLevels(inVoice && stripVisible); }, [inVoice, stripVisible]); // BAR2
   const loadSources = useCallback(() => {
     setPicker((p) => ({ sources: [], ...p, loading: true, error: null }));
@@ -668,6 +695,7 @@ export default function StripApp() {
     if (picker) { setPicker(null); return; }
     setCabinet(null);
     setFocus(null);
+    setStreamsOpen(false); // C2: one stacked panel at a time
     setPicker({ loading: true, error: null, sources: [] });
     loadSources();
   };
@@ -687,7 +715,7 @@ export default function StripApp() {
     onToggleOverlay: () => engineCommand(engine.state.overlay.open ? CMD.OVERLAY_CLOSE : CMD.OVERLAY_OPEN, {}),
     onShareClick,
   }) : [];
-  const stackPanel = picker && inVoice ? (
+  const sharePickerPanel = picker && inVoice ? (
     <SharePicker
       list={picker}
       starting={Boolean(picker.starting)}
@@ -763,14 +791,30 @@ export default function StripApp() {
   openViewerRef.current = openViewer;
   const closeViewerRef = useRef(closeViewer);
   closeViewerRef.current = closeViewer;
-  const viewerToOverlay = () => {
+  // C2: watch `callsign` at a WATCH_DESTINATIONS entry. 'bar' is the strip's
+  // own viewer; any other destination takes the stream away from it (the
+  // engine hands it over), so the viewer closes once that succeeds.
+  // Resolves when started, rejects with the reason.
+  const watchAt = (callsign, dest) => {
+    if (dest.id === 'bar') { openViewer(callsign); return Promise.resolve(); }
+    return engineSend(dest.cmd, { callsign }).then(() => {
+      setViewer((cur) => (cur ? null : cur));
+    });
+  };
+  const viewerSwitch = (dest) => {
     const callsign = viewer?.callsign;
     if (!callsign) return;
-    engineSend(CMD.OVERLAY_WATCH, { callsign }).then(
-      () => setViewer(null),
-      (err) => setViewer((cur) => (cur?.callsign === callsign ? { ...cur, error: err.message } : cur)),
-    );
+    watchAt(callsign, dest).catch((err) => setViewer((cur) => (cur?.callsign === callsign ? { ...cur, error: err.message } : cur)));
   };
+  const streamsPanel = streamsOpen && inVoice && !sharePickerPanel ? (
+    <StreamsPanel
+      engine={engine}
+      onPick={watchAt}
+      onClose={closeStreams}
+      maxHeight={Math.max(200, Math.min(420, vh - 110))}
+    />
+  ) : null;
+  const stackPanel = sharePickerPanel || streamsPanel;
   const retryViewer = () => {
     const callsign = viewer?.callsign;
     if (!callsign) return;
@@ -789,7 +833,7 @@ export default function StripApp() {
       onToggleExpand={() => setViewerExpanded((x) => !x)}
       overlayOk={engine.state.caps.overlay}
       error={viewer.error}
-      onOpenOverlay={viewerToOverlay}
+      onSwitch={viewerSwitch}
       onClose={closeViewer}
       onRetry={retryViewer}
       onShow={() => { closeCabinet(); setPicker(null); }}
@@ -799,20 +843,39 @@ export default function StripApp() {
   // NET: voice failed to connect (classified by CommLink): a quiet chip on the
   // bar that opens Settings on the Repair panel.
   const [settingsSection, setSettingsSection] = useState(null);
+  const bugReplies = useBugReportReplies(auth === 'in');
   useEffect(() => { if (cabinet !== 'settings') setSettingsSection(null); }, [cabinet]);
   // Repair connection lives under About & diagnostics.
   const openRepair = () => { setSettingsSection({ id: 'about', at: Date.now() }); if (cabinet !== 'settings') toggleCabinet('settings'); };
+  // L3: a server-owner action refused with TWO_FACTOR_REQUIRED -> open
+  // Settings → Account, where the two-factor setup lives.
+  useEffect(() => {
+    const onRequired = () => { setSettingsSection({ id: 'account', at: Date.now() }); if (cabinet !== 'settings') toggleCabinet('settings'); };
+    window.addEventListener('specter:two-factor-required', onRequired);
+    return () => window.removeEventListener('specter:two-factor-required', onRequired);
+  });
   if (auth === 'in' && engine.connected && engine.state.voice.connectIssue) barSlots.push(repairSlot(engine.state.voice.connectIssue, openRepair));
+  // The owner replied to a bug report: Settings → About & diagnostics → Your reports.
+  if (auth === 'in' && bugReplies.unread > 0) barSlots.push(bugReplySlot(bugReplies.unread, openRepair));
+  // S3: stuck MLS group(s) → suggest Resync encryption (same Settings section).
+  const mlsStuck = engine.state.mls?.stuck;
+  if (auth === 'in' && engine.connected && Array.isArray(mlsStuck) && mlsStuck.length) barSlots.push(encryptionSyncSlot(mlsStuck, openRepair, engine.state.mls?.repairing));
   barSlots.push(...(auth === 'in' ? streamWatchSlots({
     engine, viewerOpen,
-    onWatch: (callsign) => openViewer(callsign),
-    onOpenChannels: () => { if (cabinet !== 'channels') toggleCabinet('channels'); },
+    panelOpen: Boolean(streamsPanel),
+    onToggle: () => {
+      if (streamsOpen) { setStreamsOpen(false); return; }
+      setCabinet(null);
+      setFocus(null);
+      setPicker(null);
+      setStreamsOpen(true);
+    },
   }) : []));
 
   const unreadTotal = auth === 'in' ? totalUnread(engine.state) : 0;
   const channelsBadge = unreadTotal > 0 ? {
     label: `${unreadTotal} unread`,
-    element: <UnreadPill count={unreadTotal} className="pointer-events-none absolute -top-1 -right-1 !h-[17px] !min-w-[17px] !px-1 !text-[10px] border-2 border-[#0b1d2e]" />,
+    element: <UnreadPill count={unreadTotal} className="pointer-events-none absolute -top-1 -right-1 !h-[17px] !min-w-[17px] !px-1 !text-[10px] border-2 border-specter-brand-ink" />,
   } : null;
 
   // P2C: Settings and Games cabinets.
@@ -834,6 +897,7 @@ export default function StripApp() {
             resyncOrg={activeOrg /* MR2: Resync encryption, under About & diagnostics */}
             resync={resync}
             onResyncEncryption={auth === 'in' && engine.connected ? resyncEncryption : null}
+            bugReplies={auth === 'in' ? bugReplies : null}
             maxHeight={maxHeight}
             onClose={onClose}
           />
@@ -883,6 +947,8 @@ export default function StripApp() {
         <GamesCabinet
           activeTool={gameTool}
           onOpenTool={(game, tool) => setGameTool({ game, tool, shipId: null })}
+          onToolChange={setGameTool}
+          onCloseTool={() => setGameTool(null)}
           onClose={onClose}
           maxHeight={maxHeight}
         />
@@ -892,11 +958,6 @@ export default function StripApp() {
   };
   const renderCabinetAll = (id, args) => renderCabinet(id, args) ?? renderP2CCabinet(id, args);
 
-  // P2C: a game tool (hangar / ship editor) opens as a wide panel in the free
-  // area beside the bar column (StripFrame's aside slot, P2A layout).
-  const gameToolAside = gameToolOpen ? (
-    <GameToolDock tool={gameTool} onChange={setGameTool} onClose={() => setGameTool(null)} onRegionChange={reportRegion} />
-  ) : null;
 
   // ── LIVE: the notice's actions ─────────────────────────────────────────
   // Join: open the strip on the op's server with the Channels cabinet (the op
@@ -955,12 +1016,35 @@ export default function StripApp() {
   const onLoginSubmit = async (e) => {
     e.preventDefault();
     setLoginState({ loading: true, error: null, notice: null });
-    const { error } = await session.login({ email: form.email, password: form.password });
+    if (tfa.active) {
+      const { error } = await tfa.submit();
+      if (error) { setLoginState({ loading: false, error, notice: null }); return; }
+      setLoginState({ loading: false, error: null, notice: null });
+      setAuth('in');
+      return;
+    }
+    const { error, code, masked_email, twoFactor } = await session.login({ email: form.email, password: form.password });
+    if (twoFactor) {
+      setForm((f) => ({ ...f, password: '' }));
+      setLoginState({ loading: false, error: null, notice: null });
+      tfa.begin(twoFactor.challenge);
+      return;
+    }
+    if (code === 'EMAIL_NOT_VERIFIED') {
+      setLoginState({ loading: false, error: session.verifyInboxMessage(masked_email), notice: null, unverified: true });
+      return;
+    }
     if (error) { setLoginState({ loading: false, error, notice: null }); return; }
     // auth-changed "login" switches this view (and wakes the engine window).
     setLoginState({ loading: false, error: null, notice: null });
     setForm((f) => ({ ...f, password: '' }));
     setAuth('in');
+  };
+
+  const onResendVerification = async () => {
+    setLoginState((s) => ({ ...s, loading: true }));
+    const { error } = await session.resendVerification({ email: form.email, password: form.password });
+    setLoginState((s) => ({ ...s, loading: false, resendNote: error || 'If that matches an account awaiting verification, a new email is on its way.' }));
   };
 
   const onForgotSubmit = async (e) => {
@@ -996,8 +1080,10 @@ export default function StripApp() {
         onPasswordChange: (e) => setForm((f) => ({ ...f, password: e.target.value })),
         onSubmit: onLoginSubmit,
         ...loginState,
+        onResendVerification: loginState.unverified ? onResendVerification : undefined,
         onForgotPassword: () => { setForgotState({ loading: false, error: null, success: null }); setLoggedOutView('forgot'); },
         onCreateAccount: openSignup,
+        twoFactor: tfa.twoFactor && { ...tfa.twoFactor, onCancel: () => { tfa.cancel(); setLoginState({ loading: false, error: null, notice: null }); } },
       }}
       forgot={{
         email: form.email,
@@ -1031,13 +1117,19 @@ export default function StripApp() {
       opPanel={opPanel}
       barSlots={barSlots /* BAR2 */}
       channelsBadge={channelsBadge}
+      channelsIcon={inVoice ? ScVoiceActive : null /* BRAND: the Channels tile while in voice */}
       stackPanel={stackPanel}
       cabinetSlotStyle={fluidSlotStyle(fluid, expand)}
       onCabinetSlotTransitionEnd={fluid.onTransitionEnd}
       streamViewer={streamViewer /* SV */}
       collapsed={collapsed /* SV */}
       liveNotice={liveNotice /* LIVE */}
+      overlayTab={auth === 'in' && engine.connected && engine.state.voice.channelId
+        ? ({ grow: g, onRegionChange: rc }) => (
+          <OverlayTab engine={engine} grow={g} onRegionChange={rc}
+            onClick={() => engineCommand(engine.state.overlay.open ? CMD.OVERLAY_CLOSE : CMD.OVERLAY_OPEN, {})} />
+        ) : null /* OVERLAYTAB */}
     />
   );
-  return <StripFrame layout={layout} grow={grow} expand={expand} aside={gameToolAside}>{main}</StripFrame>;
+  return <StripFrame layout={layout} grow={grow} expand={expand}>{main}<StatusBanner grow={grow} /></StripFrame>;
 }

@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { coarseIp } from '../utils/coarseIp.js';
 import * as argon2 from 'argon2';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
@@ -16,6 +17,12 @@ import { DROPLET_TIERS } from '../config/dropletTiers.js';
 import { getNodesWithStatus } from '../utils/nodeStatus.js';
 import { decryptEmail } from '../utils/encryption.js';
 import { decryptReportBuffer } from '../utils/reportEncryption.js';
+import {
+  signChallenge, verifyChallenge, createUsedChallengeSet, requireTwoFactorForPrivileged,
+  CHALLENGE_TTL_SECONDS, TWO_FACTOR_INVALID,
+} from '../utils/twoFactor.js';
+import * as twoFactorStore from '../utils/twoFactorStore.js';
+import { checkSecondFactor } from './twoFactorController.js';
 import {
   AdminRole,
   isAdminRole,
@@ -62,6 +69,7 @@ class HttpError extends Error {
   }
 }
 
+/** Rate-limit key only (in memory): the full address. */
 const clientIp = (req: Request): string | null => (req.ip ? String(req.ip).slice(0, 64) : null);
 
 /** Never logs request bodies, params or pg error details — see safeErr. */
@@ -113,7 +121,7 @@ export async function writeAudit(db: Db, req: AdminRequest, e: AuditEntry, actor
       e.targetId ?? null,
       JSON.stringify(e.summary ?? {}),
       e.reason ?? null,
-      clientIp(req),
+      coarseIp(clientIp(req)),
     ],
   );
 }
@@ -265,13 +273,64 @@ export const adminLogin = async (req: Request, res: Response) => {
       return res.status(403).json({ message: 'This admin account has no role assigned.' });
     }
 
+    // L3: 2FA on -> challenge first, session only after POST /admin/login/2fa.
+    const subject = { type: 'admin' as const, id: String(admin.id) };
+    if (await twoFactorStore.isEnabled(subject)) {
+      const { challenge } = signChallenge(subject, getJwtSecret());
+      return res.json({ two_factor_required: true, challenge, expires_in: CHALLENGE_TTL_SECONDS });
+    }
+
+    return await openAdminSession(req, res, admin, role);
+  } catch (error) {
+    return fail(res, 'login', error);
+  }
+};
+
+const usedAdminChallenges = createUsedChallengeSet();
+
+/** POST /admin/login/2fa { challenge, code | recovery_code } -> same answer as /admin/login. */
+export const adminLoginTwoFactor = async (req: Request, res: Response) => {
+  const { challenge, code, recovery_code } = req.body ?? {};
+  try {
+    const claims = verifyChallenge(challenge, getJwtSecret(), 'admin');
+    if (!claims || usedAdminChallenges.has(claims.jti) || !twoFactorStore.takeChallengeAttempt(claims.jti)) {
+      return res.status(401).json({ code: 'TWO_FACTOR_CHALLENGE_EXPIRED', message: 'Sign-in timed out. Enter your password again.' });
+    }
+    const subject = { type: 'admin' as const, id: claims.sub };
+    if (!twoFactorStore.takeAccountAttempt(subject)) {
+      return res.status(429).json({ message: 'Too many code attempts. Try again in an hour.' });
+    }
+    const adminRes = await pool.query('SELECT id, username, role, permissions FROM platform_admins WHERE id = $1', [claims.sub]);
+    const admin = adminRes.rows[0];
+    if (!admin) return res.status(401).json({ message: 'Invalid credentials' });
+    const r = await twoFactorStore.verifyFactor(subject, { code, recovery_code });
+    if (!r.ok) {
+      await writeAudit(pool, req, { action: 'admin.2fa_failed', targetType: 'admin', targetId: admin.id },
+        { id: admin.id, username: admin.username });
+      return res.status(401).json({ code: TWO_FACTOR_INVALID, message: 'That code is not valid. Codes can only be used once.' });
+    }
+    usedAdminChallenges.add(claims.jti, claims.exp);
+    if (r.method === 'recovery') {
+      await writeAudit(pool, req, { action: 'admin.2fa_recovery_used', targetType: 'admin', targetId: admin.id, summary: { remaining: r.recovery_remaining } },
+        { id: admin.id, username: admin.username });
+    }
+    const role = effectiveAdminRole(admin);
+    if (!role) return res.status(403).json({ message: 'This admin account has no role assigned.' });
+    return await openAdminSession(req, res, admin, role);
+  } catch (error) {
+    return fail(res, 'login 2fa', error);
+  }
+};
+
+async function openAdminSession(req: Request, res: Response, admin: { id: string; username: string }, role: AdminRole) {
+  {
     const maxHours = adminSessionMaxHours();
     const session = await withTx(async (c) => {
       const s = await c.query(
         `INSERT INTO admin_sessions (admin_id, expires_at, reauth_at, ip, user_agent)
          VALUES ($1, NOW() + make_interval(hours => $2::int), NOW(), $3, $4)
          RETURNING id, expires_at`,
-        [admin.id, maxHours, clientIp(req), (req.get('user-agent') ?? '').slice(0, 256)],
+        [admin.id, maxHours, coarseIp(clientIp(req)), (req.get('user-agent') ?? '').slice(0, 256)],
       );
       await c.query('UPDATE platform_admins SET last_login = NOW() WHERE id = $1', [admin.id]);
       // Housekeeping: dead sessions are only useful for a while (the audit
@@ -297,10 +356,8 @@ export const adminLogin = async (req: Request, res: Response) => {
       admin: { id: admin.id, username: admin.username, role },
       session: { expires_at: session.expires_at, idle_timeout_minutes: adminIdleTimeoutMinutes() },
     });
-  } catch (error) {
-    return fail(res, 'login', error);
   }
-};
+}
 
 export const adminLogout = async (req: AdminRequest, res: Response) => {
   try {
@@ -326,6 +383,12 @@ export const adminReauth = async (req: AdminRequest, res: Response) => {
       await writeAudit(pool, req, { action: 'admin.reauth_failed', targetType: 'admin', targetId: req.admin!.id });
       return res.status(401).json({ message: 'Incorrect password', code: 'REAUTH_FAILED' });
     }
+    // L3: with 2FA on, re-auth also needs a fresh code (checkSecondFactor answers 401/429 itself).
+    if (!(await checkSecondFactor({ type: 'admin', id: req.admin!.id }, req.body, res,
+      { id: req.admin!.id, username: req.admin!.username }))) {
+      await writeAudit(pool, req, { action: 'admin.reauth_failed', targetType: 'admin', targetId: req.admin!.id, summary: { second_factor: true } });
+      return;
+    }
     await withTx(async (c) => {
       await c.query('UPDATE admin_sessions SET reauth_at = NOW(), last_seen_at = NOW() WHERE id = $1', [req.admin!.sessionId]);
       await writeAudit(c, req, { action: 'admin.reauth', targetType: 'admin', targetId: req.admin!.id });
@@ -337,6 +400,8 @@ export const adminReauth = async (req: AdminRequest, res: Response) => {
 };
 
 export const getAdminMe = async (req: AdminRequest, res: Response) => {
+  let enabled = false;
+  try { enabled = await twoFactorStore.isEnabled({ type: 'admin', id: req.admin!.id }); } catch (err) { console.error('[admin] 2fa state:', safeErr(err)); }
   res.json({
     admin: { id: req.admin!.id, username: req.admin!.username, role: req.admin!.role },
     session: {
@@ -344,6 +409,7 @@ export const getAdminMe = async (req: AdminRequest, res: Response) => {
       idle_timeout_minutes: adminIdleTimeoutMinutes(),
       reauth_window_minutes: adminReauthWindowMinutes(),
     },
+    two_factor: { enabled, required: requireTwoFactorForPrivileged() },
   });
 };
 
@@ -745,6 +811,8 @@ export const banGlobalUser = async (req: AdminRequest, res: Response) => {
           },
           refresh_tokens_revoked: sessionsRevoked,
           hwid_shared_accounts: hw.shared_accounts,
+          // L12: a CSAM-related ban can't be appealed (utils/banAppeals.ts)
+          ...(ban && body.csam === true ? { csam: true } : {}),
         },
       });
       return { sessionsRevoked, hwidBanApplied, hwidBanRemoved };
@@ -1000,6 +1068,8 @@ export const eraseUser = async (req: AdminRequest, res: Response) => {
         else r = await c.query(`UPDATE ${fk.table} SET ${fk.column} = DEFAULT WHERE ${fk.column} = $1`, [userId]);
         if ((r.rowCount ?? 0) > 0) affected[`${fk.table}.${fk.rawColumn}`] = { plan, rows: r.rowCount ?? 0 };
       }
+
+      await twoFactorStore.deleteForSubject(c, { type: 'user', id: userId }); // L3
 
       const tomb = `deleted_${userId.replace(/-/g, '').slice(0, 16)}`;
       await c.query(

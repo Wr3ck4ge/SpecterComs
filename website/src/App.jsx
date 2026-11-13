@@ -9,6 +9,7 @@ import LandingPage from './components/LandingPage';
 import AdminPortal from './components/AdminPortal';
 import WebPortalDashboard from './components/WebPortalDashboard';
 import BillingReturnPage from './components/billing/BillingReturnPage';
+import AppealPage from './components/AppealPage';
 
 // ─── Design System ─────────────────────────────────────────────────────────────
 
@@ -173,9 +174,21 @@ function AuthScreen({ onLogin, isModal = false }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  // Set when the server answers EMAIL_NOT_VERIFIED (required-verification signups).
+  const [unverified, setUnverified] = useState(null); // { masked } | null
+  const [resendNote, setResendNote] = useState(null);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
-  const switchMode = (m) => { setMode(m); setError(null); setSuccess(null); };
+  const [tfa, setTfa] = useState(null); // L3: { challenge, code, useRecovery } while asking for the code
+  const switchMode = (m) => { setMode(m); setError(null); setSuccess(null); setUnverified(null); setResendNote(null); setTfa(null); };
+
+  const handleResend = async () => {
+    setResendNote(null);
+    setLoading(true);
+    const { error } = await api.resendVerificationPublic({ email: form.email, password: form.password });
+    setLoading(false);
+    setResendNote(error || 'If that matches an account awaiting verification, a new email is on its way.');
+  };
 
   const handleForgotSubmit = async (e) => {
     e.preventDefault();
@@ -192,6 +205,8 @@ function AuthScreen({ onLogin, isModal = false }) {
     e.preventDefault();
     setError(null);
     setSuccess(null);
+    setUnverified(null);
+    setResendNote(null);
     setLoading(true);
 
     // No hwid in either payload — see auth/payloads.js.
@@ -208,6 +223,14 @@ function AuthScreen({ onLogin, isModal = false }) {
         }
         return setError(error);
       }
+      // Server requires a verified email: no session yet, tell the user where to look.
+      if (data.verification_required) {
+        const where = data.masked_email ? ` at ${data.masked_email}` : '';
+        setSuccess(`Operator ${data.user.callsign} registered. Check your inbox${where} to verify your email, then log in.`);
+        setMode('login');
+        setForm({ callsign: '', global_tag: '', email: form.email, password: '' });
+        return;
+      }
       // Sign straight in with what was just entered, instead of making the
       // new user retype the password on the login form (a mistyped retype
       // looked like "the password wasn't saved").
@@ -223,12 +246,38 @@ function AuthScreen({ onLogin, isModal = false }) {
       setMode('login');
       setForm({ callsign: '', global_tag: '', email: form.email, password: '' });
     } else {
-      const { data, error } = await api.login(buildLoginPayload(form));
+      const { data, error, code, masked_email } = await api.login(buildLoginPayload(form));
       setLoading(false);
+      if (code === 'EMAIL_NOT_VERIFIED') return setUnverified({ masked: masked_email || '' });
       if (error) return setError(error);
+      // L3: 2FA on -> ask for the code before there is a session.
+      if (data.two_factor_required) {
+        setForm((f) => ({ ...f, password: '' }));
+        return setTfa({ challenge: data.challenge, code: '', useRecovery: false });
+      }
       session.setSession(data.token, data.refresh_token, data.user);
       onLogin(data.user);
     }
+  };
+
+  // L3: login's second step (authenticator or recovery code).
+  const handleTwoFactorSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    const value = tfa.code.trim();
+    const { data, error, code } = await api.verifyTwoFactor(tfa.useRecovery
+      ? { challenge: tfa.challenge, recovery_code: value }
+      : { challenge: tfa.challenge, code: value });
+    setLoading(false);
+    if (error) {
+      if (code === 'TWO_FACTOR_CHALLENGE_EXPIRED') setTfa(null);
+      else setTfa((t) => ({ ...t, code: '' }));
+      return setError(error);
+    }
+    setTfa(null);
+    session.setSession(data.token, data.refresh_token, data.user);
+    onLogin(data.user);
   };
 
   if (mode === 'forgot') {
@@ -292,6 +341,33 @@ function AuthScreen({ onLogin, isModal = false }) {
             ))}
           </div>
 
+          {tfa ? (
+            <form onSubmit={handleTwoFactorSubmit} className="space-y-4">
+              <div className="text-specter-text-muted font-mono text-xs">
+                {tfa.useRecovery
+                  ? 'Enter one of the recovery codes you saved when you turned on two-factor authentication. Each works once.'
+                  : 'Enter the 6-digit code from your authenticator app.'}
+              </div>
+              <Input label={tfa.useRecovery ? 'Recovery code' : 'Authentication code'} id="tfa-code" type="text"
+                value={tfa.code} onChange={(e) => setTfa((t) => ({ ...t, code: e.target.value }))}
+                placeholder={tfa.useRecovery ? 'XXXX-XXXX-XXXX' : '123456'} required autoFocus
+                autoComplete="one-time-code" inputMode={tfa.useRecovery ? 'text' : 'numeric'} />
+              {error && <Alert type="error">{error}</Alert>}
+              <Button type="submit" full disabled={loading || !tfa.code.trim()}>
+                {loading ? 'Checking...' : 'Verify'}
+              </Button>
+              <div className="flex justify-between">
+                <button type="button" onClick={() => { setError(null); setTfa((t) => ({ ...t, code: '', useRecovery: !t.useRecovery })); }}
+                  className="text-specter-text-muted hover:text-specter-primary-cyan text-xs font-mono transition-colors">
+                  {tfa.useRecovery ? 'Use an authenticator code' : 'Use a recovery code'}
+                </button>
+                <button type="button" onClick={() => { setError(null); setTfa(null); }}
+                  className="text-specter-text-muted hover:text-specter-primary-cyan text-xs font-mono transition-colors">
+                  ← Back
+                </button>
+              </div>
+            </form>
+          ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'register' ? (
               <>
@@ -322,11 +398,22 @@ function AuthScreen({ onLogin, isModal = false }) {
 
             {error   && <Alert type="error">{error}</Alert>}
             {success && <Alert type="success">{success}</Alert>}
+            {unverified && (
+              <Alert type="error">
+                Check your inbox{unverified.masked ? ` at ${unverified.masked}` : ''} to verify your email, then log in.
+                <button type="button" onClick={handleResend} disabled={loading}
+                  className="ml-2 underline text-specter-primary-cyan disabled:opacity-50">
+                  Resend email
+                </button>
+                {resendNote && <div className="mt-1 text-specter-text-muted">{resendNote}</div>}
+              </Alert>
+            )}
 
             <Button type="submit" full disabled={loading}>
               {loading ? 'Authenticating...' : mode === 'login' ? 'Log In' : 'Create Account'}
             </Button>
           </form>
+          )}
         </Card>
 
         <p className="text-center text-specter-text-muted text-xs font-mono">
@@ -402,6 +489,46 @@ function ResetPasswordScreen() {
           )}
         </Card>
         <p className="text-center text-specter-text-muted text-xs font-mono">Zero-Trust. End-to-End Encrypted.</p>
+      </div>
+    </div>
+  );
+}
+
+// --- Verify Email Screen ---
+// L2: the emailed link lands here; the token is only consumed by this POST, so
+// mail-scanner prefetching of the GET link cannot burn it.
+
+function VerifyEmailScreen() {
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const token = searchParams.get('token') || '';
+  const [state, setState] = useState({ loading: !!token, error: token ? null : 'Missing verification token. Please use the link from your email.', done: false });
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    api.verifyEmail(token).then(({ error }) => {
+      if (cancelled) return;
+      setState({ loading: false, error: error || null, done: !error });
+    });
+    return () => { cancelled = true; };
+  }, [token]);
+
+  return (
+    <div className="min-h-screen bg-specter-bg-deep flex items-center justify-center bg-[url('/SpecterBG.png')] bg-cover bg-center">
+      <div className="w-full max-w-sm space-y-6">
+        <div className="text-center space-y-1">
+          <div className="text-specter-primary-cyan font-mono text-3xl font-bold tracking-[0.3em]">SPECTERCOMS</div>
+        </div>
+        <Card>
+          <div className="text-specter-primary-cyan font-mono text-xs uppercase tracking-widest mb-4">Verify Email</div>
+          {state.loading && <div className="text-specter-text-muted font-mono text-sm">Verifying...</div>}
+          {state.done && <Alert type="success">Email verified. You can close this page.</Alert>}
+          {state.error && <Alert type="error">{state.error}</Alert>}
+          <div className="mt-4">
+            <Button full onClick={() => navigate('/auth')}>Go to Login</Button>
+          </div>
+        </Card>
       </div>
     </div>
   );
@@ -489,6 +616,8 @@ function AppContent() {
 
       <Route path="/auth/admin" element={<AdminPortal onExit={() => navigate('/')} />} />
       <Route path="/reset-password" element={<ResetPasswordScreen />} />
+      <Route path="/verify-email" element={<VerifyEmailScreen />} />
+      <Route path="/appeal" element={<AppealPage />} />
       <Route path="/join/:code" element={<JoinPage />} />
       {/* Stripe Checkout success/cancel landing (public: Checkout usually runs in a browser with no session) */}
       <Route path="/billing/return" element={<BillingReturnPage />} />

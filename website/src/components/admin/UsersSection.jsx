@@ -20,6 +20,7 @@ function BanModal({ adminApi, user, hwid, onClose, onDone }) {
   const [hwidBan, setHwidBan] = useState(false);
   const [ackShared, setAckShared] = useState(false);
   const [hwidUnban, setHwidUnban] = useState(true);
+  const [csam, setCsam] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -30,7 +31,7 @@ function BanModal({ adminApi, user, hwid, onClose, onDone }) {
     setBusy(true);
     setErr(null);
     const body = banning
-      ? { ban: true, reason, confirm_callsign: confirm, hwid_ban: hwidBan, acknowledge_shared_hwid: ackShared }
+      ? { ban: true, reason, confirm_callsign: confirm, hwid_ban: hwidBan, acknowledge_shared_hwid: ackShared, csam }
       : { ban: false, reason, confirm_callsign: confirm, hwid_unban: hwidUnban };
     const { data, error } = await adminApi.banUser(user.id, body);
     setBusy(false);
@@ -64,6 +65,13 @@ function BanModal({ adminApi, user, hwid, onClose, onDone }) {
             <span>
               Also ban this device {hwid?.short && <code className="text-xs bg-gray-100 px-1 rounded">{hwid.short}</code>}
               <span className="block text-xs text-gray-500">{hwid?.reason || 'No hardware ID on record.'}</span>
+            </span>
+          </label>
+          <label className="flex items-start gap-2">
+            <input type="checkbox" checked={csam} onChange={(e) => setCsam(e.target.checked)} className="mt-0.5" />
+            <span>
+              CSAM-related ban
+              <span className="block text-xs text-gray-500">Marks the ban as not appealable. The user sees a neutral message.</span>
             </span>
           </label>
           {bannable && hwidBan && shared > 0 && (
@@ -115,7 +123,7 @@ function downloadJson(obj, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function DsrModal({ adminApi, user, mode, onClose, onDone }) {
+export function DsrModal({ adminApi, user, mode, onClose, onDone }) {
   const [preview, setPreview] = useState(null);
   const [previewErr, setPreviewErr] = useState(null);
   const [reason, setReason] = useState('');

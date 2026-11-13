@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { AlertCircle, ChevronLeft, Hash, Loader2, Lock, MessageSquare, Send, X } from 'lucide-react';
+import { AlertCircle, ChevronLeft, Hash, Loader2, MessageSquare, Send, X } from 'lucide-react';
+import { ScEncryptedVerified, ScUnverified } from '../icons/brand'; // BRAND
 import { IconButton } from '../ui';
 import { cx, focusRing } from '../ui/styles';
 import { fmtDayLabel, fmtTime } from '../../utils/format';
@@ -32,6 +33,7 @@ export default function StripChat({ channel, chat, onSend, onClose, onBack = nul
   const [input, setInput] = useState(initialInput);
   const [pending, setPending] = useState(initialPending); // [{ key, text }]
   const [error, setError] = useState(initialError);
+  const [revealed, setRevealed] = useState(() => new Set()); // S7: unverified rows the user chose to show
   const scrollRef = useRef(null);
   const atBottomRef = useRef(true);
   const inputRef = useRef(null);
@@ -88,7 +90,7 @@ export default function StripChat({ channel, chat, onSend, onClose, onBack = nul
         <h2 className="flex-1 min-w-0 truncate text-ui-lg font-semibold text-specter-text-main">{channel.name}</h2>
         {isDm && (
           <span className="shrink-0 inline-flex items-center gap-1 text-ui-xs text-emerald-300" title="Direct messages are end-to-end encrypted">
-            <Lock size={11} aria-hidden="true" />Encrypted
+            <ScEncryptedVerified size={11} />Encrypted
           </span>
         )}
         <IconButton icon={<X size={16} />} label={isDm ? 'Close conversation' : 'Close chat'} size="sm" onClick={onClose} />
@@ -122,8 +124,19 @@ export default function StripChat({ channel, chat, onSend, onClose, onBack = nul
                   </span>
                   <span className="shrink-0 text-ui-xs tabular-nums text-specter-text-subtle">{fmtTime(m.timestamp)}</span>
                 </div>
-                {m.text != null ? (
-                  <p className="text-ui-sm text-specter-text-muted whitespace-pre-wrap break-words">{m.text}</p>
+                {m.unverified && !revealed.has(m.id) ? (
+                  // S7 (D2): the message doesn't match its franking commitment
+                  // (only a modified client can send that). Hidden, click to show.
+                  <button type="button" onClick={() => setRevealed((r) => new Set(r).add(m.id))}
+                    className={cx('inline-flex items-center gap-1 text-left text-ui-sm italic text-specter-text-subtle hover:text-specter-text-muted', focusRing)}
+                    title="Its content doesn't match what the server relayed. Click to show it anyway.">
+                    <ScUnverified size={13} className="shrink-0 text-amber-300" />This message couldn&rsquo;t be verified. Show
+                  </button>
+                ) : m.text != null ? (
+                  <p className="text-ui-sm text-specter-text-muted whitespace-pre-wrap break-words">
+                    {m.unverified && <span className="mr-1 text-ui-xs not-italic text-amber-300">[unverified]</span>}
+                    {m.text}
+                  </p>
                 ) : (
                   // MR2: not readable yet — the engine retries on key changes
                   // and a peer's backfill replaces it. Never a blank row.

@@ -17,6 +17,10 @@ import mlsRoutes from './routes/mls.js';
 import deviceRoutes from './routes/device.js';
 import abuseRoutes from './routes/abuse.js';
 import voiceReportRoutes from './routes/voiceReport.js';
+import bugReportRoutes from './routes/bugReport.js';
+import tsReportRoutes from './routes/tsReport.js';
+import { TS_REPORT_BODY_LIMIT } from './utils/tsReport.js';
+import statusRoutes from './routes/status.js';
 import diagRoutes from './routes/diag.js';
 import netprobeRoutes from './routes/netprobe.js'; // Repair panel network test
 import gameShipsRoutes from './routes/gameShips.js';
@@ -31,7 +35,9 @@ import { startBillingCycleScheduler } from './utils/billingCycle.js';
 import { getBillingConfig } from './config/billingConfig.js';
 import { paymentsStatus } from './payments/index.js';
 import { seedPresenceFromDb } from './controllers/channelController.js';
+import { randomizeLegacyUploadNames } from './controllers/userController.js';
 import { startGameDataSyncScheduler } from './utils/gameDataScheduler.js';
+import { startOwnershipSweep } from './utils/ownershipTransfer.js';
 import { startPushWatcher } from './jobs/pushWatcher.js';
 
 dotenv.config();
@@ -40,7 +46,7 @@ const app = express();
 export { app };
 const port = process.env.PORT || 3000;
 
-// nginx sits in front of this service and sets X-Forwarded-For (see nginx/*.conf) —
+// nginx sits in front of this service and sets X-Forwarded-For (see nginx/*.conf) â€”
 // without this, req.ip resolves to nginx's own container IP for every request,
 // which would bucket the auth rate limiters below by a single shared key instead
 // of by real client IP. `1` = trust exactly one hop (the nginx reverse proxy).
@@ -48,26 +54,27 @@ app.set('trust proxy', 1);
 
 // Init NATS Discovery
 initDiscovery();
-// Start usage metering consumer (data only — BILLING_ENFORCE=false by default)
+// Start usage metering consumer (data only â€” BILLING_ENFORCE=false by default)
 startBillingConsumer();
-// Hourly cycle settlement — shadow charges only unless BILLING_ENFORCE=true
+// Hourly cycle settlement â€” shadow charges only unless BILLING_ENFORCE=true
 // (utils/billingCycle.ts). Also fails fast here on an invalid BILLING_CONFIG_*.
 getBillingConfig();
 startBillingCycleScheduler();
 {
   const ps = paymentsStatus();
-  console.log(`[billing] payments ${ps.enabled ? `enabled (${ps.provider}, ${ps.mode} mode)` : `disabled — ${ps.reason}`}`);
+  console.log(`[billing] payments ${ps.enabled ? `enabled (${ps.provider}, ${ps.mode} mode)` : `disabled â€” ${ps.reason}`}`);
 }
 // The admin-saved billing config (billing_config_versions) is loaded before
-// the server listens — see the listen call below. Never throws.
+// the server listens â€” see the listen call below. Never throws.
 const billingConfigReady = initBillingConfigStore().then(m => {
   console.log(`[billing] config source: ${m.source === 'db' ? `database v${m.version}` : m.source}`);
 });
 // Daily refresh of Star Citizen ship/component data from fleetyards.net +
 // scunpacked-data, independent of request traffic (see gameDataScheduler.ts)
 startGameDataSyncScheduler();
+startOwnershipSweep(); // L13: transfer expiry + abandonment claims
 // Polls node health for offline/overloaded transitions and pushes to
-// registered admin devices via FCM — no-ops quietly if FIREBASE_SERVICE_ACCOUNT_PATH
+// registered admin devices via FCM â€” no-ops quietly if FIREBASE_SERVICE_ACCOUNT_PATH
 // isn't configured (see utils/pushService.ts).
 startPushWatcher();
 
@@ -99,7 +106,7 @@ const allowedOrigins = process.env.CORS_ALLOWED_ORIGINS
 app.use(cors({
   origin(origin, callback) {
     // No Origin header means this isn't a browser cross-origin request
-    // (server-to-server calls, health checks, curl) — nothing to gate here.
+    // (server-to-server calls, health checks, curl) â€” nothing to gate here.
     if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
     callback(new Error('Not allowed by CORS'));
   },
@@ -110,7 +117,7 @@ app.use('/webhooks', express.raw({ type: 'application/json' }), stripeWebhookRou
 // Website traffic beacon (POST /metrics/pageview): parses its own tiny body,
 // so it's mounted before the JSON parser too. See routes/metrics.ts.
 app.use('/metrics', metricsRoutes);
-// Parse JSON bodies. Also accept text/plain — Opera's built-in proxy/Turbo mode
+// Parse JSON bodies. Also accept text/plain â€” Opera's built-in proxy/Turbo mode
 // routes HTTP traffic through compression servers which can change Content-Type
 // from application/json to text/plain, leaving req.body empty and causing Zod
 // validation failures.
@@ -129,6 +136,9 @@ app.use(/\/mls\/(commit|external-commit|group-info)$/, express.json({ type: ['ap
 // "Submit diagnostics" was a 413 from the global parser below before diag.ts
 // (owner report 2026-11-08); diag.ts keeps its own 2 MB cap, the client trims.
 app.post('/diag/perf-report', express.json({ type: ['application/json', 'text/plain'], limit: '2mb' }));
+// T3: a trust & safety report is a sealed file of up to 7 MiB, base64 in JSON
+// (fits nginx's 10 MB /api/ cap); utils/tsReport.ts holds the real limit.
+app.post('/ts-reports', express.json({ type: ['application/json', 'text/plain'], limit: TS_REPORT_BODY_LIMIT }));
 app.use(express.json({ type: ['application/json', 'text/plain'] }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -151,6 +161,9 @@ app.use('/mls', mlsRoutes);
 app.use('/devices', deviceRoutes);
 app.use('/abuse-reports', abuseRoutes);
 app.use('/voice-reports', voiceReportRoutes);
+app.use('/bug-reports', bugReportRoutes);
+app.use('/ts-reports', tsReportRoutes);
+app.use('/status', statusRoutes);
 
 // Serve uploaded chat images
 // Cross-Origin-Resource-Policy must be 'cross-origin' here because the Tauri
@@ -171,11 +184,15 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Start Server (skip in test environment — supertest binds its own ephemeral port)
+// Start Server (skip in test environment â€” supertest binds its own ephemeral port)
 if (process.env.NODE_ENV !== 'test') {
   billingConfigReady.finally(() => app.listen(port, async () => {
     console.log(`Identity Service running on port ${port}`);
     await seedPresenceFromDb();
+    // E1: rename legacy <userId>-named avatar/intro files (idempotent).
+    randomizeLegacyUploadNames()
+      .then((n) => { if (n) console.log(`[uploads] renamed ${n} legacy id-named upload(s)`); })
+      .catch((err) => console.error('[uploads] legacy rename failed:', err));
   }));
 }
 
@@ -183,7 +200,7 @@ import { pool } from './config/db.js';
 import * as argon2 from 'argon2';
 import * as crypto from 'crypto';
 
-// ─── Admin Seed ────────────────────────────────────────────────────────────────
+// â”€â”€â”€ Admin Seed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // If ADMIN_SEED_USERNAME / EMAIL / PASSWORD env vars are set AND the
 // platform_admins table is empty, automatically insert a root admin on startup.
 // This ensures a fresh volume always gets an admin without manual intervention.

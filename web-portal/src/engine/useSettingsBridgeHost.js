@@ -4,7 +4,9 @@ import {
   MIC_TEST_LEASE_MS, SETTINGS_KEYS, SEV, SOP, settingsEmit, settingsListen,
 } from './settingsBridge.js';
 import { collectAndSubmitDiagnostics } from '../utils/diagnostics';
+import { sendBugReport } from '../utils/bugReport';
 import { VAD_KEYS, applyNativeVadConfig } from './voiceActivation';
+import { RESET_RELOAD_DELAY_MS } from '../utils/resetIdentity'; // S5
 
 // P2C: engine side of the settings bridge (protocol: ./settingsBridge.js).
 // Mounted once by WarRoom in the hidden main window:
@@ -51,6 +53,24 @@ async function listDevices() {
   ]);
   // No inputs usually means Windows privacy is blocking mic access.
   return { inputs, outputs, permission: inputs.length > 0 ? 'granted' : 'unknown' };
+}
+
+// S5: reset this device's MLS identity, reply, then reload the engine window
+// (a fresh mlsSession, chat and org state — the same reload main.jsx's error
+// screen does). The strip leaves voice before asking, so no native capture
+// is mid-flight when the page goes away.
+let resetting = null;
+function resetIdentityAndReload() {
+  if (resetting) return resetting;
+  resetting = (async () => {
+    const [{ api }, { resetEncryptionIdentity }] = await Promise.all([import('../api'), import('../mlsSession')]);
+    let userId = null;
+    try { userId = JSON.parse(localStorage.getItem('specter_user') || 'null')?.id ?? null; } catch { /* none */ }
+    const result = await resetEncryptionIdentity(api, userId);
+    setTimeout(() => window.location.reload(), RESET_RELOAD_DELAY_MS);
+    return { ...result, restarting: true };
+  })().catch((err) => { resetting = null; throw err; });
+  return resetting;
 }
 
 export default function useSettingsBridgeHost({ micCaptureActive = false } = {}) {
@@ -189,6 +209,9 @@ export default function useSettingsBridgeHost({ micCaptureActive = false } = {})
         if (error) throw new Error(typeof error === 'string' ? error : 'Upload failed');
         return {};
       },
+      [SOP.BUG_REPORT]: (args) => sendBugReport(args || {}), // D1
+      [SOP.MLS_DIAGNOSTICS]: async () => (await import('../mlsSession')).getMlsDiagnostics(), // S2: read-only
+      [SOP.RESET_MLS_IDENTITY]: () => resetIdentityAndReload(), // S5
     };
 
     const stopReq = settingsListen(SEV.REQUEST, async ({ id, op, args }) => {

@@ -22,7 +22,9 @@
  *                is_commander (Mission Wide transmitters).
  *   participants accepted members of any of the event's groups.
  *   freq members FREQWL: each frequency's explicit whitelist
- *                (event_frequency_members), set by the planner.
+ *                (event_frequency_members), set by the planner, PLUS
+ *                (FREQROLE, 2026-11-13) the accepted holders of every role
+ *                linked to it (event_frequency_roles), computed live.
  *
  *   channel kind       audience
  *   group channel      accepted members of THAT group ONLY (GROUPSTRICT, owner
@@ -34,8 +36,8 @@
  *                      planning. If a commander wants to be in every frequency
  *                      he can assign it there.") — no implicit access for the
  *                      commander, group leaders, organisers or a Leadership
- *                      net. Roles are only a planner shortcut for adding
- *                      their holders to the whitelist.
+ *                      net. A role linked to the net brings its accepted
+ *                      holders with it (FREQROLE), whenever they sign up.
  *   other event chan.  participants ∪ organisers (debrief, planner-made)
  *   event cascade grp  participants ∪ organisers (eventCascadeMemberUserIds:
  *                      a cascade speaker is heard in every channel of the tree)
@@ -54,6 +56,7 @@
  */
 import { orgChannelAudience } from './orgAuthority.js';
 import { pool } from '../config/db.js';
+import { filterAttested } from './adultAccess.js'; // L11
 
 type Queryable = { query: (text: string, params?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }> };
 
@@ -62,7 +65,8 @@ export type EventChannelKind = 'group' | 'frequency' | 'other';
 
 export type ChannelScope =
   // minLevel: channels.visible_min_level (utils/orgAuthority). 0 = every member.
-  | { scope: 'org'; orgId: string; channelId: string; minLevel: number }
+  // adult: channels.is_adult (L11): only members who attested 18+ may use it.
+  | { scope: 'org'; orgId: string; channelId: string; minLevel: number; adult?: boolean }
   | {
       scope: 'event';
       orgId: string;
@@ -88,6 +92,7 @@ export async function getChannelScope(channelId: string, orgId: string, db: Quer
   const res = await db.query(
     `SELECT c.id, c.event_id, COALESCE(c.is_frequency, false) AS is_frequency,
             COALESCE(c.visible_min_level, 0) AS visible_min_level,
+            COALESCE(c.is_adult, false) AS is_adult,
             (SELECT eg.id FROM event_groups eg WHERE eg.channel_id = c.id LIMIT 1) AS group_id,
             (SELECT ef.id FROM event_frequencies ef WHERE ef.channel_id = c.id
               ORDER BY ef.is_leadership DESC LIMIT 1) AS frequency_id
@@ -97,7 +102,7 @@ export async function getChannelScope(channelId: string, orgId: string, db: Quer
   );
   if (res.rows.length === 0) return null;
   const row = res.rows[0];
-  if (!row.event_id) return { scope: 'org', orgId, channelId, minLevel: Number(row.visible_min_level) || 0 };
+  if (!row.event_id) return { scope: 'org', orgId, channelId, minLevel: Number(row.visible_min_level) || 0, adult: row.is_adult === true };
   return {
     scope: 'event', orgId, channelId, eventId: row.event_id, kind: classifyEventChannel(row),
     groupId: row.group_id ?? null, frequencyId: row.frequency_id ?? null,
@@ -111,7 +116,7 @@ export interface EventAudience {
   participants: Set<string>;
   /** group_id → accepted members */
   groupMembers: Map<string, Set<string>>;
-  /** FREQWL: frequency_id → its planner whitelist (every frequency of the op has an entry) */
+  /** FREQWL: frequency_id → its planner whitelist ∪ accepted holders of its roles (every frequency of the op has an entry) */
   frequencyMembers: Map<string, Set<string>>;
 }
 
@@ -157,6 +162,20 @@ export async function loadEventAudience(eventId: string, db: Queryable = pool): 
     if (!a.frequencyMembers.has(f.id)) a.frequencyMembers.set(f.id, new Set());
     if (f.user_id) addTo(a.frequencyMembers, f.id, f.user_id);
   }
+  // FREQROLE (owner 2026-11-13): "users that sign up to the assigned roles
+  // within the groups should be auto assigned to the frequency". Accepted
+  // holders of a role linked to the frequency are members too, computed live:
+  // a later sign-up is on the net as soon as it's accepted, leaving the role
+  // takes them off, and a planner's stale save can't drop them.
+  const roleHolders = await db.query(
+    `SELECT DISTINCT efr.frequency_id, egm.user_id
+     FROM event_frequency_roles efr
+     JOIN event_frequencies ef ON ef.id = efr.frequency_id
+     JOIN event_group_members egm ON egm.role_id = efr.role_id AND egm.status = 'accepted'
+     WHERE ef.event_id = $1 AND egm.user_id IS NOT NULL`,
+    [eventId],
+  );
+  for (const r of roleHolders.rows) addTo(a.frequencyMembers, r.frequency_id, r.user_id);
 
   const members = await db.query(
     `SELECT egm.user_id, egm.group_id, egm.role_id, COALESCE(egr.is_commander, false) AS is_commander
@@ -253,7 +272,9 @@ export async function channelMemberUserIds(scope: ChannelScope, db: Queryable = 
   if (scope.scope === 'org') {
     // Visibility (owner, 2026-11-08): members at or above the channel's rank
     // threshold, plus the owner. Threshold 0 = every member, as before.
-    return orgChannelAudience(scope.orgId, scope.minLevel ?? 0, db);
+    const ids = await orgChannelAudience(scope.orgId, scope.minLevel ?? 0, db);
+    // L11: an adult channel's audience (and so its MLS key) is attested members only.
+    return scope.adult ? filterAttested(scope.orgId, ids, db) : ids;
   }
   return [...audienceFor(scope, await loadEventAudience(scope.eventId, db))];
 }
@@ -274,6 +295,7 @@ export async function eventCascadeMemberUserIds(eventId: string, db: Queryable =
  * rank-restricted org channel: its visibility audience.
  */
 export async function canUseChannel(scope: ChannelScope, userId: string, db: Queryable = pool): Promise<boolean> {
+  if (scope.scope === 'org' && scope.adult) return (await channelMemberUserIds(scope, db)).includes(userId); // attested only
   if (scope.scope === 'org' && !(scope.minLevel > 0)) return true;
   return (await channelMemberUserIds(scope, db)).includes(userId);
 }

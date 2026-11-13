@@ -3,7 +3,13 @@ import { z } from 'zod';
 import { pool } from '../config/db.js';
 import { publishEvent } from '../config/nats.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
-import { getChannelScope, channelMemberUserIds, eventCascadeMemberUserIds } from '../utils/eventChannelAccess.js'; // EVMLS
+import { adultRegionRefusal } from '../utils/adultAccess.js'; // L11
+import { deviceCapsFor } from '../utils/wireCaps.js';
+import { getChannelScope, channelMemberUserIds, eventCascadeMemberUserIds, canUseChannel, type ChannelScope } from '../utils/eventChannelAccess.js'; // EVMLS
+
+/** B6: the 403 text for a channel the caller isn't allowed on (matches channelController). */
+const channelForbiddenMessage = (scope: ChannelScope) =>
+  scope.scope === 'org' ? 'Forbidden: this channel is restricted to higher ranks' : 'Not assigned to this event channel';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -23,12 +29,12 @@ const submitDmCommitSchema = z.object({
 /**
  * Ensures an mls_groups row exists (a brand-new group starts at epoch 0),
  * then atomically bumps current_epoch only if `epoch` is exactly the next
- * one — the Delivery Service ordering rule (RFC 9750 §3): accept exactly
+ * one â€” the Delivery Service ordering rule (RFC 9750 Â§3): accept exactly
  * one Commit per epoch, so two concurrent commits can't fork the group
  * into disagreeing states. Returns false (caller should 409) on conflict.
  *
  * Also durably logs the commit/welcome into mls_commit_log in the same
- * transaction as the epoch bump — see that migration's doc comment for why:
+ * transaction as the epoch bump â€” see that migration's doc comment for why:
  * mls_commit/mls_welcome are relayed over plain NATS core pub/sub with no
  * replay, so without this a device that isn't connected at the exact
  * publish instant (a new install, a migrated machine, anyone who was
@@ -38,7 +44,7 @@ const submitDmCommitSchema = z.object({
  * MR1: `groupInfo` (the GroupInfo for the epoch this commit produces) is
  * stored in the same UPDATE as the bump, so the served GroupInfo can never
  * be ahead of or behind the epoch it claims. A commit without one (an older
- * client) leaves group_info_epoch behind current_epoch — that GroupInfo is
+ * client) leaves group_info_epoch behind current_epoch â€” that GroupInfo is
  * then stale and not served until a member re-uploads (putGroupInfo).
  */
 async function bumpGroupEpoch(
@@ -97,13 +103,13 @@ async function bumpGroupEpoch(
  *
  * `welcome: null` means this user has never been welcomed into this group at all
  * yet (nothing to catch up on until some existing member's next reconcile pass
- * adds them) — but commits are still returned, because a device may hold the
+ * adds them) â€” but commits are still returned, because a device may hold the
  * group already without this user ever having been welcomed to it: the device
  * that *created* the group via genesis is exactly that case.
  *
  * This deliberately does NOT filter to commits after the Welcome, which it used
  * to. `welcomed_user_ids` is per-*user*, not per-device, so on an account with
- * two devices the Welcome minted for device B became device A's anchor too — and
+ * two devices the Welcome minted for device B became device A's anchor too â€” and
  * device A, already a member, was then handed zero commits and could never
  * advance. Observed in production: a device created a channel's group (epoch 1,
  * welcoming every other member), another member's reconcile pass then committed
@@ -118,7 +124,7 @@ async function bumpGroupEpoch(
  * already applied or not actionable from its current epoch, which is precisely
  * what a commit from before its join looks like. Being liberal here and letting
  * the client decide is strictly more robust than the server guessing which
- * commits a given device still needs — the server cannot know, since it holds no
+ * commits a given device still needs â€” the server cannot know, since it holds no
  * per-device epoch state.
  */
 async function fetchGroupCatchUp(groupId: string, userId: string) {
@@ -136,7 +142,7 @@ async function fetchGroupCatchUp(groupId: string, userId: string) {
     commits.push({ epoch: Number(row.epoch), commit: (row.commit as Buffer).toString('base64') });
   }
   // MR1: the server's epoch lets the client tell "caught up" from "can't
-  // reach the server epoch" (diverged → resync); group_info_epoch tells a
+  // reach the server epoch" (diverged â†’ resync); group_info_epoch tells a
   // member whether the stored GroupInfo is stale and worth re-uploading.
   const g = await pool.query(
     'SELECT current_epoch, group_info_epoch FROM mls_groups WHERE group_id = $1',
@@ -151,17 +157,17 @@ async function fetchGroupCatchUp(groupId: string, userId: string) {
  * POST /dm/:userId/mls/commit
  * Submit an MLS Commit (optionally bundled with a Welcome) advancing a DM's
  * group to the next epoch. This is the one piece of real state this
- * otherwise content-blind relay holds (see the mls_groups migration) — MLS's
+ * otherwise content-blind relay holds (see the mls_groups migration) â€” MLS's
  * Delivery Service role requires accepting exactly one Commit per epoch, or
  * two concurrent commits could fork the group into disagreeing states
- * (RFC 9750 §3, "ordering server" DS). group_id here is the DM's existing
+ * (RFC 9750 Â§3, "ordering server" DS). group_id here is the DM's existing
  * deterministic conversation_id (see dmController.ts), not a separate id.
  *
  * The commit (and welcome, if present) is relayed to *both* participants'
  * user-scoped subjects rather than trying to guess which side needs which:
  * a Welcome is only actionable by a device that doesn't yet hold this group
  * locally (a brand-new member, or the committer's own freshly-added second
- * device), and a Commit is only actionable by a device that already does —
+ * device), and a Commit is only actionable by a device that already does â€”
  * every other recipient's attempt is a harmless no-op that the client
  * discards, same as this codebase's existing fire-and-forget relay pattern.
  */
@@ -195,11 +201,11 @@ export const submitDmCommit = async (req: AuthRequest, res: Response) => {
     const convId = [me, otherUserId].sort().join('-');
 
     // DMs don't track welcomed_user_ids explicitly (see the doc comment
-    // above on why both sides always get the live broadcast) — log both
+    // above on why both sides always get the live broadcast) â€” log both
     // participants as welcomed whenever a welcome is present, so catch-up
     // can find this commit as either side's entry point.
     if (!(await bumpGroupEpoch(convId, epoch, commit, welcome, welcome ? [me, otherUserId] : undefined, group_info))) {
-      return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
+      return res.status(409).json({ message: 'Epoch conflict â€” this commit no longer targets the current epoch' });
     }
 
     for (const recipientId of [me, otherUserId]) {
@@ -226,12 +232,12 @@ export const submitDmCommit = async (req: AuthRequest, res: Response) => {
 
 const submitChannelCommitSchema = z.object({
   epoch: z.number().int().positive(),
-  commit: z.string().max(500000), // base64 — larger cap than DM's: a channel add/remove can bundle many devices
+  commit: z.string().max(500000), // base64 â€” larger cap than DM's: a channel add/remove can bundle many devices
   welcome: z.string().max(2000000).nullable().optional(), // base64
   // Which user(s) this Commit's Welcome is for (empty/omitted for a plain
   // remove, or for an add that's re-syncing the committer's own second
   // device). The server can't infer this itself since it doesn't track MLS
-  // group membership — only the client authoring the add knows. A genesis
+  // group membership â€” only the client authoring the add knows. A genesis
   // commit names the channel's whole audience.
   welcomed_user_ids: z.array(z.string().uuid()).max(MAX_WELCOMED_USERS).optional(),
   group_info: groupInfoField,
@@ -239,13 +245,13 @@ const submitChannelCommitSchema = z.object({
 
 /**
  * POST /orgs/:orgId/channels/:chanId/mls/commit
- * Channel counterpart to submitDmCommit — group_id is the channel's own
+ * Channel counterpart to submitDmCommit â€” group_id is the channel's own
  * UUID (channel_id), membership-gated the same way sendMessage is (any org
  * member can access any org channel by default; see messageController.ts).
  *
  * Unlike a DM, existing members already share a channel-wide NATS subject
  * (specter.msg.channel.${chanId}, subscribed via SSE for every channel in
- * every org a user belongs to) — so the Commit is published there once
+ * every org a user belongs to) â€” so the Commit is published there once
  * instead of once per member. A Welcome still can't rely on that subject:
  * a brand-new member's SSE subscription list is computed once at connect
  * time (see sseController.ts), so they may not be subscribed to this
@@ -264,13 +270,13 @@ const submitEventGroupCommitSchema = z.object({
 
 /**
  * POST /orgs/:orgId/events/:eventId/mls/commit
- * Event counterpart to submitDmCommit/submitChannelCommit — group_id is the
+ * Event counterpart to submitDmCommit/submitChannelCommit â€” group_id is the
  * event's own UUID. This group exists so a priority speaker's voice-cascade
  * audio (see media-rust's cross-channel duck broadcast) can be decrypted by
  * every event participant, not just members of the speaker's own channel:
  * "every currently-accepted event_group_members row across the event's
  * groups" is used as the membership set rather than trying to track each
- * frequency's narrower role-based grant — frequency access is always a
+ * frequency's narrower role-based grant â€” frequency access is always a
  * subset of group membership (event_frequency_roles grants specific
  * event_group_roles rows, and holding one requires being an accepted member
  * of that role's group), so this set is a safe superset for every possible
@@ -279,7 +285,7 @@ const submitEventGroupCommitSchema = z.object({
  * frequencies (utils/eventChannelAccess's eventCascadeMemberUserIds).
  *
  * Unlike a channel, no single existing NATS subject spans every event
- * participant (they're scattered across many channels/groups) — mirrors the
+ * participant (they're scattered across many channels/groups) â€” mirrors the
  * DM pattern instead, relaying both the Commit and any Welcome individually
  * to each current participant's `specter.event.user.{id}` subject.
  */
@@ -306,8 +312,8 @@ export const submitEventGroupCommit = async (req: AuthRequest, res: Response) =>
       return res.status(404).json({ message: 'Event not found' });
     }
 
-    // EVMLS: only a member of this group's audience — accepted participants
-    // plus the event's staff (utils/eventChannelAccess) — may commit, and only
+    // EVMLS: only a member of this group's audience â€” accepted participants
+    // plus the event's staff (utils/eventChannelAccess) â€” may commit, and only
     // members of that audience may be welcomed into it.
     const members = await eventCascadeMemberUserIds(eventId as string);
     if (!members.includes(userId)) {
@@ -318,7 +324,7 @@ export const submitEventGroupCommit = async (req: AuthRequest, res: Response) =>
     }
 
     if (!(await bumpGroupEpoch(eventId as string, epoch, commit, welcome, welcomed_user_ids, group_info))) {
-      return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
+      return res.status(409).json({ message: 'Epoch conflict â€” this commit no longer targets the current epoch' });
     }
 
     for (const memberId of members) {
@@ -374,7 +380,7 @@ export const submitChannelCommit = async (req: AuthRequest, res: Response) => {
     }
     // EVMLS: an event channel's group is limited to that channel's audience
     // (signed-up members with access; utils/eventChannelAccess). Only they may
-    // commit, and a Welcome may only go to them — so a client still
+    // commit, and a Welcome may only go to them â€” so a client still
     // reconciling against the whole org (pre-2.0.0) can't widen it again.
     if (scope.scope === 'event' || scope.minLevel > 0) {
       const allowed = await channelMemberUserIds(scope);
@@ -387,7 +393,7 @@ export const submitChannelCommit = async (req: AuthRequest, res: Response) => {
     }
 
     if (!(await bumpGroupEpoch(chanId as string, epoch, commit, welcome, welcomed_user_ids, group_info))) {
-      return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
+      return res.status(409).json({ message: 'Epoch conflict â€” this commit no longer targets the current epoch' });
     }
 
     await publishEvent(`specter.msg.channel.${chanId}`, {
@@ -415,7 +421,7 @@ export const submitChannelCommit = async (req: AuthRequest, res: Response) => {
 
 /**
  * GET /dm/:userId/mls/catch-up
- * DM counterpart to getChannelMlsCatchUp — same auth gate as submitDmCommit.
+ * DM counterpart to getChannelMlsCatchUp â€” same auth gate as submitDmCommit.
  */
 export const getDmMlsCatchUp = async (req: AuthRequest, res: Response) => {
   const me = req.user?.id;
@@ -444,7 +450,7 @@ export const getDmMlsCatchUp = async (req: AuthRequest, res: Response) => {
 
 /**
  * GET /orgs/:orgId/events/:eventId/mls/catch-up
- * Event counterpart to getChannelMlsCatchUp — same auth gate as
+ * Event counterpart to getChannelMlsCatchUp â€” same auth gate as
  * submitEventGroupCommit.
  */
 export const getEventGroupMlsCatchUp = async (req: AuthRequest, res: Response) => {
@@ -477,7 +483,7 @@ export const getEventGroupMlsCatchUp = async (req: AuthRequest, res: Response) =
  * user (their entry point), plus every commit since, in order. Called
  * before deciding whether a missing local group means "this channel never
  * had a group" (genuinely create one) or "I'm just late" (a previous
- * add for this user never reached this device live) — same auth gate as
+ * add for this user never reached this device live) â€” same auth gate as
  * submitChannelCommit.
  */
 export const getChannelMlsCatchUp = async (req: AuthRequest, res: Response) => {
@@ -493,12 +499,16 @@ export const getChannelMlsCatchUp = async (req: AuthRequest, res: Response) => {
     if (memberCheck.rows.length === 0) {
       return res.status(403).json({ message: 'Not a member of this organization' });
     }
-    const chanCheck = await pool.query(
-      'SELECT 1 FROM channels WHERE id = $1 AND org_id = $2',
-      [chanId, orgId],
-    );
-    if (chanCheck.rows.length === 0) {
+    const scope = await getChannelScope(chanId as string, orgId as string);
+    if (!scope) {
       return res.status(404).json({ message: 'Channel not found' });
+    }
+    // B6: the same gate as submitChannelCommit â€” a member who lost access (or
+    // never had it) doesn't read the channel's commit log.
+    const adultNo = await adultRegionRefusal(scope, req.ip); // L11
+    if (adultNo) return res.status(403).json(adultNo);
+    if (!(await canUseChannel(scope, userId))) {
+      return res.status(403).json({ message: channelForbiddenMessage(scope) });
     }
     res.json(await fetchGroupCatchUp(chanId as string, userId));
   } catch (err) {
@@ -509,15 +519,17 @@ export const getChannelMlsCatchUp = async (req: AuthRequest, res: Response) => {
 
 /**
  * GET /orgs/:orgId/channels/:chanId/mls/members
- * EVMLS: the user ids a channel's MLS group should hold — what mlsSession.js's
+ * EVMLS: the user ids a channel's MLS group should hold â€” what mlsSession.js's
  * ensureChannelGroup reconciles the group against (adding missing devices,
  * removing everyone else, which rotates the key).
  *   { scope: 'org',   user_ids }  a normal channel: every org member (unchanged)
  *   { scope: 'event', user_ids }  an event channel: its signed-up audience
- *                                 (utils/eventChannelAccess — the same rule
+ *                                 (utils/eventChannelAccess â€” the same rule
  *                                 that gates its tickets, presence and sends)
- * Readable by any org member: the list says no more than the event's roster
- * (GET /events/:id/groups) already does.
+ * B6: readable only by callers allowed on the channel (canUseChannel â€” the
+ * same rule as its tickets, messages and commits); anyone else gets 403, like
+ * the channel's other routes. A rank-restricted channel's member list would
+ * otherwise tell a lower rank who sits in it.
  */
 export const getChannelMlsMembers = async (req: AuthRequest, res: Response) => {
   const userId = req.user?.id;
@@ -536,11 +548,18 @@ export const getChannelMlsMembers = async (req: AuthRequest, res: Response) => {
     if (!scope) {
       return res.status(404).json({ message: 'Channel not found', code: 'CHANNEL_NOT_FOUND' });
     }
+    const adultNo = await adultRegionRefusal(scope, req.ip); // L11
+    if (adultNo) return res.status(403).json(adultNo);
+    if (!(await canUseChannel(scope, userId))) {
+      return res.status(403).json({ message: channelForbiddenMessage(scope) });
+    }
     const user_ids = await channelMemberUserIds(scope);
     res.json({
       scope: scope.scope,
       ...(scope.scope === 'event' ? { event_id: scope.eventId, kind: scope.kind } : {}),
       user_ids,
+      // S7: { device_id: wire_caps } of the audience's active devices.
+      device_caps: await deviceCapsFor(user_ids),
     });
   } catch (err) {
     console.error('getChannelMlsMembers error:', err);
@@ -548,17 +567,34 @@ export const getChannelMlsMembers = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// ── MR1: GroupInfo + external commits (join / resync without a member) ─────
+/**
+ * GET /dm/:userId/mls/members
+ * S7: the DM counterpart of /mls/members â€” the two participants and their
+ * devices' wire caps (friendship-gated like every DM MLS route).
+ */
+export const getDmMlsMembers = async (req: AuthRequest, res: Response) => {
+  try {
+    const access = await resolveDmGroup(req, res);
+    if (!access) return;
+    const user_ids = [req.user!.id, req.params.userId as string];
+    res.json({ scope: 'dm', conversation_id: access.groupId, user_ids, device_caps: await deviceCapsFor(user_ids) });
+  } catch (err) {
+    console.error('getDmMlsMembers error:', err);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
+// â”€â”€ MR1: GroupInfo + external commits (join / resync without a member) â”€â”€â”€â”€â”€
 //
 // A device that isn't in a group yet, or whose copy diverged, used to wait
 // for some existing member's client to happen to reconcile it in (and a
 // diverged one never recovered). Now every commit uploads the GroupInfo for
 // the epoch it produces (bumpGroupEpoch), and such a device fetches it here
-// and joins by an MLS external commit (RFC 9420 §12.4.3.2), which goes
+// and joins by an MLS external commit (RFC 9420 Â§12.4.3.2), which goes
 // through exactly the same Delivery Service epoch check and mls_commit_log
 // entry as any other commit.
 //
-// Authorization is the group's member LIST — the same rules as
+// Authorization is the group's member LIST â€” the same rules as
 // /mls/members, /mls/commit and /mls/catch-up (org membership; an event
 // channel's signed-up audience via utils/eventChannelAccess; the event
 // cascade group's participants + staff; DM friendship). Only a listed user
@@ -566,7 +602,7 @@ export const getChannelMlsMembers = async (req: AuthRequest, res: Response) => {
 //
 // Known limitation (documented, accepted): the server cannot parse MLS, so
 // it cannot check that an external commit's new leaf really carries the
-// caller's own credential (`${userId}:${deviceId}`) — "the caller must be
+// caller's own credential (`${userId}:${deviceId}`) â€” "the caller must be
 // the subject" is enforced only as "the caller must be on the list". A
 // listed user could therefore insert a leaf with someone else's credential
 // string; every client sees the leaf's credential + signature key, and
@@ -588,7 +624,7 @@ const sendValidationError = (res: Response, error: z.ZodError) =>
     errors: error.errors.map(e => ({ field: e.path.join('.'), message: e.message })),
   });
 
-/** DM group of the caller and :userId — friendship-gated like submitDmCommit. Sends the error and returns null on refusal. */
+/** DM group of the caller and :userId â€” friendship-gated like submitDmCommit. Sends the error and returns null on refusal. */
 async function resolveDmGroup(req: AuthRequest, res: Response): Promise<GroupAccess | null> {
   const me = req.user?.id;
   const otherUserId = req.params.userId as string;
@@ -613,7 +649,7 @@ async function resolveDmGroup(req: AuthRequest, res: Response): Promise<GroupAcc
   };
 }
 
-/** A channel's group — org membership, and for an event channel its audience (same rule as /mls/members). */
+/** A channel's group â€” org membership, and for an event channel its audience (same rule as /mls/members). */
 async function resolveChannelGroup(req: AuthRequest, res: Response): Promise<GroupAccess | null> {
   const userId = req.user?.id;
   const { orgId, chanId } = req.params as { orgId: string; chanId: string };
@@ -632,7 +668,7 @@ async function resolveChannelGroup(req: AuthRequest, res: Response): Promise<Gro
   };
 }
 
-/** An event's cascade group — participants + staff, like submitEventGroupCommit. */
+/** An event's cascade group â€” participants + staff, like submitEventGroupCommit. */
 async function resolveEventGroup(req: AuthRequest, res: Response): Promise<GroupAccess | null> {
   const userId = req.user?.id;
   const { orgId, eventId } = req.params as { orgId: string; eventId: string };
@@ -654,8 +690,8 @@ async function resolveEventGroup(req: AuthRequest, res: Response): Promise<Group
 type Resolver = (req: AuthRequest, res: Response) => Promise<GroupAccess | null>;
 
 /**
- * GET …/mls/group-info
- *   { exists: false, epoch: 0, group_info: null }      no group yet → the
+ * GET â€¦/mls/group-info
+ *   { exists: false, epoch: 0, group_info: null }      no group yet â†’ the
  *                                                      client may run genesis
  *   { exists: true, epoch, group_info, group_info_epoch }
  * group_info is null when the stored one is stale (group_info_epoch !==
@@ -695,8 +731,8 @@ const putGroupInfoSchema = z.object({
 });
 
 /**
- * PUT …/mls/group-info { epoch, group_info }
- * A member re-uploads the GroupInfo for the CURRENT epoch — heals groups whose
+ * PUT â€¦/mls/group-info { epoch, group_info }
+ * A member re-uploads the GroupInfo for the CURRENT epoch â€” heals groups whose
  * last commit came from a client that sent none (pre-2.0.1). 409 when `epoch`
  * isn't the current one (the group moved on; the uploader catches up first).
  */
@@ -713,7 +749,7 @@ const putGroupInfo = (resolve: Resolver, label: string) => async (req: AuthReque
       [access.groupId, epoch, Buffer.from(group_info, 'base64')],
     );
     if ((r.rowCount ?? 0) === 0) {
-      return res.status(409).json({ message: 'Epoch conflict — not the current epoch', code: 'EPOCH_CONFLICT' });
+      return res.status(409).json({ message: 'Epoch conflict â€” not the current epoch', code: 'EPOCH_CONFLICT' });
     }
     res.json({ ok: true, epoch });
   } catch (err) {
@@ -729,8 +765,8 @@ const externalCommitSchema = z.object({
 });
 
 /**
- * POST …/mls/external-commit { epoch, commit, group_info }
- * Same Delivery Service rule (exactly one commit per epoch → 409 otherwise)
+ * POST â€¦/mls/external-commit { epoch, commit, group_info }
+ * Same Delivery Service rule (exactly one commit per epoch â†’ 409 otherwise)
  * and the same mls_commit_log entry as a regular commit; no Welcome (the
  * joiner already holds the group). Relayed as the usual flat `mls_commit`
  * event, so existing members apply it like any other commit.
@@ -743,7 +779,7 @@ const submitExternalCommit = (resolve: Resolver, label: string) => async (req: A
     if (!access) return;
     const { epoch, commit, group_info } = parsed.data;
     if (!(await bumpGroupEpoch(access.groupId, epoch, commit, null, undefined, group_info))) {
-      return res.status(409).json({ message: 'Epoch conflict — this commit no longer targets the current epoch' });
+      return res.status(409).json({ message: 'Epoch conflict â€” this commit no longer targets the current epoch' });
     }
     await access.publishCommit(commit);
     res.status(202).json({ ok: true, epoch });

@@ -55,6 +55,9 @@ function walletSubtitle(v, loading, error) {
 /** The cabinet's launcher row. Fetches once while the row is shown (cached 30 s). */
 export function WalletToolRow({ org, onClick }) {
   const { data, loading, error } = useOrgBilling(org?.id);
+  // L9: shown in billing-UI builds, or when the server turns it on
+  // (BILLING_UI_VISIBLE → ui_visible), without a client rebuild.
+  if (!WALLET_UI_ENABLED && !data?.ui_visible) return null;
   return (
     <ToolRow icon={<Wallet size={16} aria-hidden="true" />} title="Wallet & usage"
       subtitle={walletSubtitle(deriveBilling(data), loading, error)} onClick={onClick} />

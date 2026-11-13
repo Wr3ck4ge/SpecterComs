@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
-  AlertCircle, Layers, Loader2, MicOff, MonitorUp, Radio, RefreshCw, X,
+  AlertCircle, Loader2, RefreshCw, X,
 } from 'lucide-react';
+import { ScGameHud, ScMicMuted, ScScreenShare, ScStandbyOffline, ScVoiceActive } from '../icons/brand'; // BRAND
 import { Button, IconButton, Toggle } from '../ui';
 import { cx, focusRing } from '../ui/styles';
 import { CMD } from '../../engine/bridge';
@@ -53,7 +54,7 @@ export function SpeakerChip({ voice, me, speaking, transmitting = false, onClick
   const who = useHeld(now, now ? `${now.name}+${now.extra}` : '', SPEAKER_HOLD_MS);
   if (!inVoice) {
     return (
-      <SlotChip tone="quiet" icon={<Radio size={12} />} onClick={onClick} title="Not in a voice channel. Open channels">
+      <SlotChip tone="quiet" icon={<ScStandbyOffline size={12} />} onClick={onClick} title="Not in a voice channel. Open channels">
         Not in voice
       </SlotChip>
     );
@@ -75,7 +76,7 @@ export function SpeakerChip({ voice, me, speaking, transmitting = false, onClick
   return (
     <SlotChip
       tone="default"
-      icon={voice.muted ? <MicOff size={12} className="text-red-300" /> : <Radio size={12} />}
+      icon={voice.muted ? <ScMicMuted size={12} className="text-red-300" /> : <ScVoiceActive size={12} />}
       onClick={onClick}
       label={`In voice: ${channel}${voice.muted ? ', muted' : ''}. Open channels`}
       title={`In ${channel}${voice.muted ? ' (muted)' : ''}`}
@@ -90,8 +91,8 @@ function overlayInfo({ state, pending }) {
   const key = open ? cmdKey(CMD.OVERLAY_CLOSE, {}) : cmdKey(CMD.OVERLAY_OPEN, {});
   const busy = pending[cmdKey(CMD.OVERLAY_OPEN, {})]?.status === 'pending' || pending[cmdKey(CMD.OVERLAY_CLOSE, {})]?.status === 'pending';
   const err = pending[key]?.status === 'error' ? pending[key].error : null;
-  let label = open ? 'Close the overlay' : 'Open the overlay';
-  if (!state.caps.overlay) label = 'The overlay is in safe mode';
+  let label = open ? 'Close the Game HUD' : 'Open the Game HUD';
+  if (!state.caps.overlay) label = 'The Game HUD is in safe mode (Settings → Game HUD & hotkeys)';
   else if (err) label = `${label} (last try failed: ${err})`;
   return { open, busy, err, label };
 }
@@ -121,27 +122,46 @@ export function StreamChip({ engine, pickerOpen, onClick }) {
   }
   return (
     <SlotChip iconOnly tone={pickerOpen ? 'active' : 'default'} pressed={pickerOpen}
-      icon={busy ? <Loader2 size={13} className="animate-spin" /> : <MonitorUp size={13} />}
+      icon={busy ? <Loader2 size={13} className="animate-spin" /> : <ScScreenShare size={13} />}
       onClick={onClick} disabled={busy || !engine.state.caps.share} label={label}>
       {err && <ErrorDot />}
     </SlotChip>
   );
 }
 
-/** Overlay HUD on/off. */
-export function OverlayChip({ engine, onClick }) {
+/**
+ * OVERLAYTAB (owner 2026-11-13): "an extension over the bar when in a voice
+ * channel that literally says Overlay". A labelled tab on the stack's outer
+ * edge (above the bar, or above an open cabinet; below them when the strip
+ * grows down) that opens / closes the Game HUD. It replaces the icon-only
+ * bar chip, which people didn't recognise.
+ */
+export function OverlayTab({ engine, onClick, grow = 'up', onRegionChange }) {
   const { open, busy, err, label } = overlayInfo(engine);
+  const disabled = busy || !engine.state.caps.overlay;
+  const up = grow !== 'down';
+  // The window region (strip.rs) must include the tab as it comes and goes.
+  useEffect(() => {
+    onRegionChange?.();
+    return () => onRegionChange?.();
+  }, [onRegionChange]);
   return (
-    <SlotChip iconOnly tone={open ? 'active' : 'default'} pressed={open}
-      icon={busy ? <Loader2 size={13} className="animate-spin" /> : <Layers size={13} />}
-      onClick={onClick} disabled={busy || !engine.state.caps.overlay} label={label}>
-      {err && <ErrorDot />}
-    </SlotChip>
+    <div data-strip-region className="relative self-start ml-3 z-[1]" style={up ? { marginBottom: -9 } : { marginTop: -9 }}>
+      <button type="button" onClick={onClick} disabled={disabled} aria-pressed={open} aria-label={label} title={label}
+        className={cx('strip-panel relative inline-flex items-center gap-1.5 h-7 px-3 text-ui-sm font-semibold transition-colors', focusRing,
+          up ? '!rounded-b-none !border-b-0 pb-px' : '!rounded-t-none !border-t-0 pt-px',
+          open ? '!border-specter-primary-cyan/70 text-specter-primary-neon' : 'text-specter-text-main hover:text-specter-primary-neon',
+          'disabled:opacity-50 disabled:cursor-not-allowed')}>
+        {busy ? <Loader2 size={13} className="animate-spin" aria-hidden="true" /> : <ScGameHud size={13} aria-hidden="true" />}
+        Overlay
+        {err && <ErrorDot />}
+      </button>
+    </div>
   );
 }
 
 function ErrorDot() {
-  return <span aria-hidden="true" className="pointer-events-none absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-pill border-2 border-[#0b1d2e] bg-specter-state-warning" />;
+  return <span aria-hidden="true" className="pointer-events-none absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-pill border-2 border-specter-brand-ink bg-specter-state-warning" />;
 }
 
 function SourceTile({ source, selected, onSelect }) {
@@ -266,7 +286,7 @@ export function SharePicker({
         <Button
           size="sm"
           disabled={!selected || starting}
-          icon={starting ? <Loader2 size={14} className="animate-spin" /> : <MonitorUp size={14} />}
+          icon={starting ? <Loader2 size={14} className="animate-spin" /> : <ScScreenShare size={14} />}
           onClick={() => selected && onStart(selected)}
         >
           {starting ? 'Starting…' : 'Start sharing'}

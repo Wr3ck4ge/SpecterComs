@@ -7,18 +7,26 @@
 // window and go through the settings bridge (useSettings → engine), applying
 // live — there are no Save buttons for them. Account settings are server-side
 // and call the API from here directly.
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import {
-  ChevronDown, ChevronLeft, Info, LogOut, Mic, MonitorPlay, RefreshCw, Search, ShieldCheck, Upload, User, X,
+  ChevronDown, ChevronLeft, Info, LogOut, Mic, Monitor, RefreshCw, Search, ShieldCheck, Upload, User, X,
 } from 'lucide-react';
 import { Alert, Button, IconButton, Row, Toggle } from '../ui';
 import { cx, focusRing } from '../ui/styles';
 import HexBadge from '../HexBadge';
+import { ScGameHud } from '../icons/brand'; // BRAND
+import appBadge from '../../assets/brand/app-badge-256.png'; // BRAND: the app's own identity in About
 import { api as realApi, UPLOADS_BASE_URL } from '../../api';
 import { comboFromKeyEvent, prettyKey } from '../../keybinds';
 import { inputClass } from './stripOpsLayout';
 import RepairPanel from './RepairPanel'; // NET
+import ResetIdentityPanel from './ResetIdentityPanel'; // S5
+import DataRequestsPanel from './DataRequestsPanel'; // L6
+import TwoFactorPanel from './TwoFactorPanel'; // L3
+import BugReportReplies from './BugReportReplies';
 import { masterGainForPercent, percentForMasterGain } from '../../engine/userVolume';
+import { REPORT_CATEGORIES, REPORT_MAX_CHARS } from '@spectercoms/shared-web/src/sealedReport.js'; // D1
 
 const TIMEZONE_FALLBACK = ['UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Australia/Sydney', 'Pacific/Auckland'];
 function getSupportedTimezones() {
@@ -27,7 +35,8 @@ function getSupportedTimezones() {
 
 const SETTINGS_SECTIONS = [
   { id: 'audio', title: 'Audio & voice', Icon: Mic },
-  { id: 'overlay', title: 'Overlay & hotkeys', Icon: MonitorPlay },
+  { id: 'overlay', title: 'Game HUD & hotkeys', Icon: ScGameHud }, // BRAND
+  { id: 'display', title: 'Display', Icon: Monitor },
   { id: 'account', title: 'Account', Icon: User },
   { id: 'privacy', title: 'Privacy & encryption', Icon: ShieldCheck },
   // Repair connection and Resync encryption live under About & diagnostics.
@@ -362,7 +371,7 @@ function AudioSection({ settings, pttLive }) {
         {ptt && (
           <p className="text-ui-xs text-specter-text-subtle">
             {v.specter_ptt_key ? `Push-to-talk key: ${prettyKey(v.specter_ptt_key)}. ` : 'No push-to-talk key set yet. '}
-            Set it under Overlay &amp; hotkeys → Hotkeys.
+            Set it under Game HUD &amp; hotkeys → Hotkeys.
           </p>
         )}
       </Group>
@@ -376,17 +385,17 @@ function OverlaySection({ settings, pttLive }) {
   const safe = v.specter_overlay_safe_mode === '1';
   return (
     <div className="space-y-5">
-      <Group title="Overlay">
-        <Field label="Corner" hint="Where the game overlay anchors when it opens.">
-          <Segmented label="Overlay corner" value={v.specter_overlay_corner}
+      <Group title="Game HUD">
+        <Field label="Corner" hint="Where the Game HUD anchors when it opens.">
+          <Segmented label="Game HUD corner" value={v.specter_overlay_corner}
             onChange={(c) => settings.set('specter_overlay_corner', c)}
             options={[{ value: 'top-left', label: 'Top left' }, { value: 'top-right', label: 'Top right' }]} />
         </Field>
         <Toggle label="Safe mode"
-          description="Use the built-in HUD instead of the always-on-top overlay window. Only turn this on if the overlay doesn't appear. While it's on, the overlay can't be opened from here."
+          description="Use a simpler fallback instead of the always-on-top Game HUD window. Only turn this on if the Game HUD doesn't appear. While it's on, the Game HUD can't be opened from here."
           checked={safe} onChange={(on) => settings.set('specter_overlay_safe_mode', on ? '1' : null)} />
-        <Toggle label="Show DMs in overlay"
-          description="Incoming direct messages appear under the overlay and fade out. Press the click-through hotkey to make the overlay interactive, then click a message to reply. Never shown in screen shares."
+        <Toggle label="Show DMs in the Game HUD"
+          description="Incoming direct messages appear under the Game HUD and fade out. Press the click-through hotkey to make the Game HUD interactive, then click a message to reply. Never shown in screen shares."
           checked={v.specter_overlay_dms !== '0'} onChange={(on) => settings.set('specter_overlay_dms', on ? '1' : '0')} />
       </Group>
       <Group title="Hotkeys">
@@ -396,12 +405,69 @@ function OverlaySection({ settings, pttLive }) {
           value={v.specter_ptt_key} live={pttLive} onChange={(c) => settings.set('specter_ptt_key', c)} />
         <KeybindField label="Cycle active stream" hint="Steps through the streams being shared in your channel."
           value={v.specter_stream_next_key} onChange={(c) => settings.set('specter_stream_next_key', c)} />
-        <KeybindField label="Overlay click-through" hint="Makes the overlay ignore the mouse completely. Press again to restore it."
+        <KeybindField label="Game HUD click-through" hint="Makes the Game HUD ignore the mouse completely. Press again to restore it."
           value={v.specter_overlay_passthrough_key} onChange={(c) => settings.set('specter_overlay_passthrough_key', c)} />
         <KeybindField label="Share application" hint="Starts sharing the app you're in (your game), or stops your share. Includes its audio when Share audio is on. Needs a voice channel."
           value={v.specter_share_app_key} onChange={(c) => settings.set('specter_share_app_key', c)} />
         <KeybindField label="Cycle frequency" hint="During operations: primary channel → each frequency → back to primary."
           value={v.specter_channel_toggle_key} onChange={(c) => settings.set('specter_channel_toggle_key', c)} />
+      </Group>
+    </div>
+  );
+}
+
+/**
+ * C1: "Show Specter on" — which monitor the strip (and the stream viewer,
+ * which is part of it) docks to. Saved on the Rust side (displays.rs) so it
+ * applies at launch before this page loads; Auto = the monitor under the tray
+ * icon you clicked, else the main one. A chosen monitor that's unplugged
+ * falls back to Auto until it's back.
+ */
+function DisplaySection() {
+  const [st, setSt] = useState(null);
+  const [error, setError] = useState('');
+  const [identifying, setIdentifying] = useState(false);
+  const refresh = useCallback(() => {
+    invoke('strip_display_get').then(setSt).catch((e) => setError(String(e)));
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  if (!window.__TAURI_INTERNALS__) return <p className="text-ui-sm text-specter-text-subtle">Only available in the desktop app.</p>;
+  if (!st) return error ? <Alert variant="error">{error}</Alert> : <p className="text-ui-sm text-specter-text-subtle">Looking for displays…</p>;
+
+  const options = [
+    { value: 'auto', label: 'Auto (where the tray icon is)' },
+    ...st.displays.map((d) => ({ value: d.id, label: `${d.number} · ${d.label}` })),
+  ];
+  if (st.chosen && st.chosenMissing) {
+    options.push({ value: st.chosen.id, label: `${st.chosen.label || 'Saved display'} (not connected)` });
+  }
+  const choose = (value) => {
+    setError('');
+    invoke('strip_display_set', { id: value === 'auto' ? null : value })
+      .then(setSt).catch((e) => setError(String(e)));
+  };
+  const identify = () => {
+    setIdentifying(true);
+    invoke('displays_identify').catch(() => {});
+    setTimeout(() => setIdentifying(false), 3000);
+  };
+  return (
+    <div className="space-y-5">
+      <Group title="Show Specter on">
+        <Field label="Monitor"
+          hint="The bar, its panels and the stream viewer open on this screen. Numbers match Identify.">
+          <Picker label="Show Specter on" value={st.chosen?.id ?? 'auto'} options={options} onChange={choose} />
+        </Field>
+        {st.chosen && st.chosenMissing && (
+          <Alert variant="warning">That display isn't connected, so Specter is using Auto until it's back.</Alert>
+        )}
+        {error && <Alert variant="error">{error}</Alert>}
+        <div className="flex gap-2">
+          <Button size="sm" variant="secondary" onClick={identify} disabled={identifying}>
+            {identifying ? 'Showing numbers…' : 'Identify'}
+          </Button>
+          <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} onClick={refresh}>Refresh list</Button>
+        </div>
       </Group>
     </div>
   );
@@ -457,6 +523,22 @@ function AccountSection({ user, onUserChange, onLogout, onSetBusy, api }) {
     return () => { stale = true; };
   }, [api]);
 
+  // L2: dismissible "verify your email" prompt (unverified accounts keep working).
+  const [verifyHidden, setVerifyHidden] = useState(() => {
+    try { return sessionStorage.getItem('verifyEmailDismissed') === '1'; } catch { return false; }
+  });
+  const [verifyState, setVerifyState] = useState({ busy: false, msg: null, error: null });
+  const dismissVerify = () => {
+    setVerifyHidden(true);
+    try { sessionStorage.setItem('verifyEmailDismissed', '1'); } catch { /* ignore */ }
+  };
+  const resendVerify = async () => {
+    setVerifyState({ busy: true, msg: null, error: null });
+    const { data, error } = await api.resendVerification();
+    if (error) { setVerifyState({ busy: false, msg: null, error }); return; }
+    setVerifyState({ busy: false, msg: data?.message || 'Verification email sent.', error: null });
+  };
+
   const update = (patch) => {
     const next = { ...profile, ...patch };
     setProfile(next);
@@ -503,6 +585,21 @@ function AccountSection({ user, onUserChange, onLogout, onSetBusy, api }) {
 
   return (
     <div className="space-y-5">
+      {profile.email_verified === false && !verifyHidden && (
+        <Alert variant="warning">
+          <div className="space-y-2">
+            <div>Verify your email. We sent a link to the address on your account.</div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={resendVerify} disabled={verifyState.busy}>
+                {verifyState.busy ? 'Sending…' : 'Resend email'}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={dismissVerify}>Dismiss</Button>
+            </div>
+            {verifyState.msg && <div>{verifyState.msg}</div>}
+            {verifyState.error && <div>{verifyState.error}</div>}
+          </div>
+        </Alert>
+      )}
       <div className="flex items-center gap-3">
         <HexBadge letter={(profile.callsign || '?')[0]} colorKey="cyan" size={44} active imageUrl={avatarUrl} />
         <div className="min-w-0 flex-1">
@@ -539,6 +636,12 @@ function AccountSection({ user, onUserChange, onLogout, onSetBusy, api }) {
             {intro.msg && <Alert variant="success">{intro.msg}</Alert>}
           </Field>
         )}
+      </Group>
+      <Group title="Two-factor authentication">
+        <TwoFactorPanel api={api} />
+      </Group>
+      <Group title="Your data">
+        <DataRequestsPanel api={api} />
       </Group>
       <Group title="Session">
         <Button variant="danger" icon={<LogOut size={14} />} disabled={loggingOut}
@@ -605,7 +708,67 @@ function ResyncEncryption({ org, resync, onResync }) {
   );
 }
 
-function AboutSection({ settings, appVersion, onCheckUpdate, engine, resyncOrg, resync, onResyncEncryption }) {
+// D1: "Report a bug". The text is cleaned, secrets redacted and the whole
+// description sealed to the owner's key in the engine window
+// (utils/bugReport.js); only the owner can read it, in admin.
+const BUG_CATEGORY_OPTIONS = REPORT_CATEGORIES.map((c) => ({ value: c.id, label: c.label }));
+
+function BugReportForm({ settings, appVersion }) {
+  const [category, setCategory] = useState('other');
+  const [text, setText] = useState('');
+  const [attach, setAttach] = useState(true);
+  const [state, setState] = useState({ status: 'idle', error: null, result: null });
+  const chars = Array.from(text).length;
+  const send = async () => {
+    setState({ status: 'sending', error: null, result: null });
+    try {
+      const result = await settings.sendBugReport({ category, text, attachDiagnostics: attach, appVersion: appVersion || '' });
+      setState({ status: 'ok', error: null, result });
+      setText('');
+    } catch (err) {
+      setState({ status: 'err', error: err.message, result: null });
+    }
+  };
+  const r = state.result;
+  return (
+    <div className="space-y-2.5">
+      <p className="text-ui-sm text-specter-text-muted">
+        Tell us what went wrong. It&apos;s encrypted on this computer so only the SpecterComs owner can read it.
+      </p>
+      <Picker label="What's it about?" value={category} options={BUG_CATEGORY_OPTIONS} onChange={setCategory} />
+      <div>
+        <textarea
+          aria-label="What happened"
+          className={cx(inputClass, 'h-auto min-h-[110px] resize-y py-2 leading-relaxed', focusRing)}
+          rows={5}
+          maxLength={REPORT_MAX_CHARS}
+          value={text}
+          placeholder="What were you doing, what did you expect, and what happened instead?"
+          onChange={(e) => { setText(e.target.value); if (state.status !== 'sending') setState({ status: 'idle', error: null, result: null }); }}
+        />
+        <div className="flex justify-between gap-2 text-ui-xs text-specter-text-subtle">
+          <span>Don&apos;t paste passwords, keys or tokens. Anything that looks like one is removed before sending.</span>
+          <span className="shrink-0 tabular-nums">{chars} / {REPORT_MAX_CHARS}</span>
+        </div>
+      </div>
+      <Toggle label="Attach diagnostics" checked={attach} onChange={setAttach}
+        description="Adds this computer's capture, audio and app logs (the same as Submit diagnostics below), tagged with your callsign." />
+      <Button size="sm" onClick={send} disabled={state.status === 'sending' || !text.trim()}>
+        {state.status === 'sending' ? 'Sending…' : 'Send report'}
+      </Button>
+      {state.status === 'ok' && (
+        <Alert variant="success">
+          Report sent. Thanks!
+          {r?.redactions > 0 && ` ${r.redactions} thing${r.redactions === 1 ? '' : 's'} that looked like a secret ${r.redactions === 1 ? 'was' : 'were'} removed first.`}
+          {r?.diagnosticsError && ` The diagnostics couldn't be sent (${r.diagnosticsError}).`}
+        </Alert>
+      )}
+      {state.status === 'err' && <Alert variant="error">Couldn&apos;t send the report: {state.error}</Alert>}
+    </div>
+  );
+}
+
+function AboutSection({ settings, appVersion, onCheckUpdate, engine, resyncOrg, resync, onResyncEncryption, bugReplies }) {
   const [diag, setDiag] = useState({ status: 'idle', error: null });
   const [check, setCheck] = useState('idle');
   const submit = async () => {
@@ -619,8 +782,13 @@ function AboutSection({ settings, appVersion, onCheckUpdate, engine, resyncOrg, 
   };
   return (
     <div className="space-y-5">
+      {bugReplies?.reports?.length > 0 && (
+        <Group title="Your reports">
+          <BugReportReplies replies={bugReplies} />
+        </Group>
+      )}
       <Group title="SpecterComs">
-        <Row title="Version" trailing={<span className="font-mono">{appVersion || '—'}</span>} className="px-0" />
+        <Row icon={<img src={appBadge} alt="" className="h-8 w-8 object-contain" />} title="Version" trailing={<span className="font-mono">{appVersion || '—'}</span>} className="px-0" />
         {onCheckUpdate && (
           <div className="space-y-1.5">
             <Button size="sm" variant="secondary" icon={<RefreshCw size={14} />} disabled={check === 'checking'}
@@ -640,6 +808,13 @@ function AboutSection({ settings, appVersion, onCheckUpdate, engine, resyncOrg, 
       </Group>
       <Group title="Encryption">
         <ResyncEncryption org={resyncOrg} resync={resync} onResync={onResyncEncryption} />
+        <Toggle label="Repair encryption automatically"
+          description="When a channel stops decrypting on this computer, re-sync and, if needed, re-join just that channel's encryption."
+          checked={settings.values?.specter_mls_auto_repair !== '0'} onChange={(on) => settings.set('specter_mls_auto_repair', on ? '1' : '0')} />
+        <ResetIdentityPanel settings={settings} engine={engine} />
+      </Group>
+      <Group title="Report a bug">
+        <BugReportForm settings={settings} appVersion={appVersion} />
       </Group>
       <Group title="Diagnostics">
         <p className="text-ui-sm text-specter-text-muted">
@@ -674,11 +849,12 @@ function AboutSection({ settings, appVersion, onCheckUpdate, engine, resyncOrg, 
  * openSection     { id, at }: jump to that section (the bar's repair chip → 'about') (NET)
  * resyncOrg, resync, onResyncEncryption(orgId)  MR2: About's Resync encryption
  *                 for the active server (null handler = engine not ready)
+ * bugReplies      useBugReportReplies() result: About's "Your reports"
  */
 export default function SettingsCabinet({
   settings, user, appVersion, pttLive, onUserChange, onLogout, onSetBusy, onCheckUpdate,
   maxHeight = 560, onClose, initialSection = null, api = realApi, engine = null, openSection = null,
-  resyncOrg = null, resync = null, onResyncEncryption = null,
+  resyncOrg = null, resync = null, onResyncEncryption = null, bugReplies = null,
 }) {
   const [section, setSection] = useState(openSection?.id ?? initialSection);
   useEffect(() => { if (openSection?.id) setSection(openSection.id); }, [openSection]); // NET
@@ -691,6 +867,7 @@ export default function SettingsCabinet({
       ? (v.specter_voice_mode === 'push-to-talk' ? `Push to talk${v.specter_ptt_key ? ` · ${prettyKey(v.specter_ptt_key)}` : ''}` : `Voice activated · ${v.specter_vad_mode === 'manual' ? 'manual' : 'auto'}`)
       : 'Devices, mic, voice mode',
     overlay: settings.status === 'ready' ? `${v.specter_overlay_corner === 'top-left' ? 'Top left' : 'Top right'}${v.specter_overlay_safe_mode === '1' ? ' · safe mode' : ''}` : 'Overlay, global shortcuts',
+    display: 'Which monitor Specter opens on',
     account: user?.callsign || 'Profile and session',
     privacy: 'End-to-end encryption',
     about: engine?.state?.voice?.connectIssue ? "Voice can't connect · repair here"
@@ -725,11 +902,13 @@ export default function SettingsCabinet({
             {engineBacked && <EngineState settings={settings} />}
             {section === 'audio' && settings.status === 'ready' && <AudioSection settings={settings} pttLive={pttLive} />}
             {section === 'overlay' && settings.status === 'ready' && <OverlaySection settings={settings} pttLive={pttLive} />}
+            {section === 'display' && <DisplaySection />}
             {section === 'account' && <AccountSection user={user} api={api} onUserChange={onUserChange} onLogout={onLogout} onSetBusy={onSetBusy} />}
             {section === 'privacy' && <PrivacySection />}
             {section === 'about' && (
               <AboutSection settings={settings} appVersion={appVersion} onCheckUpdate={onCheckUpdate}
-                engine={engine} resyncOrg={resyncOrg} resync={resync} onResyncEncryption={onResyncEncryption} />
+                engine={engine} resyncOrg={resyncOrg} resync={resync} onResyncEncryption={onResyncEncryption}
+                bugReplies={bugReplies} />
             )}
           </div>
         )}

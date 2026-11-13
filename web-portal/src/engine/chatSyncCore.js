@@ -34,6 +34,30 @@ export const TERMINAL_FAIL_REASONS = Object.freeze(['epoch_too_old', 'corrupt'])
 
 export const isReadable = (row) => typeof row?.plaintext === 'string';
 
+// ── S7 franking fields ────────────────────────────────────────────────────
+// A v2 (franked) row also carries content_json (the exact committed bytes as
+// text), fk (base64 franking key), frank ({ v, c, kid?, tag? } as relayed by
+// the server) and verify ('ok' | 'failed'; engine/frank.js). They travel with
+// the row through storage, backfill bundles and background sync so a report
+// can later prove the message (T&S). Only present on franked rows, so v1 rows
+// keep exactly their old shape.
+const FRANK_VERIFY = new Set(['ok', 'failed']);
+
+/** The franking fields of a row, validated (unknown / malformed ones dropped). */
+export function frankFields(msg) {
+  const out = {};
+  if (typeof msg?.content_json === 'string' && msg.content_json.length <= 20_000) out.content_json = msg.content_json;
+  if (typeof msg?.fk === 'string' && msg.fk.length <= 64) out.fk = msg.fk;
+  const f = msg?.frank;
+  if (f && typeof f === 'object' && Number.isInteger(f.v) && typeof f.c === 'string' && f.c.length <= 64) {
+    out.frank = { v: f.v, c: f.c };
+    if (typeof f.kid === 'string' && f.kid.length <= 32) out.frank.kid = f.kid;
+    if (typeof f.tag === 'string' && f.tag.length <= 64) out.frank.tag = f.tag;
+  }
+  if (FRANK_VERIFY.has(msg?.verify)) out.verify = msg.verify;
+  return out;
+}
+
 const cmpTs = (a, b) => String(a?.timestamp ?? '').localeCompare(String(b?.timestamp ?? ''));
 export const sortByTimestamp = (rows) => [...rows].sort(cmpTs);
 
@@ -55,6 +79,7 @@ export function normalizeRow(msg, channelId = msg?.channel_id) {
     fail_reason:       readable ? null : (msg.fail_reason ?? null),
     attempts:          readable ? 0 : (msg.attempts ?? 0),
     relayed_by:        msg.relayed_by ?? null,
+    ...frankFields(msg), // S7
   };
 }
 
@@ -89,6 +114,7 @@ export function normalizeDmRow(msg, conversationId = msg?.conversation_id) {
     fail_reason:       readable ? null : (msg.fail_reason ?? null),
     attempts:          readable ? 0 : (msg.attempts ?? 0),
     relayed_by:        msg.relayed_by ?? null,
+    ...frankFields(msg), // S7
   };
 }
 
@@ -169,6 +195,8 @@ export const toBundleItem = (row) => ({
   timestamp: row.timestamp,
   text: row.plaintext,
   image_url: row.image_url ?? null,
+  // S7: the receiver re-verifies these itself (engine/frank.js reverifyRow).
+  ...(() => { const { verify: _v, ...f } = frankFields(row); return f; })(),
 });
 
 const byteLength = (s) => (typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(s).length : s.length * 3);
@@ -231,6 +259,8 @@ export function parseBundle(json, { channelId, relayedBy = null, now = new Date(
       timestamp,
       received_at: now,
       relayed_by: relayedBy,
+      // S7: never trust a relayer's verdict — only the fields, re-verified on receipt.
+      ...(() => { const { verify: _v, ...f } = frankFields(it); return f; })(),
     });
   }
   return out;

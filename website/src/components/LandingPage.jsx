@@ -10,6 +10,8 @@ import {
 // composited over in-game backdrops. Re-shoot them from those pages rather
 // than from a live client (transparent windows fade in screen captures, and
 // live data has real names in it).
+import websiteLogo from '../assets/brand/website-logo-transparent.png'; // BRAND (2026-11-12): the approved website logo
+
 const IMG = '/marketing/v2';
 
 const CLIENT_VERSION = '2.0.0';
@@ -328,7 +330,7 @@ const LandingPage = ({ onEnter }) => {
         <section className="mx-auto max-w-6xl px-4 pt-12 sm:px-6 sm:pt-16">
           <div className="grid items-center gap-10 lg:grid-cols-[1fr_1.15fr]">
             <div>
-              <img src={`${IMG}/brand-banner.webp`} width="960" height="297" alt="SpecterComs" className="mb-6 h-auto w-full max-w-[360px] drop-shadow-[0_0_24px_rgba(6,182,212,0.35)]" fetchpriority="high" />
+              <img src={websiteLogo} width="1243" height="658" alt="SpecterComs" className="mb-6 h-auto w-full max-w-[360px]" fetchpriority="high" />
               <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-3 py-1 text-ui-xs font-semibold text-emerald-300">
                 <Lock size={12} aria-hidden="true" /> New in v{CLIENT_VERSION}: end-to-end encrypted voice
               </div>

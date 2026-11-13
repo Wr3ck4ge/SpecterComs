@@ -2,9 +2,11 @@ import { Response } from 'express';
 import { pool } from '../config/db.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
 import { publishEvent } from '../config/nats.js';
+import { adultAvailableForIp, adultRegionRefusal, hasAttested, ADULT_UNAVAILABLE_IN_REGION, ADULT_ATTESTATION_REQUIRED } from '../utils/adultAccess.js'; // L11
 import { getChannelScope, canUseChannel, annotateEventChannels } from '../utils/eventChannelAccess.js'; // EVMLS / OPTREE
 import { getOrgAuthority, canSeeOrgChannel, has } from '../utils/orgAuthority.js';
 import { TEXT_LIMITS, tooLong } from '../utils/validation.js';
+import { watchAudience } from '../utils/audienceNarrowing.js'; // B3
 
 // In-memory channel presence: channelId → Map<userId, callsign>
 // Seeded from channel_subscriptions on startup and kept in sync by join/leave.
@@ -116,17 +118,26 @@ export const createChannel = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: 'Forbidden: Cannot restrict a channel above your own rank' });
     }
 
+    // L11: the adult flag is only offered where adult channels are available.
+    const wantAdult = (req.body as any)?.is_adult === true && !event_id;
+    if (wantAdult && !(await adultAvailableForIp(req.ip))) {
+      return res.status(403).json({ message: 'Adult channels are not available in your region', code: ADULT_UNAVAILABLE_IN_REGION });
+    }
+
     const result = await pool.query(
-      `INSERT INTO channels (org_id, name, type, channel_kind, min_tier, ducking_level, event_id, visible_min_level)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO channels (org_id, name, type, channel_kind, min_tier, ducking_level, event_id, visible_min_level, is_adult)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING *`,
-      [orgId, name, type || 0, kind ?? 0, min_tier || 0, ducking_level || 0.0, event_id || null, visibleMinLevel]
+      [orgId, name, type || 0, kind ?? 0, min_tier || 0, ducking_level || 0.0, event_id || null, visibleMinLevel, wantAdult]
     );
+    if (wantAdult) {
+      await pool.query('INSERT INTO adult_channel_audit (org_id, channel_id, actor_id, is_adult) VALUES ($1, $2, $3, true)', [orgId, result.rows[0].id, userId]);
+    }
 
     const channel = result.rows[0];
     // Clients only refetch on this; a restricted channel's details stay off
     // the org-wide stream (lower ranks get just the refetch nudge).
-    if (visibleMinLevel > 0) {
+    if (visibleMinLevel > 0 || wantAdult) {
       await publishEvent(`specter.event.org.${orgId}`, { type: 'channel_created', channelId: channel.id });
     } else {
       await publishEvent(`specter.event.org.${orgId}`, { type: 'channel_created', channel });
@@ -150,13 +161,20 @@ export const listChannels = async (req: AuthRequest, res: Response) => {
     // Visibility (owner, 2026-11-08): a rank-restricted channel is hidden from
     // members below its threshold (utils/orgAuthority canSeeOrgChannel).
     const viewer = req.user?.id ? await getOrgAuthority(String(orgId), req.user.id) : { isOwner: false, level: 0 };
-    const visibleRows = result.rows.filter((ch: any) => ch.event_id || canSeeOrgChannel(viewer, ch.visible_min_level));
+    let visibleRows = result.rows.filter((ch: any) => ch.event_id || canSeeOrgChannel(viewer, ch.visible_min_level));
+
+    // L11: adult channels. Where the feature is unavailable for this requester
+    // (kill switch, restricted or unknown region) they are hidden entirely;
+    // otherwise an unattested member sees a locked entry, with no occupants.
+    const adultAvailable = await adultAvailableForIp(req.ip);
+    const attested = adultAvailable && req.user?.id && visibleRows.some((ch: any) => ch.is_adult)
+      ? await hasAttested(String(orgId), req.user.id) : false;
+    visibleRows = visibleRows.filter((ch: any) => !ch.is_adult || adultAvailable);
 
     // Attach real-time occupant list from in-memory presence store
-    let channels: any[] = visibleRows.map((ch: any) => ({
-      ...ch,
-      occupants: Array.from(channelPresence.get(ch.id)?.values() ?? []),
-    }));
+    let channels: any[] = visibleRows.map((ch: any) => (ch.is_adult && !attested
+      ? { ...ch, occupants: [], adult_locked: true }
+      : { ...ch, occupants: Array.from(channelPresence.get(ch.id)?.values() ?? []) }));
 
     // OPTREE: event channels carry who may join them (the shared rule in
     // utils/eventChannelAccess — the same one the media ticket enforces) and
@@ -184,7 +202,7 @@ export const listChannels = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    res.json({ channels });
+    res.json({ channels, adult_available: adultAvailable });
   } catch (error: any) {
     console.error('Error listing channels:', error);
     res.status(500).json({ message: 'Server error listing channels' });
@@ -202,6 +220,13 @@ export const joinChannelPresence = async (req: AuthRequest, res: Response) => {
     // Verify channel exists in this org and classify it (org / event channel)
     const scope = await getChannelScope(channelId, orgId);
     if (!scope) return res.status(404).json({ message: 'Channel not found' });
+
+    // L11: adult channel: region first, then the member's 18+ attestation.
+    const adultNo = await adultRegionRefusal(scope, req.ip);
+    if (adultNo) return res.status(403).json(adultNo);
+    if (scope.scope === 'org' && scope.adult && !(await hasAttested(orgId, userId))) {
+      return res.status(403).json({ message: '18+ channel: confirm your age to enter', code: ADULT_ATTESTATION_REQUIRED });
+    }
 
     // ── Event channel access enforcement ─────────────────────────────────────
     // EVMLS: the shared rule (utils/eventChannelAccess) — signed-up members
@@ -473,7 +498,7 @@ export const updateChannel = async (req: AuthRequest, res: Response) => {
   const channelId = String(req.params.channelId);
   const userId = req.user?.id;
   if (!userId) return res.status(401).json({ message: 'User not authenticated' });
-  const body = (req.body || {}) as { name?: unknown; visible_min_level?: unknown };
+  const body = (req.body || {}) as { name?: unknown; visible_min_level?: unknown; is_adult?: unknown };
 
   let name: string | null = null;
   if (body.name !== undefined) {
@@ -488,7 +513,12 @@ export const updateChannel = async (req: AuthRequest, res: Response) => {
     if (v === undefined) return res.status(400).json({ message: 'visible_min_level must be a whole number from 0' });
     level = v;
   }
-  if (name === null && level === null) return res.status(400).json({ message: 'Nothing to change' });
+  let adult: boolean | null = null;
+  if (body.is_adult !== undefined) {
+    if (typeof body.is_adult !== 'boolean') return res.status(400).json({ message: 'is_adult must be true or false' });
+    adult = body.is_adult;
+  }
+  if (name === null && level === null && adult === null) return res.status(400).json({ message: 'Nothing to change' });
 
   try {
     const actor = await getOrgAuthority(orgId, userId);
@@ -505,13 +535,29 @@ export const updateChannel = async (req: AuthRequest, res: Response) => {
       return res.status(403).json({ message: 'Forbidden: Cannot restrict a channel above your own rank' });
     }
 
+    // L11: turning the flag ON needs availability in the actor's region (turning
+    // it off never does). Hidden/unavailable means refused, not silently ignored.
+    if (adult === true && !(await adultAvailableForIp(req.ip))) {
+      return res.status(403).json({ message: 'Adult channels are not available in your region', code: ADULT_UNAVAILABLE_IN_REGION });
+    }
+
+    // B3: raising the threshold drops people from the channel → re-key its group.
+    const narrowing = level !== null && level > Number(row.visible_min_level)
+      ? await watchAudience(orgId, { channelId })
+      : null;
     const upd = await pool.query(
-      `UPDATE channels SET name = COALESCE($1, name), visible_min_level = COALESCE($2, visible_min_level)
+      `UPDATE channels SET name = COALESCE($1, name), visible_min_level = COALESCE($2, visible_min_level),
+         is_adult = COALESCE($5, is_adult)
        WHERE id = $3 AND org_id = $4 RETURNING *`,
-      [name, level, channelId, orgId],
+      [name, level, channelId, orgId, adult],
     );
     const channel = upd.rows[0];
-    const restricted = Number(channel.visible_min_level) > 0 || Number(row.visible_min_level) > 0;
+    if (adult !== null) {
+      await pool.query('INSERT INTO adult_channel_audit (org_id, channel_id, actor_id, is_adult) VALUES ($1, $2, $3, $4)', [orgId, channelId, userId, adult]);
+    }
+    await narrowing?.();
+    // An adult channel's details stay off the org-wide stream (nudge only).
+    const restricted = Number(channel.visible_min_level) > 0 || Number(row.visible_min_level) > 0 || channel.is_adult || adult !== null;
     if (restricted) {
       await publishEvent(`specter.event.org.${orgId}`, { type: 'channel_updated', channelId });
     } else {
@@ -521,5 +567,33 @@ export const updateChannel = async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     console.error('Error updating channel:', error);
     res.status(500).json({ message: 'Server error updating channel' });
+  }
+};
+
+/**
+ * POST /orgs/:orgId/adult-attestation  { confirm: true }
+ * L11: the member's one-time "I am 18 or older" for this server. Explicit
+ * confirm required; refused where adult channels are unavailable (no row is
+ * written there); idempotent.
+ */
+export const attestAdult = async (req: AuthRequest, res: Response) => {
+  const orgId = String(req.params.orgId);
+  const userId = req.user?.id;
+  if (!userId) return res.status(401).json({ message: 'User not authenticated' });
+  if ((req.body as any)?.confirm !== true) return res.status(400).json({ message: 'Confirm that you are 18 or older' });
+  try {
+    if (!(await adultAvailableForIp(req.ip))) {
+      return res.status(403).json({ message: 'Adult channels are not available in your region', code: ADULT_UNAVAILABLE_IN_REGION });
+    }
+    const actor = await getOrgAuthority(orgId, userId);
+    if (!actor.isMember) return res.status(403).json({ message: 'Not a member of this organization' });
+    await pool.query(
+      `INSERT INTO org_adult_attestations (user_id, org_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [userId, orgId],
+    );
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('Error recording adult attestation:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 };

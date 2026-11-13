@@ -1,3 +1,4 @@
+import './utils/noContextMenu'; // NOINSPECT: no browser right-click menu in release builds
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 // Slim stylesheet, not index.css — see the note at the top of strip.css.

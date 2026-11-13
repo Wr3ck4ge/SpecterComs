@@ -5,6 +5,7 @@
 #[allow(dead_code)]
 mod background_sync;
 mod capture;
+mod displays;
 mod hotkeys;
 mod mls_store;
 mod msgcache;
@@ -1126,7 +1127,7 @@ pub fn run() {
     .manage(strip::StripState::default())
     .manage(tray_activity::TrayActivityState::default())
     .manage(native_wt::NativeWtState::default())
-        .invoke_handler(tauri::generate_handler![get_hwid, submit_report_frame, snip_report_clip, capture_start, capture_stop, capture_request_keyframe, capture_list_monitors, capture_list_sources, capture_get_perf_report, capture_get_errors, capture_get_breadcrumbs, get_setup_errors, get_capture_debug_log, get_app_log, client_log, capture_get_compatibility_report, session::auth_configure, session::auth_restore, session::auth_get_token, session::auth_refresh, session::auth_set_session, session::auth_set_user, session::auth_current, session::auth_logout, mls_store::mls_save_state, mls_store::mls_load_state, mls_store::mls_legacy_owner, msgcache::msgcache_append, msgcache::msgcache_read, msgcache::msgcache_read_all, msgcache::msgcache_clear_all, set_close_behavior, show_overlay, hide_overlay, overlay_take_focus, overlay_restore_focus, close_app, updater::updater_check_now, updater::updater_pending, updater::install_update_and_restart, strip::strip_ready, strip::strip_set_region, strip::strip_set_busy, strip::strip_set_pinned, strip::strip_hide, strip::strip_show, strip::strip_layout, strip::strip_peek, tray_activity::set_tray_activity, hotkeys::hotkeys_set_bindings, hotkeys::hotkeys_status, share_target::share_app_target, netdiag::netdiag_local_checks, netdiag::netdiag_probe, native_wt::nwt_info, native_wt::nwt_connect, native_wt::nwt_send_datagram, native_wt::nwt_open_uni, native_wt::nwt_stream_write, native_wt::nwt_stream_finish, native_wt::nwt_stream_reset, native_wt::nwt_stream_stop, native_wt::nwt_close])
+        .invoke_handler(tauri::generate_handler![get_hwid, submit_report_frame, snip_report_clip, capture_start, capture_stop, capture_request_keyframe, capture_list_monitors, capture_list_sources, capture_get_perf_report, capture_get_errors, capture_get_breadcrumbs, get_setup_errors, get_capture_debug_log, get_app_log, client_log, capture_get_compatibility_report, session::auth_configure, session::auth_restore, session::auth_get_token, session::auth_refresh, session::auth_set_session, session::auth_set_user, session::auth_current, session::auth_logout, mls_store::mls_save_state, mls_store::mls_load_state, mls_store::mls_legacy_owner, msgcache::msgcache_append, msgcache::msgcache_read, msgcache::msgcache_read_all, msgcache::msgcache_clear_all, set_close_behavior, show_overlay, hide_overlay, overlay_take_focus, overlay_restore_focus, close_app, updater::updater_check_now, updater::updater_pending, updater::install_update_and_restart, strip::strip_ready, strip::strip_set_region, strip::strip_set_busy, strip::strip_set_pinned, strip::strip_hide, strip::strip_show, strip::strip_layout, strip::strip_peek, displays::displays_list, displays::strip_display_get, displays::strip_display_set, displays::displays_identify, tray_activity::set_tray_activity, hotkeys::hotkeys_set_bindings, hotkeys::hotkeys_status, share_target::share_app_target, netdiag::netdiag_local_checks, netdiag::netdiag_probe, native_wt::nwt_info, native_wt::nwt_connect, native_wt::nwt_send_datagram, native_wt::nwt_open_uni, native_wt::nwt_stream_write, native_wt::nwt_stream_finish, native_wt::nwt_stream_reset, native_wt::nwt_stream_stop, native_wt::nwt_close])
     .plugin(tauri_plugin_specter_audio::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_opener::init())
@@ -1160,8 +1161,9 @@ pub fn run() {
       } else {
         Menu::with_items(app, &[&quit_item])?
       };
-      let tray_icon = app.default_window_icon().cloned();
-      let mut tray_builder = TrayIconBuilder::with_id(tray_activity::TRAY_ID)
+      // BRAND: the tray uses the brand pack's tray set, not the app icon.
+      let tray_icon = tray_activity::init(app.handle());
+      let tray_builder = TrayIconBuilder::with_id(tray_activity::TRAY_ID)
         .menu(&tray_menu)
         .show_menu_on_left_click(false)
         .tooltip("SpecterComs")
@@ -1185,12 +1187,8 @@ pub fn run() {
             let app = tray.app_handle().clone();
             std::thread::spawn(move || strip::on_tray_left_click(&app, anchor));
           }
-        });
-      if let Some(icon) = tray_icon {
-        // The in-voice variants are drawn from this same image.
-        tray_activity::init(app.handle(), &icon);
-        tray_builder = tray_builder.icon(icon);
-      }
+        })
+        .icon(tray_icon);
       tray_builder.build(app)?;
 
       // The tray strip — the app's front door. Pre-created hidden on a

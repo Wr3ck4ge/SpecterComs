@@ -279,12 +279,34 @@ const callsignLookup = (freq, groups, members) => (uid) => {
   return (members || []).find((m) => m.user_id === uid)?.callsign || uid;
 };
 
-/** The whitelist, for the planner's list: [{ user_id, callsign, priority }], by callsign. */
+/**
+ * Everyone on the net, for the planner's list: the whitelist plus (FREQROLE,
+ * owner 2026-11-13) the accepted holders of its roles, which the server adds
+ * live, so later sign-ups appear without the planner doing anything.
+ * [{ user_id, callsign, priority, via_role }], by callsign. via_role = on the
+ * net through a role (remove the role or the sign-up to take them off).
+ */
 export function frequencyMembers(freq, groups, members = []) {
   const callsignOf = callsignLookup(freq, groups, members);
-  return Object.keys(freq?.member_priorities || {})
-    .map((user_id) => ({ user_id, callsign: callsignOf(user_id), priority: frequencyMemberPriority(freq, user_id) }))
+  const viaRole = acceptedRoleHolderIds(groups, freq?.role_refs);
+  const ids = new Set([...Object.keys(freq?.member_priorities || {}), ...viaRole]);
+  return [...ids]
+    .map((user_id) => ({ user_id, callsign: callsignOf(user_id), priority: frequencyMemberPriority(freq, user_id), via_role: viaRole.has(user_id) }))
     .sort((a, b) => String(a.callsign).localeCompare(String(b.callsign)));
+}
+
+/** FREQROLE: accepted holders of the given roles — the server's live rule (no pending sign-ups). */
+function acceptedRoleHolderIds(groups, refs) {
+  const out = new Set();
+  for (const ref of refs || []) {
+    const g = groups?.[ref.group_index];
+    const r = g?.roles?.[ref.role_index];
+    if (!g || !r?.id) continue;
+    for (const [uid, rid] of Object.entries(g.member_role_ids || {})) {
+      if (rid === r.id && (g.member_statuses?.[uid] || 'accepted') === 'accepted') out.add(uid);
+    }
+  }
+  return out;
 }
 
 /**
@@ -324,12 +346,14 @@ function frequencyRoleHolderIds(freq, groups) {
 }
 
 /**
- * Adds role (gi, ri) to frequency fi AND puts its current holders on the
- * whitelist — the planner shortcut; later sign-ups are added by hand.
+ * Adds role (gi, ri) to frequency fi. FREQROLE (2026-11-13): its accepted
+ * holders, now and later, are on the net through the role (server-side, live),
+ * so they are NOT copied onto the explicit whitelist (that would keep them on
+ * after leaving the role). `groups` is kept for call-site compatibility.
  */
+// eslint-disable-next-line no-unused-vars
 export function addFrequencyRoleWithHolders(frequencies, fi, gi, ri, groups) {
-  const holders = roleHolderIds(groups, [{ group_index: gi, role_index: ri }]);
-  return addFrequencyMembers(addFrequencyRole(frequencies, fi, gi, ri), fi, [...holders]);
+  return addFrequencyRole(frequencies, fi, gi, ri);
 }
 
 export function removeFrequencyRole(frequencies, fi, gi, ri) {

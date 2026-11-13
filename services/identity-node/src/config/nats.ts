@@ -7,17 +7,35 @@ dotenv.config();
 let natsConnection: NatsConnection | null = null;
 const sc = StringCodec();
 
+// Privacy rule: no message or transmission is ever written to disk. This stream
+// is only a delivery buffer for offline devices (ciphertext, MLS), held in
+// server MEMORY for at most MSG_BUFFER_MAX_AGE_SECONDS (default 24 h).
+export const msgBufferMaxAgeSeconds = (): number => {
+  const n = Number(process.env.MSG_BUFFER_MAX_AGE_SECONDS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 86400;
+};
+
 const ensureMsgStream = async (nc: NatsConnection) => {
   const jsm: JetStreamManager = await nc.jetstreamManager();
   const streamName = 'SPECTER_MSGS';
+  const maxAgeNs = msgBufferMaxAgeSeconds() * 1e9;
   try {
-    await jsm.streams.info(streamName);
+    const info = await jsm.streams.info(streamName);
+    if ((info.config.storage as any) !== 'memory') {
+      // Storage type cannot be changed in place; never leave it silently on disk.
+      console.error(`[nats] ${streamName} uses ${info.config.storage} storage; deleting so it is recreated in memory`);
+      await jsm.streams.delete(streamName);
+      throw new Error('recreate');
+    }
+    if (info.config.max_age !== maxAgeNs) {
+      await jsm.streams.update(streamName, { ...info.config, max_age: maxAgeNs });
+    }
   } catch {
     await jsm.streams.add({
       name: streamName,
       subjects: ['specter.msg.channel.*', 'specter.msg.dm.*'],
       retention: 'limits' as any,
-      max_age: 86400 * 1e9, // nanoseconds
+      max_age: maxAgeNs, // nanoseconds
       storage: 'memory' as any,
       max_msg_size: 32768,
       discard: 'old' as any,
@@ -67,6 +85,8 @@ const startEventTreeResponder = (nc: NatsConnection) => {
 // SSE). Share one in-flight attempt so there is one connection — and one auth
 // callout responder — instead of a race that opens several.
 let connecting: Promise<NatsConnection | null> | null = null;
+
+export const isNatsConnected = (): boolean => Boolean(natsConnection && !natsConnection.isClosed());
 
 export const connectNats = async (): Promise<NatsConnection | null> => {
     if (natsConnection) return natsConnection;

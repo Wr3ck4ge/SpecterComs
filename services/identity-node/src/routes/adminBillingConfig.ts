@@ -3,6 +3,7 @@ import {
   requireAdminSession, requireRole, requireReauth, adminRateLimit, sensitiveRateLimit,
 } from '../controllers/adminController.js';
 import { authenticateTokenStrict } from '../middleware/authMiddleware.js';
+import { requireAdminTwoFactor } from '../controllers/twoFactorController.js';
 import {
   getBillingConfigAdmin, getBillingConfigVersionAdmin, putBillingConfigAdmin,
 } from '../controllers/adminBillingConfigController.js';
@@ -18,7 +19,7 @@ router.use((_req, res, next) => {
   res.setHeader('Pragma', 'no-cache');
   next();
 });
-router.use(authenticateTokenStrict, requireAdminSession, adminRateLimit);
+router.use(authenticateTokenStrict, requireAdminSession, adminRateLimit, requireAdminTwoFactor); // L3
 
 // Reads: the billing-read role (same as /admin/billing/contributions).
 router.get('/',                  requireRole('operator'), getBillingConfigAdmin);

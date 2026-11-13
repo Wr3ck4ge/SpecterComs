@@ -28,7 +28,7 @@ import {
 
 const BANNER_H = 112;
 const LOGO = 60;
-const PANEL_BG = '#0b1d2e'; // .strip-panel's background (strip.css)
+const PANEL_BG = '#0A1A24'; // .strip-panel's background (strip.css; BRAND blue-black)
 
 const logoSrc = (url) => (url ? `${UPLOADS_BASE_URL}${url}` : null);
 // banner_url is a free-form URL from the website's landing settings; only

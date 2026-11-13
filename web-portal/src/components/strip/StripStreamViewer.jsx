@@ -1,11 +1,12 @@
 import {
-  AlertTriangle, ChevronUp, KeyRound, Layers, Loader2, Maximize2, Minimize2, MonitorOff, RefreshCw, UserX, X,
+  AlertTriangle, ChevronUp, KeyRound, Loader2, Maximize2, Minimize2, MonitorOff, RefreshCw, UserX, X,
 } from 'lucide-react';
 import { Button, IconButton } from '../ui';
 import { cx } from '../ui/styles';
 import useStripStream, { bridgeStreamSource } from './useStripStream';
 import { SV_LAYOUT, miniThumbH, streamViewerLayout } from './streamViewerLayout';
 import { ShareAudioVolume, sharerAudioPref, sharerHasAudio } from './ShareAudioControls'; // SA
+import { WatchWhere } from './watchDestinations'; // C2
 
 // SV: the strip's stream viewer — watch a sharer without the overlay.
 // A panel of its own above the main bar (streamViewerLayout), fed by the
@@ -13,9 +14,9 @@ import { ShareAudioVolume, sharerAudioPref, sharerHasAudio } from './ShareAudioC
 //
 // Modes (StripView decides, from what else is open):
 //   full    the panel above the bar (video area at the stream's aspect): header (live dot, sharer, channel)
-//           with Expand / Open in overlay / Close
+//           with Expand / where (Bar | Game HUD, C2) / Close
 //   mini    a cabinet or the share picker is open: a slim row stacked above
-//           it in the column (thumbnail, name, Show / overlay / close). It
+//           it in the column (thumbnail, name, Show / where / close). It
 //           keeps decoding, so "Show" is instant.
 //   hidden  the wide op panel is open: not drawn, not in the region (still
 //           decoding — the op panel closes back to the viewer)
@@ -30,7 +31,8 @@ import { ShareAudioVolume, sharerAudioPref, sharerHasAudio } from './ShareAudioC
 //   expanded, onToggleExpand
 //   overlayOk     the overlay can take the stream (state.caps.overlay)
 //   error         the stream.watch / overlay hand-off failed (ack error)
-//   onOpenOverlay, onClose, onRetry, onShow (mini: close what covers it)
+//   onSwitch(dest) C2: watch somewhere else (a WATCH_DESTINATIONS entry, never 'bar')
+//   onClose, onRetry, onShow (mini: close what covers it)
 //   onShareAudio  SA: ({ volume } | { muted }) for this sharer's share audio;
 //                 the controls show while voice.shareAudio says it has audio
 //   source        frame source (dev preview: a mocked one)
@@ -103,7 +105,7 @@ export default function StripStreamViewer({
   callsign, voice = null, channelName = null,
   mode = 'full', bar, vw, vh, grow = 'up', onRegion,
   expanded = false, onToggleExpand, overlayOk = true, error = null,
-  onOpenOverlay, onClose, onRetry, onShow, onShareAudio,
+  onSwitch, onClose, onRetry, onShow, onShareAudio,
   source = bridgeStreamSource,
 }) {
   const stream = useStripStream({ active: true, callsign, source, paused: mode === 'hidden' });
@@ -119,10 +121,10 @@ export default function StripStreamViewer({
   const thumbH = miniThumbH(stream.aspect);
 
   const sharing = !voice || voice.sharers.includes(callsign);
-  const overlayBtn = (
-    <IconButton size="sm" icon={<Layers size={15} />} disabled={!overlayOk || !sharing} onClick={onOpenOverlay}
-      label={!overlayOk ? 'The overlay is in safe mode' : 'Open in overlay'} />
-  );
+  // C2: the same Bar / Game HUD switch as the Streams panel and Channels rows.
+  const overlayBtn = sharing ? (
+    <WatchWhere compact callsign={callsign} current="bar" overlayOk={overlayOk} onPick={onSwitch} />
+  ) : null;
   const closeBtn = <IconButton size="sm" icon={<X size={16} />} label="Close stream" onClick={onClose} />;
   const audio = sharing && onShareAudio && sharerHasAudio(voice, callsign) ? sharerAudioPref(voice, callsign) : null; // SA
 

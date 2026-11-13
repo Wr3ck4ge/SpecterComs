@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api';
-import initWasm, { SFrameCrypto, RelayAudioSender, RelayAudioReceiver } from 'wasm-crypto';
-import { saveChannelMessage, getChannelMessages } from '../messageStore';
+import initWasm, { SFrameCrypto, RelayAudioSender, RelayAudioReceiver, ShareFrameReceiver } from 'wasm-crypto';
 import { ensureChannelGroup, syncChannelGroupEpoch, syncEventGroupEpoch, exportGroupSecret, ensureEventGroup, signBytes, verifySignature } from '../mlsSession';
+import { noteDecrypt as noteMlsHealth } from '../engine/mlsHealth'; // S3
 // MR4: onGroupStateChange / healOrgEncryption are MR1's (v2.0.1) additions —
 // read off the namespace so this still loads against an older mlsSession.
 import * as mlsSession from '../mlsSession';
@@ -37,6 +37,8 @@ import {
   createShareAudioNative, createShareAudioPlayer, loadShareAudioEnabled, saveShareAudioEnabled,
   loadSharerAudioPref, saveSharerAudioPref,
 } from '../engine/shareAudio';
+import { openShareAudioPayload, SHARE_AUDIO_FLAGS } from '../engine/shareAudio'; // S7
+import { createVideoKey, openShareV2, resetShareWindows, isShareDrop, streamFrameVersion, SHARE_KIND_VIDEO, SHARE_KIND_AUDIO } from '../engine/shareFrameV2'; // S7
 import { createLaneGainSync } from '../engine/userVolume'; // PM: per-user voice volume
 import { routeMicFrame, ROUTE_GROUP } from '../engine/activeNet'; // frequency overlay: active-net TX
 
@@ -508,7 +510,7 @@ function SourcePickerModal({ sources, onSelect, onCancel }) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSharersChange, onShareAudioChange, watchStreamTarget, onWatchFailed, onStreamCanvas, onMuteChange, levelsRef, uiVisible = false, onSharingChange, externalControlsRef, hideMuteButton, overlayActive = false, stripViewerActive = false /* SV */, channelVolume = 1.0, onRelayRef, onMlsCommitRef, localMutedUserIds, onConnectionQualityChange, onStatusChange, onE2eStateChange, onConnectStateChange /* NET */, userVolumes /* PM */, remoteSharerNets /* op-wide share */ }) => {
+const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSharersChange, onShareAudioChange, watchStreamTarget, onWatchFailed, onStreamCanvas, onMuteChange, levelsRef, uiVisible = false, onSharingChange, externalControlsRef, hideMuteButton, overlayActive = false, stripViewerActive = false /* SV */, channelVolume = 1.0, onMlsCommitRef, localMutedUserIds, onConnectionQualityChange, onStatusChange, onE2eStateChange, onConnectStateChange /* NET */, userVolumes /* PM */, remoteSharerNets /* op-wide share */ }) => {
   const [status, setStatus] = useState('disconnected'); // disconnected, connecting, connected, error
   const [messages, setMessages] = useState([]);
   const [roster, setRoster] = useState([]);
@@ -817,7 +819,10 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
   const shareAudioServerDgramOkRef = useRef(false);
   // The watched stream's declared encryption, per subscribe session — the
   // datagram path has no header of its own to read it from.
-  const shareAudioStreamEncRef = useRef({ session: null, encrypted: false });
+  const shareAudioStreamEncRef = useRef({ session: null, encrypted: false, fv: 1, sharerUserId: null });
+  // S7: the sharer's user id per subscription (subscribe ticket's
+  // sharer_user_id) — bound into every v2 share frame's AAD.
+  const subscribeSharerIdRef = useRef({ session: null, userId: null });
   const shareAudioCtxRef = useRef(null);     // { sourceId, send(payload) } while sharing natively
   const shareAudioUnlistenRef = useRef(null);
   const shareAudioOpRef = useRef(0);         // start/stop generation — a stale start backs out
@@ -889,11 +894,19 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
   // One audio frame read off the subscribe stream or its datagrams (still encrypted). Played
   // only while this is the stream being watched; share audio is E2E only, so
   // a stream that doesn't declare encryption never plays any.
-  const handleShareAudioFrame = (callsign, session, streamEncrypted, tsMs, data) => {
-    if (!streamEncrypted || !cryptoRef.current || !callsign) return;
+  // S7: `stream` = { encrypted, fv, sharerUserId } from the stream header;
+  // `flags` = the in-stream unit's flags byte (datagrams carry the same value).
+  const handleShareAudioFrame = (callsign, session, stream, tsMs, data, flags) => {
+    if (!stream?.encrypted || !cryptoRef.current || !callsign) return;
     if (videoSessionRef.current !== session || overlayWantsSelfViewRef.current) return;
     let inner = null;
-    try { inner = decodeShareAudioInner(withGraceKeys(cryptoRef, (k) => k.decrypt(data)).value); } catch { return; }
+    try {
+      inner = openShareAudioPayload({
+        fv: stream.fv, payload: data, flags, tsMs,
+        openV1: (p) => withGraceKeys(cryptoRef, (k) => k.decrypt(p)).value,
+        openV2: (p, f, ts) => openShareV2(cryptoRef, p, { flags: f, tsMs: ts, sharerUserId: stream.sharerUserId, kind: SHARE_KIND_AUDIO }),
+      });
+    } catch { return; }
     if (!inner) return; // not an audio payload (tampered flags) — never played
     setSharerHasAudio(callsign, true);
     if (!shareAudioSupportedRef.current || watchStreamTargetRef.current !== callsign) return;
@@ -1024,7 +1037,8 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
   // window — unless the rekey removed a member of the channel group, then the
   // old key is freed at once (consumeGroupMemberRemoval).
   const installVideoKey = (secret, groupId = channelRef.current?.id) => {
-      const next = new SFrameCrypto(secret);
+      // S7: v1 SFrameCrypto + the v2 share-frame receiver under the same export.
+      const next = createVideoKey(secret, { SFrameCrypto, ShareFrameReceiver });
       const removal = consumeGroupMemberRemoval(cryptoRef, groupId);
       videoKeyGroupRef.current = groupId;
       if (sameSFrameKey(cryptoRef.current, next)) {
@@ -1942,7 +1956,10 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
   // mean a stale key (missed commit) or a diverged group — recover with
   // backoff, per lane, so a healthy channel key can't mask a stale cascade
   // key or vice versa, escalating each time recovery didn't help.
+  // S3: the MLS group behind a voice lane (channel, or the event for cascade).
+  const voiceLaneGroupId = (isCascade) => (isCascade ? channelRef.current?.event_id : channelRef.current?.id) || null;
   const noteVoiceDecryptFailure = (isCascade) => {
+      noteMlsHealth(voiceLaneGroupId(isCascade), false, { keyHeld: true }); // S3
       const s = decryptFailStreakRef.current;
       const lane = isCascade ? 'cascade' : 'channel';
       s[lane] += 1;
@@ -1957,6 +1974,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
       recoverVoiceLane(isCascade, level).catch(() => {});
   };
   const noteVoiceDecryptSuccess = (isCascade) => {
+      noteMlsHealth(voiceLaneGroupId(isCascade), true); // S3
       const s = decryptFailStreakRef.current;
       s[isCascade ? 'cascade' : 'channel'] = 0;
       s.attempt = 0;
@@ -2159,7 +2177,17 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
     // before the field existed, which leaves nothing to do but the old guess.
     const declaredEncryption = header[STREAM_ENCRYPTION_FIELD];
     const senderDeclaresEncryption = typeof declaredEncryption === 'boolean';
-    shareAudioStreamEncRef.current = { session, encrypted: declaredEncryption === true }; // S2: datagram audio
+    // S7: wire format v2 is declared per stream ("fv": 2); absent = v1 as before.
+    const frameVersion = streamFrameVersion(header);
+    const subSharer = subscribeSharerIdRef.current;
+    const sharerUserId = (subSharer.session === session && subSharer.userId)
+      || (typeof header.user_id === 'string' ? header.user_id : null);
+    if (frameVersion === 2) {
+      resetShareWindows(cryptoRef); // new subscription: fresh replay windows
+      traceLog(`[video] share frames v2, sharer id from ${subSharer.session === session && subSharer.userId ? 'ticket' : 'header'}`);
+    }
+    const shareStream = { encrypted: declaredEncryption === true, fv: frameVersion, sharerUserId };
+    shareAudioStreamEncRef.current = { session, ...shareStream }; // S2: datagram audio
     // looksLikeAnnexB only means anything for the bytestream codecs whose
     // keyframes start with a start code; VP8/VP9 use different magic, so don't
     // apply that heuristic to them at all.
@@ -2352,7 +2380,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
         // buffer, the overlay relay, or the decrypt-failure/stall counters.
         if (frameSize >= 5 && isShareAudioFlags(buffer[4])) {
           const audioTsMs = new DataView(buffer.buffer, buffer.byteOffset + 5, 4).getUint32(0);
-          handleShareAudioFrame(callsign, session, declaredEncryption === true, audioTsMs, buffer.slice(9, 4 + frameSize));
+          handleShareAudioFrame(callsign, session, shareStream, audioTsMs, buffer.slice(9, 4 + frameSize), buffer[4]);
           buffer = buffer.slice(4 + frameSize);
           continue;
         }
@@ -2394,6 +2422,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
         }
         let frameUndecryptable = false;
         let frameKeyMissing = false;
+        let frameDropped = false; // S7: authentic v2 frame refused (replay / stale) — not a key problem
         if (frameEncrypted && !cryptoRef.current) {
           // Encrypted, and we have nothing to decrypt it with. Never decode it.
           frameKeyMissing = true;
@@ -2402,10 +2431,15 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
           // previous one — a sharer that hasn't switched yet keeps playing.
           try {
             const encrypted = frameData;
-            frameData = withGraceKeys(cryptoRef, (k) => k.decrypt(encrypted)).value;
+            frameData = frameVersion === 2
+              ? openShareV2(cryptoRef, encrypted, { flags: buffer[4], tsMs, sharerUserId, kind: SHARE_KIND_VIDEO })
+              : withGraceKeys(cryptoRef, (k) => k.decrypt(encrypted)).value;
           } catch (err) {
-            frameUndecryptable = true;
+            if (frameVersion === 2 && isShareDrop(err)) frameDropped = true;
+            else frameUndecryptable = true;
           }
+          // S3: stuck-group detection (noteMlsHealth never throws).
+          if (!frameDropped) noteMlsHealth(videoKeyGroupRef.current, !frameUndecryptable, { keyHeld: true });
         }
         if (frameKeyMissing) {
           keyMissingFrames++;
@@ -2452,6 +2486,10 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
               });
             }, delay);
           }
+        } else if (frameDropped) {
+          // S7: a replayed or stale frame (e.g. media-rust's cached keyframe
+          // older than 30 s): drop it; a stale keyframe means ask for a fresh one.
+          if (frameType === 'key') requestRemoteKeyframe('stale v2 keyframe');
         } else if (frameUndecryptable) {
           consecutiveDecryptFailures++;
           if (consecutiveDecryptFailures === 1) {
@@ -2489,7 +2527,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
         }
         // A frame we couldn't decrypt, or had no key for, is plaintext to nobody:
         // it must not reach the decoder, the GOP buffer, or the overlay relay.
-        const frameUsable = !frameUndecryptable && !frameKeyMissing;
+        const frameUsable = !frameUndecryptable && !frameKeyMissing && !frameDropped;
         if (frameUsable) {
         // Accumulate GOP buffer so we can replay a complete reference chain when seeding
         // the overlay decoder — sending only a keyframe causes P-frame decode errors.
@@ -2775,24 +2813,8 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
     return Number.isFinite(stored) ? stored : 150;
   });
 
-  // Text channel state
-  const isTextChannel = channel.channel_kind === 1;
-  const [chatMessages, setChatMessages] = useState([]);
-  const [chatInput, setChatInput] = useState('');
-  const [chatLoading, setChatLoading] = useState(false);
-  const [chatSending, setChatSending] = useState(false);
-  const [chatImageAttachment, setChatImageAttachment] = useState(null); // data URL or null
-  const [chatAttachError, setChatAttachError] = useState(null);
-  const chatFileInputRef = useRef(null);
   const [sourcePickerState, setSourcePickerState] = useState(null);
   const [usingTauriCapture, setUsingTauriCapture] = useState(false);
-  const chatRelayRef = useRef(null);
-
-  // Expose relay handler to parent (WarRoom) for SSE message_relay events
-  useEffect(() => {
-    if (onRelayRef) onRelayRef.current = (payload) => chatRelayRef.current?.(payload);
-    return () => { if (onRelayRef) onRelayRef.current = null; };
-  }, [onRelayRef]);
 
   // Authoritative "epoch changed" hook for WarRoom's global mls_commit SSE
   // handler, complementing the Join-triggered re-derive above — Join can
@@ -4532,6 +4554,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
       return;
     }
     const videoChannelId = viaFreq ? ticketData.channel_id : channelRef.current.id;
+    subscribeSharerIdRef.current = { session: mySession, userId: ticketData.sharer_user_id ?? null }; // S7
     // Same op key or nothing: an old server (no channel_id / op scope), or
     // an op key not in hand yet, means no subscribe — never a guess.
     if (viaFreq && (!videoChannelId || ticketData.video_key_scope !== 'op'
@@ -4565,7 +4588,7 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
       readShareAudioDatagrams(vt.datagrams.readable, (tsMs, payload) => {
         const enc = shareAudioStreamEncRef.current;
         if (enc.session !== mySession) return; // header not read yet: encryption unknown
-        handleShareAudioFrame(callsign, mySession, enc.encrypted, tsMs, payload);
+        handleShareAudioFrame(callsign, mySession, enc, tsMs, payload, SHARE_AUDIO_FLAGS);
       }, () => videoTransportRef.current === vt);
     }
 
@@ -5143,181 +5166,6 @@ const CommLink = ({ org, channel, onBack, embedded = false, onRosterChange, onSh
 
     return () => { unlistens.forEach(fn => fn()); };
   }, []);
-
-  // ── Text channel functions ──────────────────────────────────────────────────
-
-  const handleChatFileSelect = (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-    const MAX = 512 * 1024;
-    if (file.size > MAX) {
-      setChatAttachError(`Image too large (${Math.round(file.size / 1024)} KB). Max 512 KB.`);
-      setTimeout(() => setChatAttachError(null), 4000);
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      setChatImageAttachment(ev.target.result);
-      console.log('[Chat] Image attached:', file.name, Math.round(file.size / 1024) + ' KB');
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const sendChatMessage = async (e) => {
-    e.preventDefault();
-    if ((!chatInput.trim() && !chatImageAttachment) || chatSending) return;
-    const text = chatInput.trim();
-    const imageUrl = chatImageAttachment;
-    setChatSending(true);
-    setChatInput('');
-    setChatImageAttachment(null);
-    console.log('[Chat] Sending to', channel.name, '| text:', text.length, 'chars | image:', imageUrl ? 'yes' : 'no');
-    const { error } = await api.sendMessage(org.id, channel.id, text, imageUrl);
-    if (error) console.error('[Chat] Send failed:', error);
-    setChatSending(false);
-    // Message arrives back via SSE message_relay
-  };
-
-  // Load from IndexedDB on channel change
-  useEffect(() => {
-    if (!isTextChannel) return;
-    let cancelled = false;
-    setChatMessages([]);
-    setChatLoading(true);
-    console.log('[Chat] Loading messages for channel', channel.id, channel.name);
-    getChannelMessages(channel.id).then(rows => {
-      if (!cancelled) {
-        console.log('[Chat] Loaded', rows.length, 'messages from IndexedDB');
-        setChatMessages(rows);
-        setChatLoading(false);
-      }
-    }).catch((err) => {
-      console.error('[Chat] IndexedDB load failed:', err);
-      if (!cancelled) setChatLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, [channel.id, isTextChannel]);
-
-  // Register SSE relay handler for text channel
-  useEffect(() => {
-    if (!isTextChannel) return;
-    chatRelayRef.current = (payload) => {
-      if (payload.channel_id !== channel.id) return;
-      console.log('[Chat] Relay received:', payload.id, '|', payload.callsign, '|', payload.encrypted_content?.slice(0, 80), payload.image_url ? '| [image]' : '');
-      const msg = {
-        id:                payload.id,
-        channel_id:        payload.channel_id,
-        sender_id:         payload.sender_id,
-        callsign:          payload.callsign ?? null,
-        global_tag:        payload.global_tag ?? null,
-        encrypted_content: payload.encrypted_content,
-        image_url:         payload.image_url ?? null,
-        timestamp:         payload.timestamp,
-      };
-      saveChannelMessage(msg).catch(() => {});
-      setChatMessages(prev => {
-        if (prev.some(m => m.id === msg.id)) return prev;
-        return [...prev, msg];
-      });
-    };
-    return () => { chatRelayRef.current = null; };
-  }, [channel.id, isTextChannel]);
-
-  useEffect(() => {
-    if (isTextChannel && endRef.current) {
-      endRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [chatMessages]);
-
-  // ── Text channel early return ───────────────────────────────────────────────
-
-  if (isTextChannel) {
-    return (
-      <div className="h-full flex flex-col bg-specter-bg-panel border border-specter-primary-dim rounded-lg overflow-hidden">
-        {/* Header */}
-        <div className="bg-specter-bg-surface p-4 border-b border-specter-primary-dim flex justify-between items-center">
-          <div>
-            <div className="text-xs text-specter-text-muted uppercase tracking-widest">Text Channel</div>
-            <div className="text-lg font-bold text-specter-primary-cyan">{channel.name}</div>
-          </div>
-          <button onClick={onBack} className="text-specter-text-muted hover:text-specter-primary-cyan">&times; Close</button>
-        </div>
-
-        {/* Message list */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {chatLoading && chatMessages.length === 0 && (
-            <div className="text-specter-text-muted text-xs text-center py-8">Loading messages...</div>
-          )}
-          {chatMessages.map(m => (
-            <div key={m.id} className="group">
-              <div className="flex items-baseline gap-2">
-                <span className="text-specter-primary-cyan font-mono text-xs font-bold">{m.callsign}</span>
-                {m.global_tag && <span className="text-specter-text-muted text-xs font-mono">[{m.global_tag}]</span>}
-                <span className="text-specter-text-muted text-xs font-mono">
-                  {new Date(m.timestamp).toLocaleTimeString()}
-                </span>
-              </div>
-              {m.encrypted_content && (
-                <div className="text-specter-text-main text-sm font-mono pl-0 mt-0.5 break-words">{m.encrypted_content}</div>
-              )}
-              {m.image_url && (
-                <img
-                  src={m.image_url}
-                  alt="attachment"
-                  className="mt-1 rounded border border-specter-primary-dim/50 object-contain cursor-pointer"
-                  style={{ maxHeight: 260, maxWidth: '100%' }}
-                  onClick={() => window.open(m.image_url, '_blank')}
-                />
-              )}
-            </div>
-          ))}
-          <div ref={endRef} />
-        </div>
-
-        {/* Input form */}
-        <form onSubmit={sendChatMessage} className="p-3 border-t border-specter-primary-dim space-y-2">
-          {/* Attachment preview */}
-          {chatImageAttachment && (
-            <div className="relative inline-block">
-              <img src={chatImageAttachment} alt="pending attachment" className="rounded border border-specter-primary-dim object-contain" style={{ maxHeight: 80, maxWidth: 200 }} />
-              <button
-                type="button"
-                onClick={() => setChatImageAttachment(null)}
-                className="absolute -top-1 -right-1 w-4 h-4 bg-specter-state-error text-white rounded-full text-xs leading-none flex items-center justify-center"
-              >×</button>
-            </div>
-          )}
-          {chatAttachError && (
-            <div className="text-specter-state-error text-xs font-mono">{chatAttachError}</div>
-          )}
-          <div className="flex gap-2">
-            <input type="file" ref={chatFileInputRef} className="hidden" accept="image/*" onChange={handleChatFileSelect} />
-            <button
-              type="button"
-              onClick={() => chatFileInputRef.current?.click()}
-              title="Attach image (max 512 KB)"
-              className="px-2 py-2 border border-specter-primary-dim text-specter-text-muted hover:text-white hover:border-specter-primary-cyan rounded text-base transition-colors flex-shrink-0"
-            >📎</button>
-            <input
-              value={chatInput}
-              onChange={e => setChatInput(e.target.value)}
-              maxLength={4000}
-              placeholder={`Message #${channel.name}`}
-              className="flex-1 bg-black border border-specter-primary-dim rounded px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-specter-primary-cyan placeholder-specter-text-muted"
-            />
-            <button
-              type="submit"
-              disabled={chatSending || (!chatInput.trim() && !chatImageAttachment)}
-              className="px-4 py-2 bg-specter-primary-cyan text-specter-bg-surface rounded text-xs font-bold uppercase tracking-wider font-mono disabled:opacity-50"
-            >
-              SEND
-            </button>
-          </div>
-        </form>
-      </div>
-    );
-  }
 
   // ── Voice channel render ────────────────────────────────────────────────────
 

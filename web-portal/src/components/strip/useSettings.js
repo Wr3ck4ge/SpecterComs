@@ -19,6 +19,9 @@ import { DEFAULT_KEYBINDS } from '../../keybinds';
 //                     (rms/floor raw i16 RMS — see settingsBridge's mic-level);
 //                     s.setMicTest(on, deviceId)
 //   s.submitDiagnostics(appVersion) → Promise
+//   s.sendBugReport({ category, text, attachDiagnostics, appVersion }) → Promise (D1)
+//   s.mlsDiagnostics() → Promise<{ loaded, ownLabel, stateVersion, groups }> (S2)
+//   s.resetMlsIdentity() → Promise<{ oldLabel, newLabel, registered, warnings, restarting }> (S5)
 // Everything is engine-held; the strip keeps nothing of its own here.
 
 const KEYBIND_DEFAULTS = {
@@ -120,9 +123,18 @@ export default function useSettings({ enabled = true } = {}) {
     (appVersion) => settingsRequest(SOP.DIAGNOSTICS, { appVersion }, DIAGNOSTICS_TIMEOUT_MS),
     [],
   );
+  // D1: sealed to the owner's key in the engine window before it's sent.
+  const sendBugReport = useCallback(
+    (report) => settingsRequest(SOP.BUG_REPORT, report, DIAGNOSTICS_TIMEOUT_MS),
+    [],
+  );
+  // S2: read-only snapshot of this device's MLS groups (epochs, members).
+  const mlsDiagnostics = useCallback(() => settingsRequest(SOP.MLS_DIAGNOSTICS, {}), []);
+  // S5: last-resort repair; the engine reloads itself after replying.
+  const resetMlsIdentity = useCallback(() => settingsRequest(SOP.RESET_MLS_IDENTITY, {}, DIAGNOSTICS_TIMEOUT_MS), []);
 
   return {
     status, error, values: effective(raw || {}), set, saveError, clearSaveError: () => setSaveError(null), reload,
-    devices, loadDevices, requestMic, mic, setMicTest, submitDiagnostics,
+    devices, loadDevices, requestMic, mic, setMicTest, submitDiagnostics, sendBugReport, mlsDiagnostics, resetMlsIdentity,
   };
 }

@@ -1,3 +1,4 @@
+import './utils/noContextMenu'; // NOINSPECT: no browser right-click menu in release builds
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 // Intentionally NOT importing index.css here. index.css applies heavy CSS rules

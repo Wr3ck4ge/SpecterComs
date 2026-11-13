@@ -76,10 +76,32 @@ async function adoptLogin(data) {
 /** Logs in; on success the session is stored and every window is told. */
 export async function login({ email, password }) {
   const hwid = await getHwid();
-  const { data, error } = await api.login({ email, password, hwid });
-  if (error) return { user: null, error };
+  const { data, error, code, masked_email } = await api.login({ email, password, hwid });
+  // EMAIL_NOT_VERIFIED: the account exists but must verify its email first.
+  if (error) return { user: null, error, code: code || null, masked_email: masked_email || '' };
+  // L3: 2FA on -> no session yet; the caller asks for a code and calls verifyTwoFactor.
+  if (data?.two_factor_required) return { user: null, error: null, twoFactor: { challenge: data.challenge } };
   await adoptLogin(data);
   return { user: data.user, error: null };
+}
+
+/** L3: login's second step. { challenge, code } or { challenge, recovery_code } -> { user, error, code } */
+export async function verifyTwoFactor({ challenge, code, recovery_code }) {
+  const { data, error, code: errCode } = await api.verifyTwoFactor({ challenge, code, recovery_code });
+  if (error) return { user: null, error, code: errCode || null };
+  await adoptLogin(data);
+  return { user: data.user, error: null, recoveryCodesRemaining: data.recovery_codes_remaining };
+}
+
+/** Mails a fresh verification link (no session needed). Same answer whether or not the account exists. */
+export async function resendVerification({ email, password }) {
+  const { error } = await api.resendVerificationPublic({ email, password });
+  return { error };
+}
+
+/** "Check your inbox at j***@x.com to verify your email" */
+export function verifyInboxMessage(masked) {
+  return `Check your inbox${masked ? ` at ${masked}` : ''} to verify your email, then log in.`;
 }
 
 /** Creates an account. Doesn't log in — the UI sends the user to the login form. */

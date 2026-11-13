@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
-  AlertCircle, Hash, Loader2, Mic, MicOff, MonitorPlay, PhoneOff, Plus, Radio, Trash2, Users, Volume2, X,
+  AlertCircle, Hash, Loader2, PhoneOff, Plus, Trash2, Users, Volume2, X,
   ArrowLeft, ChevronRight, RadioTower, // CH2
-  Layers, // SV
   KeyRound, Lock, // E2EV
   Eye, // channel visibility
   Crown, // LEADFREQ
@@ -14,11 +13,13 @@ import { CMD, selectMyChannelUsers, totalUnread } from '../../engine/bridge';
 import { cmdKey } from './useEngine';
 import { ShareAudioEchoWarning, sharerHasAudio } from './ShareAudioControls'; // SA
 import MemberMenu from './MemberMenu'; // PM
+import { WATCH_DESTINATIONS, WatchWhere, watchDestination, watchingWhere } from './watchDestinations'; // C2
 import { fmtVolumePct } from '../../engine/people'; // PM
 import { buildChannelSections, joinBlockedReason } from './channelTree'; // OPTREE
+import { ScChannels, ScEncryptedVerified, ScGameHud, ScMicMuted, ScMicOn, ScStreamingLive, ScWatchingStream } from '../icons/brand'; // BRAND
 
 /** CH2: the Channels cabinet's icon (bar button + cabinet header). */
-export const CHANNELS_ICON = Radio;
+export const CHANNELS_ICON = ScChannels; // BRAND: was Radio
 
 // The Channels cabinet and its side panel, fed by the engine bridge
 // (src/engine/bridge.js). Presentational — StripApp owns the bridge and the
@@ -30,9 +31,9 @@ export const CHANNELS_ICON = Radio;
 // panel — StripApp passes it as `pane` and drives the width (useFluidExpand):
 //   voice  first click: the channel's members in the pane
 //          second click (or Join there): join. The joined channel's pane is
-//          live: speaking indicators, two stream buttons next to each sharer
-//          (SV: Watch = the strip's own stream viewer; the layers icon opens
-//          the overlay watching them), mic + leave.
+//          live: speaking indicators, a Watch button next to each sharer
+//          (C2: it opens the Bar / Game HUD choice under the row,
+//          watchDestinations.jsx), mic + leave.
 //   text   the chat (StripChat), with a red unread count on unfocused rows.
 //
 // CH2: two views while in voice.
@@ -115,7 +116,7 @@ function VoiceStatus({ status, keyState = null, keyProblem = null, error = null 
   if (status === 'connected') {
     return (
       <span className="shrink-0 inline-flex items-center gap-1 text-ui-xs text-emerald-300" title="Voice is end-to-end encrypted">
-        <Lock size={11} aria-hidden="true" />Connected
+        <ScEncryptedVerified size={11} />Connected
       </span>
     );
   }
@@ -179,7 +180,7 @@ function FrequencyChips({ engine, onCommand, clearError }) {
             >
               {pending ? <Loader2 size={11} aria-hidden="true" className="animate-spin" /> : <Icon size={11} aria-hidden="true" className="shrink-0" />}
               <span className="truncate">{f.command ? 'Command' : f.leadership ? 'Leadership' : f.name}</span>
-              {f.active && <Mic size={10} aria-label="transmitting" className="shrink-0" />}
+              {f.active && <ScMicOn size={10} aria-label="transmitting" className="shrink-0" />}
             </button>
           );
         })}
@@ -207,7 +208,7 @@ function MyVoiceControls({ engine, onCommand, clearError }) {
           className={cx('!h-7', !v.muted && '!border-emerald-500/50 !bg-emerald-500/10 !text-emerald-300')}
           disabled={mutePending || v.status !== 'connected'}
           aria-pressed={v.muted}
-          icon={mutePending ? <Loader2 size={13} className="animate-spin" /> : v.muted ? <MicOff size={13} /> : <Mic size={13} />}
+          icon={mutePending ? <Loader2 size={13} className="animate-spin" /> : v.muted ? <ScMicMuted size={13} /> : <ScMicOn size={13} />}
           onClick={() => { clearError(cmdKey(CMD.VOICE_SET_MUTED, {})); onCommand(CMD.VOICE_SET_MUTED, { muted: !v.muted }); }}
         >
           {v.muted ? 'Unmute' : 'Mute'}
@@ -244,6 +245,7 @@ function MyChannelMembers({ engine, onCommand, clearError, onOpenDm }) {
   const overlayOk = state.caps.overlay;
   const users = selectMyChannelUsers(state, levels);
   const [menuFor, setMenuFor] = useState(null); // callsign whose menu is open (PM)
+  const [chooseFor, setChooseFor] = useState(null); // C2: callsign whose Watch choice is open
   const anchorRefs = useRef(new Map());
   const menuForRef = useRef(null);
   menuForRef.current = menuFor;
@@ -263,12 +265,12 @@ function MyChannelMembers({ engine, onCommand, clearError, onOpenDm }) {
         const menuOpen = hasMenu && menuFor === u.callsign;
         const nameClass = cx('flex-1 min-w-0 truncate', u.speaking ? 'text-emerald-300' : 'text-specter-text-main');
         const watchArgs = { callsign: u.callsign };
-        const watchPending = pendingFor(CMD.OVERLAY_WATCH, watchArgs);
-        const watchErr = errorFor(CMD.OVERLAY_WATCH, watchArgs);
-        const watching = u.watching && state.overlay.open && v.viewer !== 'strip'; // SV: not while the strip has it
-        // SV: Watch = the strip's own viewer (no overlay needed).
-        const hereWatching = u.watching && v.viewer === 'strip';
-        const herePending = pendingFor(CMD.STREAM_WATCH, watchArgs);
+        // C2: where I'm watching them (WATCH_DESTINATIONS id), what's in flight, what failed.
+        const where = watchingWhere(state, u.callsign);
+        const busyAt = WATCH_DESTINATIONS.find((d) => pendingFor(d.cmd, watchArgs))?.id ?? null;
+        const watchErrDest = WATCH_DESTINATIONS.find((d) => errorFor(d.cmd, watchArgs));
+        const watchErr = watchErrDest ? errorFor(watchErrDest.cmd, watchArgs) : null;
+        const chooseOpen = chooseFor === u.callsign && u.sharing && !u.isMe;
         return (
           <li key={u.callsign}>
             <div className="flex items-center gap-2 h-8 px-4 text-ui-sm">
@@ -300,7 +302,7 @@ function MyChannelMembers({ engine, onCommand, clearError, onOpenDm }) {
                   {u.isMe && <span className="ml-1 text-ui-xs text-specter-text-subtle">(you)</span>}
                 </span>
               )}
-              {u.isMe && v.muted && <MicOff size={13} className="shrink-0 text-specter-text-subtle" aria-label="Muted" />}
+              {u.isMe && v.muted && <ScMicMuted size={13} className="shrink-0 text-specter-text-subtle" aria-label="Muted" />}
               {u.sharing && u.isMe && v.shareAudio?.supported && (
                 // SA: my share's audio on/off, while sharing.
                 <IconButton
@@ -313,35 +315,41 @@ function MyChannelMembers({ engine, onCommand, clearError, onOpenDm }) {
                 />
               )}
               {u.sharing && u.isMe && (
-                <MonitorPlay size={14} className="shrink-0 mx-1.5 text-specter-primary-neon" aria-label="You're sharing your screen" />
+                <ScStreamingLive size={14} className="shrink-0 mx-1.5 text-specter-primary-neon" aria-label="You're sharing your screen" />
               )}
               {u.sharing && !u.isMe && sharerHasAudio(v, u.callsign) && (
                 // SA: this share carries audio.
                 <Volume2 size={13} className="shrink-0 text-specter-text-subtle" aria-label={`${u.callsign}'s stream has audio`} />
               )}
               {u.sharing && !u.isMe && (
+                // C2: one Watch button; the where (Bar / Game HUD) opens below the row.
                 <IconButton
                   size="sm"
-                  active={hereWatching}
-                  disabled={herePending}
-                  icon={herePending ? <Loader2 size={15} className="animate-spin" /> : <MonitorPlay size={15} />}
-                  label={hereWatching ? `Watching ${u.callsign}` : `Watch ${u.callsign}'s stream`}
-                  onClick={() => onCommand(CMD.STREAM_WATCH, watchArgs)}
-                />
-              )}
-              {u.sharing && !u.isMe && (
-                <IconButton
-                  size="sm"
-                  active={watching}
-                  disabled={!overlayOk || watchPending}
-                  icon={watchPending ? <Loader2 size={15} className="animate-spin" /> : <Layers size={15} /> /* SV: was MonitorPlay */}
-                  label={!overlayOk
-                    ? 'The overlay is in safe mode'
-                    : watching ? `Watching ${u.callsign} in the overlay` : `Open ${u.callsign}'s stream in the overlay`}
-                  onClick={() => { clearError(cmdKey(CMD.OVERLAY_WATCH, watchArgs)); onCommand(CMD.OVERLAY_WATCH, watchArgs); }}
+                  active={Boolean(where) || chooseOpen}
+                  aria-expanded={chooseOpen}
+                  disabled={Boolean(busyAt)}
+                  icon={busyAt ? <Loader2 size={15} className="animate-spin" />
+                    : where === 'hud' ? <ScGameHud size={15} /> : <ScWatchingStream size={15} />}
+                  label={where ? `Watching ${u.callsign} in the ${watchDestination(where)?.label}. Change where`
+                    : `Watch ${u.callsign}'s stream`}
+                  onClick={() => setChooseFor((cur) => (cur === u.callsign ? null : u.callsign))}
                 />
               )}
             </div>
+            {chooseOpen && (
+              <WatchWhere
+                className="mx-4 mb-1.5"
+                callsign={u.callsign}
+                current={where}
+                pending={busyAt}
+                overlayOk={overlayOk}
+                onPick={(dest) => {
+                  clearError(cmdKey(dest.cmd, watchArgs));
+                  onCommand(dest.cmd, watchArgs);
+                  setChooseFor(null);
+                }}
+              />
+            )}
             {menuOpen && (
               <MemberMenu
                 callsign={u.callsign}
@@ -353,7 +361,7 @@ function MyChannelMembers({ engine, onCommand, clearError, onOpenDm }) {
                 onClose={closeMenu}
               />
             )}
-            {watchErr && <RowError className="mx-4" message={watchErr} onDismiss={() => clearError(cmdKey(CMD.OVERLAY_WATCH, watchArgs))} />}
+            {watchErr && <RowError className="mx-4" message={watchErr} onDismiss={() => clearError(cmdKey(watchErrDest.cmd, watchArgs))} />}
             {u.isMe && u.sharing && v.shareAudio?.active && v.shareAudio.echoRisk && <ShareAudioEchoWarning className="mx-4 mb-1" /> /* SA */}
             {u.isMe && u.sharing && v.shareAudio?.error && (
               <p role="alert" className="mx-4 mb-1 text-ui-xs text-red-300">Share audio: {v.shareAudio.error}</p>
@@ -488,7 +496,7 @@ function InVoiceRow({ engine, onCommand, clearError, onOpen }) {
           className={cx('!h-7 !w-7', !v.muted && '!text-emerald-300')}
           disabled={mutePending || v.status !== 'connected'}
           active={v.muted}
-          icon={mutePending ? <Loader2 size={14} className="animate-spin" /> : v.muted ? <MicOff size={14} /> : <Mic size={14} />}
+          icon={mutePending ? <Loader2 size={14} className="animate-spin" /> : v.muted ? <ScMicMuted size={14} /> : <ScMicOn size={14} />}
           label={v.muted ? 'Unmute' : 'Mute'}
           onClick={() => { clearError(cmdKey(CMD.VOICE_SET_MUTED, {})); onCommand(CMD.VOICE_SET_MUTED, { muted: !v.muted }); }}
         />
@@ -528,7 +536,7 @@ function JoinedHeader({ engine, onBack, onClose }) {
           onClick={onBack}
         />
         {unread > 0 && (
-          <span aria-hidden="true" className="pointer-events-none absolute top-0.5 right-0.5 h-2.5 w-2.5 rounded-pill border-2 border-[#0b1d2e] bg-red-500" />
+          <span aria-hidden="true" className="pointer-events-none absolute top-0.5 right-0.5 h-2.5 w-2.5 rounded-pill border-2 border-specter-brand-ink bg-red-500" />
         )}
       </span>
       <Volume2 size={16} aria-hidden="true" className="shrink-0 mt-1.5 text-emerald-400" />
@@ -591,16 +599,23 @@ function VisibilityPicker({ value, options, onChange, disabled }) {
   );
 }
 
-function VisibilityEdit({ channel, options, busy, error, onSave, onCancel }) {
+function VisibilityEdit({ channel, options, busy, error, onSave, onCancel, adultAvailable = false }) {
   const [value, setValue] = useState(channel.minLevel || 0);
+  const [adult, setAdult] = useState(Boolean(channel.adult));
   return (
     <div className="mx-1 mb-1 px-2 py-2 space-y-2 rounded-ui-row border border-specter-border bg-specter-bg-deep/40" aria-label={`Who can see ${channel.name}`}>
       <p className="text-ui-sm text-specter-text-main"><span className="font-semibold">{channel.name}</span></p>
       <VisibilityPicker value={value} options={options} onChange={setValue} disabled={busy} />
       <p className="text-ui-xs text-specter-text-subtle">Members below this rank won&apos;t see the channel or be able to join it.</p>
+      {(adultAvailable || channel.adult) && (
+        <label className="flex items-start gap-2 text-ui-sm text-specter-text-main">
+          <input type="checkbox" className="mt-0.5" checked={adult} disabled={busy} onChange={(e) => setAdult(e.target.checked)} />
+          <span>18+ channel<span className="block text-ui-xs text-specter-text-subtle">Adults only. Members confirm they are 18 or older before entering.</span></span>
+        </label>
+      )}
       {error && <p role="alert" className="text-ui-xs text-red-300">{error}</p>}
       <div className="flex gap-1.5">
-        <Button size="sm" onClick={() => onSave(value)} disabled={busy || value === (channel.minLevel || 0)}>{busy ? 'Saving…' : 'Save'}</Button>
+        <Button size="sm" onClick={() => onSave(value, adult)} disabled={busy || (value === (channel.minLevel || 0) && adult === Boolean(channel.adult))}>{busy ? 'Saving…' : 'Save'}</Button>
         <Button variant="secondary" size="sm" onClick={onCancel} disabled={busy}>Cancel</Button>
       </div>
     </div>
@@ -705,6 +720,7 @@ export default function ChannelsCabinet({
   engine, onCommand, clearError = () => {}, focus = null, onFocus = () => {},
   onCreateChannel, onDeleteChannel, onClose, initialCreating = false,
   onUpdateChannel = null, onLoadRanks = null, // channel visibility
+  onLoadAdultAvailable = null, onAttestAdult = null, // L11 adult channels
   pane = null, paneWidth = 0, expand = 'left', maxHeight = 520, paneMinHeight = 0,
   browseFor = null, onBrowseFor = () => {},
 }) {
@@ -775,15 +791,36 @@ export default function ChannelsCabinet({
   const visOptions = visibilityOptions(ranks, state.org);
   const [editVis, setEditVis] = useState(null); // channel id
   const [visState, setVisState] = useState({ busy: false, error: null });
-  const submitVisibility = async (ch, minLevel) => {
+  const submitVisibility = async (ch, minLevel, adult) => {
     setVisState({ busy: true, error: null });
-    const { error } = (await onUpdateChannel?.(ch, { visible_min_level: minLevel })) || {};
+    const body = { visible_min_level: minLevel };
+    if (adult !== undefined && adult !== Boolean(ch.adult)) body.is_adult = adult; // L11
+    const { error } = (await onUpdateChannel?.(ch, body)) || {};
     if (error) { setVisState({ busy: false, error: typeof error === 'string' ? error : error?.message || 'Could not change who can see it' }); return; }
     setVisState({ busy: false, error: null });
     setEditVis(null);
   };
 
-  useEffect(() => { setConfirmDelete(null); }, [state.org?.id]);
+  // L11: adult channels. The toggle only exists where the server says they are
+  // available; an unattested member confirms 18+ once (inline, on first entry).
+  const [adultAvailable, setAdultAvailable] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setAdultAvailable(false);
+    if (canManage && orgIdForRanks && onLoadAdultAvailable) onLoadAdultAvailable().then((a) => { if (live) setAdultAvailable(a === true); }).catch(() => {});
+    return () => { live = false; };
+  }, [canManage, orgIdForRanks, onLoadAdultAvailable]);
+  const [attestFor, setAttestFor] = useState(null); // channel id
+  const [attestState, setAttestState] = useState({ busy: false, error: null });
+  const submitAttest = async () => {
+    setAttestState({ busy: true, error: null });
+    const { error } = (await onAttestAdult?.()) || {};
+    if (error) { setAttestState({ busy: false, error: typeof error === 'string' ? error : error?.message || 'Could not confirm' }); return; }
+    setAttestState({ busy: false, error: null });
+    setAttestFor(null);
+  };
+
+  useEffect(() => { setConfirmDelete(null); setAttestFor(null); }, [state.org?.id]);
   useEffect(() => { if (!canManage) { setCreating(false); setConfirmDelete(null); } }, [canManage]);
 
   // OPTREE: regular voice, one entry per launched op (its group tree), text.
@@ -839,8 +876,23 @@ export default function ChannelsCabinet({
     if (editVis === ch.id) {
       return (
         <li key={ch.id}>
-          <VisibilityEdit channel={ch} options={visOptions} {...visState}
-            onSave={(lv) => submitVisibility(ch, lv)} onCancel={() => setEditVis(null)} />
+          <VisibilityEdit channel={ch} options={visOptions} {...visState} adultAvailable={adultAvailable}
+            onSave={(lv, adult) => submitVisibility(ch, lv, adult)} onCancel={() => setEditVis(null)} />
+        </li>
+      );
+    }
+    if (attestFor === ch.id) {
+      return (
+        <li key={ch.id}>
+          <div className="mx-1 mb-1 px-2 py-2 space-y-2 rounded-ui-row border border-specter-border bg-specter-bg-deep/40" aria-label={`18+ channel ${ch.name}`}>
+            <p className="text-ui-sm text-specter-text-main"><span className="font-semibold">{ch.name}</span> is an 18+ channel</p>
+            <p className="text-ui-xs text-specter-text-subtle">Adult content may be shared here. Confirm that you are 18 or older to enter. You only do this once for this server.</p>
+            {attestState.error && <p role="alert" className="text-ui-xs text-red-300">{attestState.error}</p>}
+            <div className="flex gap-1.5">
+              <Button size="sm" onClick={submitAttest} disabled={attestState.busy}>{attestState.busy ? 'Confirming…' : 'I am 18 or older'}</Button>
+              <Button variant="secondary" size="sm" onClick={() => setAttestFor(null)} disabled={attestState.busy}>Cancel</Button>
+            </div>
+          </div>
         </li>
       );
     }
@@ -855,6 +907,7 @@ export default function ChannelsCabinet({
     const count = joined ? Math.max(v.roster.length, 1) : ch.occupants.length;
     const blocked = isVoice && !joined ? joinBlockedReason(ch) : null; // OPTREE
     const onClick = () => {
+      if (ch.adultLocked) { setAttestState({ busy: false, error: null }); setAttestFor(ch.id); return; } // L11
       if (!isVoice) { onFocus(focused ? null : me); return; }
       if (joined) { onBrowseFor(null); return; } // CH2: back to the joined view
       if (!focused) { onFocus(me); return; }
@@ -904,6 +957,11 @@ export default function ChannelsCabinet({
               <span className="shrink-0 px-1.5 rounded-pill border border-specter-state-warning/30 text-ui-xs font-medium text-amber-300/80">Pending</span>
             )}
             {blocked && <Lock size={12} aria-hidden="true" className="shrink-0 text-specter-text-subtle" />}
+            {ch.adult && (
+              <span className="shrink-0 inline-flex items-center gap-0.5 px-1.5 rounded-pill border border-specter-border text-ui-xs font-medium text-specter-text-subtle" title={ch.adultLocked ? '18+ channel: confirm your age to enter' : '18+ channel'}>
+                {ch.adultLocked && <Lock size={10} aria-hidden="true" />}18+
+              </span>
+            )}
             {ch.minLevel > 0 && (
               <span className="shrink-0 inline-flex text-specter-text-subtle" title={visLabel || 'Restricted to higher ranks'}>
                 <Eye size={12} aria-label={visLabel || 'Restricted to higher ranks'} />

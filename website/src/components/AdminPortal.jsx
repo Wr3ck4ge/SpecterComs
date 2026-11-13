@@ -12,12 +12,16 @@ import AdminsSection from './admin/AdminsSection';
 import TrafficSection from './admin/TrafficSection';
 import PlansPricingSection from './admin/PlansPricingSection';
 import AdminBillingSection from './billing/AdminBillingSection';
+import DataRequestsSection from './admin/DataRequestsSection';
+import AppealsSection from './admin/AppealsSection';
+import TwoFactorSection from './admin/TwoFactorSection'; // L3
+import BugReportsSection, { lockBugReportKeys } from './admin/BugReportsSection';
 
 // Every request in this panel goes through admin/adminApi.js (its own client),
 // and every permission it shows or hides is enforced again server-side in
-// services/identity-node/src/routes/admin.ts — hiding a button here is UX only.
+// services/identity-node/src/routes/admin.ts â€” hiding a button here is UX only.
 
-// ─── Section: Dashboard ───────────────────────────────────────────────────────
+// â”€â”€â”€ Section: Dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function SectionDashboard({ adminApi }) {
   const [data, setData]   = useState(null);
@@ -61,7 +65,7 @@ function SectionDashboard({ adminApi }) {
               {list?.length > 0
                 ? list.map((x) => (
                   <div key={x.id ?? x.callsign} className="px-4 py-2 flex justify-between text-sm">
-                    <span className="font-medium text-gray-800">{x.callsign ?? '—'}</span>
+                    <span className="font-medium text-gray-800">{x.callsign ?? 'â€”'}</span>
                     <span className="text-gray-400 text-xs"><Time ts={x.created_at} dateOnly /></span>
                   </div>
                 ))
@@ -86,7 +90,7 @@ function SectionDashboard({ adminApi }) {
   );
 }
 
-// ─── Section: Servers (Phase A of multi-tenant infra) ─────────────────────────
+// â”€â”€â”€ Section: Servers (Phase A of multi-tenant infra) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Must match REGION_ALLOWLIST in services/identity-node/src/utils/doProvisioning.ts.
 const PROVISION_REGIONS = ['nyc3', 'sfo3', 'ams3', 'fra1', 'sgp1'];
@@ -114,7 +118,7 @@ function SectionServers({ adminApi, role }) {
 
   useEffect(() => { loadNodes(); }, []);
 
-  // Only polls while something is actually pending — avoids needless requests
+  // Only polls while something is actually pending â€” avoids needless requests
   // in the steady state once all provisions have resolved one way or another.
   useEffect(() => {
     if (pendingProvisions.length === 0) return;
@@ -143,7 +147,7 @@ function SectionServers({ adminApi, role }) {
   }, [pendingProvisions.length]);
 
   // Reconcile immediately whenever a fresh node list arrives (don't wait for
-  // the next 10s poll tick) — the node the admin just requested may already
+  // the next 10s poll tick) â€” the node the admin just requested may already
   // have heartbeated in by the time this fires.
   useEffect(() => {
     if (pendingProvisions.length === 0) return;
@@ -179,7 +183,7 @@ function SectionServers({ adminApi, role }) {
                 {PROVISION_REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
               </select>
               <RBtn small variant="success" disabled={provisioning} onClick={handleProvision}>
-                {provisioning ? 'Provisioning…' : '+ Provision New Node'}
+                {provisioning ? 'Provisioningâ€¦' : '+ Provision New Node'}
               </RBtn>
             </>
           )}
@@ -206,7 +210,7 @@ function SectionServers({ adminApi, role }) {
                 <td className="px-4 py-3 text-gray-500 text-sm">{p.region}</td>
                 <td className="px-4 py-3" colSpan={7}>
                   <Badge tone={p.status === 'failed' || p.status === 'timed_out' ? 'red' : 'amber'}>
-                    {p.status === 'failed' ? 'Failed' : p.status === 'timed_out' ? 'Timed out — check DO console' : 'Provisioning…'}
+                    {p.status === 'failed' ? 'Failed' : p.status === 'timed_out' ? 'Timed out â€” check DO console' : 'Provisioningâ€¦'}
                   </Badge>
                 </td>
               </tr>
@@ -231,18 +235,18 @@ function SectionServers({ adminApi, role }) {
   );
 }
 
-// ─── Section: Voice Reports ───────────────────────────────────────────────────
+// â”€â”€â”€ Section: Voice Reports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// Decodes a report clip — see the matching encoder, frameReportClip in
+// Decodes a report clip â€” see the matching encoder, frameReportClip in
 // web-portal's CommLink.jsx. Both sides are this app's own code, so this
 // framing has no external spec to match.
 //
 // Two formats exist:
 //   - New (4B magic "SEV2" prefix): repeated [8B ts u64 LE][4B ssrc u32 LE]
-//     [4B opus_len u32 LE][opus bytes] — ssrc lets a segment be attributed to
+//     [4B opus_len u32 LE][opus bytes] â€” ssrc lets a segment be attributed to
 //     a real speaker (via the report's speaker_map) once the source channel
 //     ran the E2E voice relay instead of server-side mixing.
-//   - Legacy (no magic prefix — every report submitted before this existed):
+//   - Legacy (no magic prefix â€” every report submitted before this existed):
 //     repeated [8B ts u64 LE][4B opus_len u32 LE][opus bytes], one blended
 //     stream, ssrc implicitly 0 throughout.
 // The magic tag is checked first so old, already-stored reports stay
@@ -286,7 +290,7 @@ async function decodeReportClip(arrayBuffer) {
         if (sr) sampleRate = sr;
       }
     } catch {
-      // One malformed frame shouldn't sink the whole clip — skip and keep going.
+      // One malformed frame shouldn't sink the whole clip â€” skip and keep going.
     }
   }
   if (dec.free) dec.free();
@@ -367,7 +371,7 @@ function SectionVoiceReports({ adminApi }) {
       if (samples.length === 0) throw new Error('Clip decoded to zero samples');
 
       // Resolve this clip's ssrcs to user_ids via the report's own speaker_map
-      // (sent by the reporter's client — see submitVoiceReport in CommLink.jsx).
+      // (sent by the reporter's client â€” see submitVoiceReport in CommLink.jsx).
       // Empty for a clip from a still mixed-mode channel, where every frame is
       // ssrc=0 and there's nothing per-speaker to attribute.
       const report = reports.find(r => r.id === id);
@@ -426,8 +430,8 @@ function SectionVoiceReports({ adminApi }) {
           {reports.map((r) => (
             <React.Fragment key={r.id}>
               <tr className="border-b border-gray-100 hover:bg-gray-50">
-                <td className="px-4 py-3 text-gray-700 text-sm">{r.reporter_callsign || '—'}</td>
-                <td className="px-4 py-3 text-gray-700 text-sm">{r.accused_callsign || '—'}</td>
+                <td className="px-4 py-3 text-gray-700 text-sm">{r.reporter_callsign || 'â€”'}</td>
+                <td className="px-4 py-3 text-gray-700 text-sm">{r.accused_callsign || 'â€”'}</td>
                 <td className="px-4 py-3 text-gray-400 text-sm"><Time ts={r.reported_at} /></td>
                 <td className="px-4 py-3"><StatusPill status={r.status} /></td>
                 <td className="px-4 py-3 text-right">
@@ -460,7 +464,7 @@ function SectionVoiceReports({ adminApi }) {
                       </div>
                       <div className="flex items-center gap-2">
                         <RBtn small onClick={() => handlePlayAudio(r.id)} disabled={audioBusyId === r.id}>
-                          {audioBusyId === r.id ? 'Loading…' : '▶ Play Clip'}
+                          {audioBusyId === r.id ? 'Loadingâ€¦' : 'â–¶ Play Clip'}
                         </RBtn>
                         <span className="text-xs text-gray-400">Decrypted server-side on request (access is audited); never stored in the browser.</span>
                       </div>
@@ -473,7 +477,7 @@ function SectionVoiceReports({ adminApi }) {
                               <div className="flex flex-wrap gap-1">
                                 {clipSpeakers[r.id].map(uid => {
                                   // Best-effort label: the only two callsigns this list
-                                  // response carries are the reporter's and accused's —
+                                  // response carries are the reporter's and accused's â€”
                                   // any other attributed speaker shows as a raw user_id
                                   // (cross-reference via the Users section if needed).
                                   const label =
@@ -516,9 +520,9 @@ function SectionVoiceReports({ adminApi }) {
   );
 }
 
-// ─── Section: System ──────────────────────────────────────────────────────────
+// â”€â”€â”€ Section: System â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function SectionSystem({ onLogout, session }) {
+function SectionSystem({ onLogout, session, adminApi, onTwoFactorChanged }) {
   const [health, setHealth] = useState(null);
 
   useEffect(() => {
@@ -551,6 +555,8 @@ function SectionSystem({ onLogout, session }) {
         <div>Destructive owner actions ask for your password again if it was last entered more than {session?.reauth_window_minutes ?? 5} minutes ago.</div>
       </div>
 
+      <TwoFactorSection adminApi={adminApi} onChanged={onTwoFactorChanged} />
+
       <div className="border border-red-200 bg-red-50 rounded-lg p-6 space-y-4">
         <div className="text-sm font-semibold text-red-700 border-b border-red-200 pb-3">Danger Zone</div>
         <div className="flex items-center justify-between">
@@ -565,10 +571,12 @@ function SectionSystem({ onLogout, session }) {
   );
 }
 
-// ─── Re-auth prompt ───────────────────────────────────────────────────────────
+// â”€â”€â”€ Re-auth prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-function ReauthModal({ adminApi, onResult }) {
+function ReauthModal({ adminApi, onResult, needCode = false }) {
   const [password, setPassword] = useState('');
+  const [code, setCode] = useState(''); // L3: with 2FA on, a code too
+  const [askCode, setAskCode] = useState(needCode);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
 
@@ -576,9 +584,10 @@ function ReauthModal({ adminApi, onResult }) {
     e.preventDefault();
     setBusy(true);
     setErr(null);
-    const { error } = await adminApi.reauth(password);
+    const { error, code: errCode } = await adminApi.reauth(password, askCode ? code.trim() : undefined);
     setBusy(false);
-    if (error) { setErr(error); return; }
+    if (errCode === 'TWO_FACTOR_CODE_REQUIRED') setAskCode(true);
+    if (error) { setErr(error); setCode(''); return; }
     onResult(true);
   };
 
@@ -589,17 +598,22 @@ function ReauthModal({ adminApi, onResult }) {
         <Field label="Password">
           <TextInput type="password" autoFocus autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
+        {askCode && (
+          <Field label="Authenticator code">
+            <TextInput inputMode="numeric" autoComplete="one-time-code" maxLength={7} value={code} onChange={(e) => setCode(e.target.value)} />
+          </Field>
+        )}
         {err && <Alert>{err}</Alert>}
         <div className="flex justify-end gap-2">
           <RBtn variant="ghost" onClick={() => onResult(false)}>Cancel</RBtn>
-          <RBtn type="submit" variant="danger" disabled={busy || !password}>{busy ? 'Checking…' : 'Confirm'}</RBtn>
+          <RBtn type="submit" variant="danger" disabled={busy || !password || (askCode && !code.trim())}>{busy ? 'Checkingâ€¦' : 'Confirm'}</RBtn>
         </div>
       </form>
     </Modal>
   );
 }
 
-// ─── Sidebar Nav ──────────────────────────────────────────────────────────────
+// â”€â”€â”€ Sidebar Nav â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const NAV = [
   { id: 'dashboard',    label: 'Dashboard',     role: 'viewer'   },
@@ -610,6 +624,9 @@ const NAV = [
   { id: 'billing',      label: 'Billing',       role: 'viewer'   },
   { id: 'plans',        label: 'Plans & Pricing', role: 'operator' },
   { id: 'voiceReports', label: 'Voice Reports', role: 'operator' },
+  { id: 'bugReports',   label: 'Bug Reports',   role: 'owner'    },
+  { id: 'dataRequests', label: 'Data requests', role: 'owner'    },
+  { id: 'appeals',      label: 'Appeals',       role: 'operator' },
   { id: 'servers',      label: 'Servers',       role: 'viewer'   },
   { id: 'audit',        label: 'Audit Log',     role: 'operator' },
   { id: 'admins',       label: 'Admins',        role: 'owner'    },
@@ -620,7 +637,7 @@ const NAV = [
 // clears itself; the server enforces the real limit regardless.
 const ACTIVITY_EVENTS = ['mousedown', 'keydown', 'scroll', 'touchstart'];
 
-// ─── Admin Portal Root ────────────────────────────────────────────────────────
+// â”€â”€â”€ Admin Portal Root â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const AdminPortal = ({ onExit }) => {
   const [hasToken, setHasToken]           = useState(() => !!adminTokenStore.get());
@@ -631,10 +648,15 @@ const AdminPortal = ({ onExit }) => {
   const [loginBusy, setLoginBusy]         = useState(false);
   const [activeSection, setActiveSection] = useState('dashboard');
   const [reauthPrompt, setReauthPrompt]   = useState(null); // resolver fn while open
+  // L3: { enabled, required } from /me; loginTfa = { challenge, code, useRecovery } during sign-in.
+  const [twoFactor, setTwoFactor]         = useState(null);
+  const [loginTfa, setLoginTfa]           = useState(null);
+  const [tfaNotice, setTfaNotice]         = useState(null);
   const lastActivity = useRef(Date.now());
 
   const endSession = useCallback((message) => {
     adminTokenStore.clear();
+    lockBugReportKeys(); // D1: unlocked report keys never outlive the session
     setHasToken(false);
     setAdminUser(null);
     setSession(null);
@@ -645,6 +667,7 @@ const AdminPortal = ({ onExit }) => {
   const adminApi = useMemo(() => createAdminApi({
     onSessionExpired: (message) => endSession(message),
     requestReauth: () => new Promise((resolve) => setReauthPrompt(() => resolve)),
+    onTwoFactorRequired: (message) => { setTfaNotice(message || 'Turn on two-factor authentication to continue.'); setActiveSection('system'); },
   }), [endSession]);
 
   // Purge any token an older build left in localStorage.
@@ -657,7 +680,11 @@ const AdminPortal = ({ onExit }) => {
   const loadMe = useCallback(() => {
     setMeError(null);
     adminApi.me().then(({ data, error, status }) => {
-      if (data) { setAdminUser(data.admin); setSession(data.session); }
+      if (data) {
+        setAdminUser(data.admin); setSession(data.session); setTwoFactor(data.two_factor || null);
+        if (data.two_factor?.enabled) setTfaNotice(null);
+        else if (data.two_factor?.required) { setTfaNotice('Two-factor authentication is required for admins. Turn it on below.'); setActiveSection('system'); }
+      }
       else if (status !== 401) setMeError(error || 'Could not load your admin session.');
     });
   }, [adminApi]);
@@ -686,9 +713,27 @@ const AdminPortal = ({ onExit }) => {
     e.preventDefault();
     setLoginErr(null);
     setLoginBusy(true);
-    const { data, error } = await adminApi.login(loginForm.username, loginForm.password);
+    let res;
+    if (loginTfa) {
+      const value = loginTfa.code.trim();
+      res = await adminApi.loginTwoFactor(loginTfa.challenge, loginTfa.useRecovery ? { recovery_code: value } : { code: value });
+      if (res.error) {
+        setLoginBusy(false);
+        setLoginTfa(res.code === 'TWO_FACTOR_CHALLENGE_EXPIRED' ? null : { ...loginTfa, code: '' });
+        return setLoginErr(res.error);
+      }
+    } else {
+      res = await adminApi.login(loginForm.username, loginForm.password);
+    }
+    const { data, error } = res;
     setLoginBusy(false);
     if (error) return setLoginErr(error);
+    if (data.two_factor_required) {
+      // L3: password OK, now the authenticator code.
+      setLoginForm((f) => ({ ...f, password: '' }));
+      return setLoginTfa({ challenge: data.challenge, code: '', useRecovery: false });
+    }
+    setLoginTfa(null);
     adminTokenStore.set(data.token);
     lastActivity.current = Date.now();
     setLoginForm({ username: '', password: '' });
@@ -715,9 +760,31 @@ const AdminPortal = ({ onExit }) => {
         <div className="bg-white border border-gray-200 rounded-xl shadow-lg p-8 w-full max-w-sm space-y-6">
           <div className="text-center border-b border-gray-200 pb-5">
             <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Specter Admin</h1>
-            <p className="text-sm text-gray-400 mt-1">Restricted access — authorized personnel only</p>
+            <p className="text-sm text-gray-400 mt-1">Restricted access â€” authorized personnel only</p>
           </div>
           <form onSubmit={handleLogin} className="space-y-4">
+            {loginTfa ? (
+              <div className="space-y-2">
+                <label className="text-xs text-gray-500 font-medium uppercase tracking-wider block mb-1">
+                  {loginTfa.useRecovery ? 'Recovery code' : 'Authenticator code'}
+                </label>
+                <input
+                  className="w-full bg-white border border-gray-300 rounded focus:border-gray-500 focus:outline-none p-2.5 text-gray-800 text-sm font-mono"
+                  value={loginTfa.code}
+                  onChange={e => setLoginTfa(t => ({ ...t, code: e.target.value }))}
+                  autoComplete="one-time-code"
+                  inputMode={loginTfa.useRecovery ? 'text' : 'numeric'}
+                  autoFocus
+                  required
+                />
+                <div className="flex justify-between text-xs">
+                  <button type="button" className="underline text-gray-500" onClick={() => setLoginTfa(t => ({ ...t, code: '', useRecovery: !t.useRecovery }))}>
+                    {loginTfa.useRecovery ? 'Use an authenticator code' : 'Use a recovery code'}
+                  </button>
+                  <button type="button" className="underline text-gray-500" onClick={() => { setLoginTfa(null); setLoginErr(null); }}>Back</button>
+                </div>
+              </div>
+            ) : (<>
             <div>
               <label className="text-xs text-gray-500 font-medium uppercase tracking-wider block mb-1">Username or Email</label>
               <input
@@ -740,6 +807,7 @@ const AdminPortal = ({ onExit }) => {
                 required
               />
             </div>
+            </>)}
             {loginErr && <Alert>{loginErr}</Alert>}
             <div className="flex gap-2 pt-1">
               <button type="button" onClick={onExit}
@@ -748,7 +816,7 @@ const AdminPortal = ({ onExit }) => {
               </button>
               <button type="submit" disabled={loginBusy}
                 className="flex-1 bg-gray-900 text-white rounded py-2 hover:bg-gray-700 text-sm font-medium transition-colors disabled:opacity-50">
-                {loginBusy ? 'Signing in…' : 'Sign In'}
+                {loginBusy ? 'Signing inâ€¦' : 'Sign In'}
               </button>
             </div>
           </form>
@@ -803,8 +871,10 @@ const AdminPortal = ({ onExit }) => {
           {!adminUser ? (
             meError
               ? <Alert>{meError} <button className="underline ml-2" onClick={loadMe}>Retry</button></Alert>
-              : <div className="text-gray-400 text-sm p-8 text-center">Loading session…</div>
+              : <div className="text-gray-400 text-sm p-8 text-center">Loading sessionâ€¦</div>
           ) : (
+            <>
+            {tfaNotice && <div className="mb-4"><Alert type="warn" onDismiss={() => setTfaNotice(null)}>{tfaNotice}</Alert></div>}
             <SectionBoundary key={section}>
               {section === 'dashboard'    && <SectionDashboard {...props} />}
               {section === 'traffic'      && <TrafficSection {...props} />}
@@ -814,16 +884,20 @@ const AdminPortal = ({ onExit }) => {
               {section === 'billing'      && <AdminBillingSection {...props} />}
               {section === 'plans'        && <PlansPricingSection {...props} />}
               {section === 'voiceReports' && <SectionVoiceReports {...props} />}
+              {section === 'bugReports'   && <BugReportsSection {...props} />}
+              {section === 'dataRequests' && <DataRequestsSection {...props} />}
+              {section === 'appeals' && <AppealsSection {...props} />}
               {section === 'servers'      && <SectionServers {...props} />}
               {section === 'audit'        && <AuditSection {...props} />}
               {section === 'admins'       && <AdminsSection {...props} self={adminUser} />}
-              {section === 'system'       && <SectionSystem onLogout={handleLogout} session={session} />}
+              {section === 'system'       && <SectionSystem onLogout={handleLogout} session={session} adminApi={adminApi} onTwoFactorChanged={loadMe} />}
             </SectionBoundary>
+            </>
           )}
         </main>
       </div>
 
-      {reauthPrompt && <ReauthModal adminApi={adminApi} onResult={resolveReauth} />}
+      {reauthPrompt && <ReauthModal adminApi={adminApi} onResult={resolveReauth} needCode={Boolean(twoFactor?.enabled)} />}
     </div>
   );
 };

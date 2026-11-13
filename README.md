@@ -33,13 +33,40 @@ This isn't open source: there's no licence here for reuse or redistribution. The
     - A Members & ranks pane.
     - Rank safety: you can manage only ranks below your own, and grant only permissions you hold.
     - Per-channel visibility by rank. One access rule enforces it for the channel list, presence, media tickets, messages and MLS key membership.
-    - Known gap: narrowing a channel's visibility cuts off access immediately, but the channel's key rotates only at its next rekey.
+    - Narrowing a channel's visibility cuts off access immediately. Since 2.1 the channel's key also rotates right away (see below).
   - **Client changes.**
     - A share-application hotkey.
     - Live-op notices.
     - Per-user volume above 100% in dB with a soft limiter, plus a master volume.
     - Push-to-talk reliability fixes.
     - DMs from the Friends list.
+
+## What's new in 2.1
+
+- **Stream frames are bound to their stream (wire format v2).** Screen-share video and share audio now get the same protection voice has: a version byte, a stream kind, a per-session key, a counter and a timestamp, all authenticated. A relay can no longer replay, reorder or move frames between sharers (`web-portal/wasm-crypto/`). Clients advertise which formats they support, and the old format is still accepted while clients update.
+- **Message franking.** Chat and DM messages carry a cryptographic commitment to their content. The server tags that commitment when it relays the message, so a message someone reports can later be checked as genuine without the server keeping a copy of any message (`web-portal/src/engine/frank.js`).
+- **MLS self-repair.** The client detects channel groups that have stopped decrypting and repairs them step by step on its own. A read-only encryption diagnostics view and a last-resort "Reset encryption identity" in Settings back this up. A channel's group is re-keyed as soon as its audience narrows, which closes the 2.0 gap above.
+- **Accounts and security.**
+  - Two-factor authentication (TOTP) for users and platform admins.
+  - Email verification, which the server can require for new signups.
+  - Server ownership transfer with a signed hand-off, plus claims for abandoned servers. Both ask for the 2FA code when 2FA is on.
+  - User search no longer lists accounts: prefix search only within servers you share, exact callsign otherwise, rate-limited.
+  - Uploaded files get random names, and an arbitrary-file-deletion bug through client-set upload paths is fixed.
+- **Trust & safety and privacy.**
+  - Server-side report intake and review queue with legal hold and retention limits. The client reporting flow is still to come.
+  - Account data export and deletion requests.
+  - A ban appeal form.
+  - Optional 18+ channels with self-attestation, switched off in regions that require ID age verification.
+  - The message buffer on the server is kept in memory only, and stored admin IPs are coarsened to /24 (IPv4) and /48 (IPv6).
+  - Bug reports are sealed on your device to the owner's public key and deleted after 30 days. Dismissed reports are also deleted after 30 days.
+  - Chat no longer accepts plaintext image links.
+- **Client changes.**
+  - A brand refresh: new icon set, framed-tile bar, palette and tray icons per state, including a Live state while you share your screen.
+  - Choose which monitor the bar appears on.
+  - The in-game overlay is now the Game HUD. It shows streaming-hotkey notices and a LIVE marker while you share, and has a labelled tab on the bar while you're in voice.
+  - Choose where each stream shows: the bar or the Game HUD.
+  - A public status page and in-client incident notices.
+  - Role-holders get their frequencies automatically when they sign up for a role.
 
 ## Planned: community features, with privacy limits
 
@@ -66,7 +93,7 @@ Profiles and community tools are planned, not shipped: profile cards, presence, 
 
 Everything below describes what this code does. It is not a claim of an external audit.
 
-**Text, DMs and event chat** are end-to-end encrypted with [MLS (RFC 9420)](https://datatracker.ietf.org/doc/html/rfc9420) through [OpenMLS](https://github.com/openmls/openmls), compiled to WASM (`web-portal/mls-crypto/`). Every device is its own MLS member, so the scheme is multi-device aware and provides forward secrecy and post-compromise security. The server stores and relays ciphertext plus the MLS handshake messages (key packages, commits, welcomes, group info) that members need to join and stay in step. It never holds group secrets.
+**Text, DMs and event chat** are end-to-end encrypted with [MLS (RFC 9420)](https://datatracker.ietf.org/doc/html/rfc9420) through [OpenMLS](https://github.com/openmls/openmls), compiled to WASM (`web-portal/mls-crypto/`). Every device is its own MLS member, so the scheme is multi-device aware and provides forward secrecy and post-compromise security. The server relays message ciphertext without keeping a message store. History lives on your devices and is caught up between them. The server stores the MLS handshake messages (key packages, commits, welcomes, group info) that members need to join and stay in step, and never holds group secrets. Each message carries a franking commitment, which the server tags when it relays the message, so a reported message can be checked as genuine.
 
 **Voice is end-to-end encrypted on every channel as of 2.0.0.** Each voice frame is sealed with ChaCha20-Poly1305 (`web-portal/wasm-crypto/src/relay_audio.rs`):
 
@@ -162,7 +189,7 @@ The audio plugin's tests build Opus from source, so CMake must be on `PATH`.
 
 ## Status
 
-This is a real, actively developed product, not a demo. This snapshot reflects the production codebase at **client v2.0.23** (2026-11-09). The version the desktop client shows in its settings should match. If this snapshot has fallen behind a release, the client is the authority and this snapshot is out of date.
+This is a real, actively developed product, not a demo. This snapshot reflects the production codebase at **client v2.1.1** (2026-11-13). The version the desktop client shows in its settings should match. If this snapshot has fallen behind a release, the client is the authority and this snapshot is out of date.
 
 ## Licence
 

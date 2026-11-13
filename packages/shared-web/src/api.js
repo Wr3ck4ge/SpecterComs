@@ -82,13 +82,24 @@ export function createApi(API_BASE_URL, auth = null) {
         if (expectedStatuses.includes(response.status)) {
           return { data: null, error: errMsg };
         }
-        throw new Error(errMsg);
+        // Stable machine code (e.g. EMAIL_NOT_VERIFIED) + masked address ride
+        // along on the thrown error so login screens can react to them.
+        const apiErr = new Error(errMsg);
+        if (json.code) { apiErr.code = json.code; apiErr.masked_email = json.masked_email; }
+        // L3: a privileged action refused until 2FA is set up. Screens show
+        // the message; this event lets an app open its 2FA setup too.
+        if (json.code === 'TWO_FACTOR_REQUIRED' && typeof window !== 'undefined') {
+          try { window.dispatchEvent(new CustomEvent('specter:two-factor-required', { detail: { message: errMsg } })); } catch { /* no DOM */ }
+        }
+        throw apiErr;
       }
 
       return { data: json, error: null };
     } catch (err) {
       console.error(`API Call Failed [${endpoint}]:`, err);
-      return { data: null, error: err.message || "Network Error" };
+      const out = { data: null, error: err.message || "Network Error" };
+      if (err.code) { out.code = err.code; out.masked_email = err.masked_email; }
+      return out;
     }
   }
 
@@ -98,12 +109,16 @@ export function createApi(API_BASE_URL, auth = null) {
     login: (body) => fetchWithAuth("/auth/login", { method: "POST", body }),
     forgotPassword: (email) => fetchWithAuth('/auth/forgot-password', { method: 'POST', body: { email } }),
     resetPassword:  (resetToken, password) => fetchWithAuth('/auth/reset-password', { method: 'POST', body: { token: resetToken, password } }),
+    verifyEmail: (token) => fetchWithAuth('/auth/verify-email', { method: 'POST', body: { token } }),
+    // No session: email/callsign + password. Same answer whether or not the account exists.
+    resendVerificationPublic: ({ email, callsign, password }) => fetchWithAuth('/auth/resend-verification-public', { method: 'POST', body: { ...(email ? { email } : { callsign }), password } }),
+    resendVerification: () => fetchWithAuth('/auth/resend-verification', { method: 'POST', body: {} }),
     refresh: (refreshToken) => fetchWithAuth('/auth/refresh', { method: 'POST', body: { refresh_token: refreshToken } }),
     logout: (refreshToken) => fetchWithAuth('/auth/logout', { method: 'POST', body: { refresh_token: refreshToken } }),
 
     // Users
-    updatePresence: (status, gameActivity) => fetchWithAuth("/users/presence", { method: "PUT", body: { status, gameActivity } }),
     getMyProfile: () => fetchWithAuth("/users/me"),
+    changeEmail: (email, password, code) => fetchWithAuth('/users/email', { method: 'POST', body: { email, password, ...(code ? { code } : {}) } }),
     updateProfile: (body) => fetchWithAuth("/users/profile", { method: "PUT", body: body }),
     getMyGames: () => fetchWithAuth("/users/games"),
     updateMyGames: (games) => fetchWithAuth("/users/games", { method: "PUT", body: { games } }),
@@ -140,6 +155,7 @@ export function createApi(API_BASE_URL, auth = null) {
     deleteChannel: (orgId, chanId)  => fetchWithAuth(`/orgs/${orgId}/channels/${chanId}`, { method: "DELETE" }),
     // { name?, visible_min_level? } — rename / who can see it (can_manage_channels).
     updateChannel: (orgId, chanId, body) => fetchWithAuth(`/orgs/${orgId}/channels/${chanId}`, { method: "PUT", body }),
+    attestAdult:   (orgId)          => fetchWithAuth(`/orgs/${orgId}/adult-attestation`, { method: "POST", body: { confirm: true } }), // L11
     joinChannelPresence:  (orgId, channelId) => fetchWithAuth(`/orgs/${orgId}/channels/${channelId}/presence`, { method: "POST",   body: {} }),
     pingChannelPresence:  (orgId, channelId) => fetchWithAuth(`/orgs/${orgId}/channels/${channelId}/presence/ping`, { method: "POST", body: {} }),
     leaveChannelPresence: (orgId, channelId) => fetchWithAuth(`/orgs/${orgId}/channels/${channelId}/presence`, { method: "DELETE", body: {} }),
@@ -312,6 +328,27 @@ export function createApi(API_BASE_URL, auth = null) {
     // attached server-side from the auth token, not sent in the body.
     submitDiagnostics: (body) =>
       fetchWithAuth('/diag/perf-report', { method: 'POST', body: body }),
+
+    // D1: bug reports. The description is sealed to the owner's key first
+    // (sealedReport.js); the server never sees it in the clear.
+    getBugReportKey: () => fetchWithAuth('/bug-reports/key', { method: 'GET' }),
+    submitBugReport: (body) => fetchWithAuth('/bug-reports', { method: 'POST', body: body }),
+    listMyBugReports: () => fetchWithAuth('/bug-reports/mine', { method: 'GET' }),
+    markBugReportSeen: (id) => fetchWithAuth(`/bug-reports/${encodeURIComponent(id)}/seen`, { method: 'POST', body: {} }),
+    // L6: account data requests (export / delete); processed by a human admin
+    listDataRequests: () => fetchWithAuth('/users/me/data-requests', { method: 'GET' }),
+    // code: the authenticator code, needed when the account has 2FA on (L3).
+    createDataRequest: (type, password, code) => fetchWithAuth('/users/me/data-requests', { method: 'POST', body: { type, password, ...(code ? { code } : {}) } }),
+
+    // L3: two-factor authentication. Login's second step (verifyTwoFactor)
+    // answers like /auth/login; the rest manage the signed-in user's own 2FA.
+    verifyTwoFactor: ({ challenge, code, recovery_code }) => fetchWithAuth('/auth/2fa/verify', { method: 'POST', body: { challenge, ...(recovery_code ? { recovery_code } : { code }) } }),
+    twoFactorStatus: () => fetchWithAuth('/auth/2fa'),
+    twoFactorEnroll: (password) => fetchWithAuth('/auth/2fa/enroll', { method: 'POST', body: { password } }),
+    twoFactorConfirm: (code) => fetchWithAuth('/auth/2fa/confirm', { method: 'POST', body: { code } }),
+    twoFactorDisable: ({ password, code, recovery_code }) => fetchWithAuth('/auth/2fa/disable', { method: 'POST', body: { password, code, recovery_code } }),
+    twoFactorRecoveryCodes: ({ password, code }) => fetchWithAuth('/auth/2fa/recovery-codes', { method: 'POST', body: { password, code } }),
+    cancelDataRequest: (id) => fetchWithAuth(`/users/me/data-requests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
     // Admin — all calls (except login) take the admin JWT as an explicit first
     // argument rather than relying on fetchWithAuth's localStorage default, since

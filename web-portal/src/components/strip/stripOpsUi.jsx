@@ -492,7 +492,7 @@ export function ShipBadge({ name = '', url, size = 28, w, code, count = 0, class
 /** Tiny count / state bubble pinned to a bar icon's corner. */
 export function IconBadge({ kind, count }) {
   if (!kind) return null;
-  const base = 'pointer-events-none absolute -top-0.5 -right-0.5 inline-flex items-center justify-center rounded-pill border-2 border-[#0b1d2e]';
+  const base = 'pointer-events-none absolute -top-0.5 -right-0.5 inline-flex items-center justify-center rounded-pill border-2 border-specter-brand-ink';
   if (kind === 'live') {
     return <span aria-hidden="true" className={cx(base, 'h-3 w-3 bg-specter-state-success animate-pulse')} />;
   }

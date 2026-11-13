@@ -52,3 +52,6 @@ export async function healOrgEncryption(_api, _u, orgId, opts = {}) {
   heals.push({ orgId, ...opts });
   return { healed: [], failed: [], checked: 0 };
 }
+
+// useChannelChat.sendDm ensures the DM group first (stub: nothing to do).
+export async function ensureDmGroup() {}

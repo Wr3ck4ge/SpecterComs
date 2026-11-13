@@ -36,6 +36,8 @@ const ALL_PLANNER_STEPS = [
 ];
 // EVT2: the Map step is out of scope for now; its code stays for later.
 const PLANNER_STEPS = ALL_PLANNER_STEPS.filter((s) => s.id !== 'map' || PLANNER_MAP_ENABLED);
+// SCSHIPS (owner 2026-11-13): the Ships page is Star Citizen only.
+export const plannerSteps = (game) => PLANNER_STEPS.filter((s) => s.id !== 'ships' || game === 'star_citizen');
 
 function initialForm(event, initialDate) {
   const start = event?.start_time ? toLocalInput(event.start_time) : initialDate ? `${initialDate}T08:00` : '';
@@ -74,11 +76,11 @@ function formToEventInput(f) {
   };
 }
 
-function StepTabs({ step, onStep, created, compact }) {
-  const at = PLANNER_STEPS.findIndex((s) => s.id === step);
+function StepTabs({ steps, step, onStep, created, compact }) {
+  const at = steps.findIndex((s) => s.id === step);
   return (
     <ol className="flex items-center gap-0.5 shrink-0" aria-label="Planner pages">
-      {PLANNER_STEPS.map((s, i) => {
+      {steps.map((s, i) => {
         const enabled = created || i === 0;
         const current = s.id === step;
         return (
@@ -198,7 +200,7 @@ export default function OpPlanner({
   initialStep = 'details', initialSelected = null, initialPopover = null, initialMapOpen = false,
 }) {
   const created = !!event?.id;
-  const [step, setStep] = useState(created && PLANNER_STEPS.some((s) => s.id === initialStep) ? initialStep : 'details');
+  const [step, setStep] = useState(created && plannerSteps(event?.game).some((s) => s.id === initialStep) ? initialStep : 'details');
   const [form, setForm] = useState(() => initialForm(event, initialDate));
   const [detailsSaving, setDetailsSaving] = useState(false);
   const [detailsError, setDetailsError] = useState(null);
@@ -226,8 +228,11 @@ export default function OpPlanner({
   }, [plan.groups.length, selectedIdx]);
 
   const detailsDirty = JSON.stringify(form) !== baseline;
+  const steps = plannerSteps(form.game); // SCSHIPS: follows the Details page's game at once
   const others = editors.filter((e) => e.userId !== user?.id);
-  const at = PLANNER_STEPS.findIndex((s) => s.id === step);
+  const at = Math.max(0, steps.findIndex((s) => s.id === step));
+  // SCSHIPS: the game changed away from Star Citizen while on Ships → Roles.
+  useEffect(() => { if (!steps.some((s) => s.id === step)) setStep('roles'); }, [steps, step]);
   const valid = form.name.trim() && (form.startNow || form.startTime) && (form.duration !== 'custom' || form.customEnd);
   const linkColors = computeLinkColors(plan.groups);
   // OPGROW: the page's preferred panel width (WideOpFrame clamps it to the
@@ -276,7 +281,7 @@ export default function OpPlanner({
     if (step === 'details' && (!created || detailsDirty)) {
       if (!(await saveDetails())) return;
     }
-    setStep(PLANNER_STEPS[Math.min(at + 1, PLANNER_STEPS.length - 1)].id);
+    setStep(steps[Math.min(at + 1, steps.length - 1)].id);
   };
   const saveAll = async () => {
     if (step === 'details' && detailsDirty) await saveDetails();
@@ -348,12 +353,12 @@ export default function OpPlanner({
   const bar = (
     <>
       <div className="min-w-0 shrink overflow-hidden py-1 -my-1 pl-0.5 -ml-0.5">
-        <StepTabs step={step} onStep={goTo} created={created} compact={compact} />
+        <StepTabs steps={steps} step={step} onStep={goTo} created={created} compact={compact} />
       </div>
       <span className="flex-1 min-w-0 truncate text-right text-ui-xs text-specter-text-subtle px-1">{compact ? '' : status}</span>
       <div className="ml-auto flex shrink-0 items-center gap-1.5" role="group" aria-label="Planner actions">
         {at > 0 && !compact && (
-          <IconButton size="sm" icon={<ChevronLeft size={15} />} label="Previous page" onClick={() => goTo(PLANNER_STEPS[at - 1].id)} />
+          <IconButton size="sm" icon={<ChevronLeft size={15} />} label="Previous page" onClick={() => goTo(steps[at - 1].id)} />
         )}
         {created && dirty && (
           <Button className="whitespace-nowrap shrink-0" size="sm" variant="secondary" icon={<Save size={14} />} disabled={plan.saving || detailsSaving} onClick={saveAll}>
@@ -381,7 +386,7 @@ export default function OpPlanner({
     </>
   );
 
-  const stepLabel = PLANNER_STEPS[at].label;
+  const stepLabel = steps[at].label;
 
   return (
     <WideOpFrame layout={layout} want={want} label="Operation planner" bar={bar} barLabel="Planner pages and actions"

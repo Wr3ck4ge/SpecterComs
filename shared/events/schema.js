@@ -71,6 +71,11 @@ const CHANNEL_MESSAGE = {
   timestamp: 'string',
 };
 
+// S7 franking: { v, c } from the sender, plus { kid, tag } when the server
+// holds a franking key (services/identity-node/src/utils/franking.ts).
+// Optional until S9; kid/tag are extra keys (allowed, not checked here).
+const FRANK = { v: 'number', c: 'string' };
+
 const SYNC_REQUEST = {
   channel_id: 'string',
   org_id: 'string',
@@ -141,6 +146,15 @@ export const SSE_EVENTS = {
     shapes: [{ subject: ORG, required: {}, optional: { channelId: 'string' } }],
     handledBy: ['WarRoom.jsx', 'useStripOps.js'],
   },
+  // B3: the channel's audience narrowed (visibility raised, a demotion, a
+  // rank's level/permissions lowered or deleted, a kick / ban). Sent only to
+  // members STILL allowed, one per user subject; never says who left. The
+  // client re-runs the channel's MLS reconcile, which commits the removal and
+  // rotates the key (utils/audienceNarrowing.ts).
+  channel_audience_narrowed: {
+    shapes: [{ subject: USER, required: { orgId: 'string', channelId: 'string' } }],
+    handledBy: ['WarRoom.jsx'],
+  },
   channel_presence_changed: {
     shapes: [{ subject: ORG, required: { channelId: 'string', occupants: 'array' } }],
     handledBy: ['WarRoom.jsx'],
@@ -197,7 +211,7 @@ export const SSE_EVENTS = {
     shapes: [
       // Channel: flat for the client (useChannelChat / unread / CommLink) AND
       // nested under `payload` for background_sync.rs's decrypt_and_cache.
-      { subject: CHANNEL, required: { ...CHANNEL_MESSAGE, payload: { ...CHANNEL_MESSAGE } } },
+      { subject: CHANNEL, required: { ...CHANNEL_MESSAGE, payload: { ...CHANNEL_MESSAGE } }, optional: { frank: FRANK } },
       // DM: DmCabinet reads context/partner_id and the message object.
       {
         subject: USER,

@@ -250,7 +250,7 @@ export default function OpTreeView({ groups, myUserId, linkColors = {}, vp, sele
               // used to be see-through, which showed the wallpaper) and a soft
               // drop shadow.
               className={cx(
-                'group absolute flex flex-col items-stretch rounded-ui-md border text-center overflow-hidden bg-[#0b1d2e] transition-[border-color,filter,box-shadow] duration-200',
+                'group absolute flex flex-col items-stretch rounded-ui-md border text-center overflow-hidden bg-specter-brand-ink transition-[border-color,filter,box-shadow] duration-200',
                 focusRing,
                 selected ? 'border-specter-primary-neon shadow-[0_0_0_3px_rgba(103,218,245,0.3),0_6px_18px_rgba(0,0,0,0.5)]'
                   : mine ? 'strip-float-card border-specter-state-success/60'
@@ -274,7 +274,7 @@ export default function OpTreeView({ groups, myUserId, linkColors = {}, vp, sele
       </div>
 
       {/* Zoom controls — opposite the cabinet. POLISH: a small floating pill. */}
-      <div data-pz-ignore className={cx('absolute top-2 flex items-center gap-0.5 p-0.5 rounded-pill border border-specter-border-strong bg-[#0b1d2e]/95 strip-float-card', controlsLeft ? 'left-2' : 'right-2')}
+      <div data-pz-ignore className={cx('absolute top-2 flex items-center gap-0.5 p-0.5 rounded-pill border border-specter-border-strong bg-specter-brand-ink/95 strip-float-card', controlsLeft ? 'left-2' : 'right-2')}
         role="toolbar" aria-label="Zoom">
         <IconButton size="sm" className="!rounded-pill" icon={<Minus size={14} />} label="Zoom out" onClick={() => pz.zoomBy(0.8)} />
         <span className="min-w-[38px] text-center text-ui-xs tabular-nums text-specter-text-muted" aria-live="off">{Math.round(t.k * 100)}%</span>
@@ -290,7 +290,7 @@ export default function OpTreeView({ groups, myUserId, linkColors = {}, vp, sele
       )}
       {overlay && (
         // POLISH: messages sit on a solid card now that the view has no background.
-        <div data-pz-ignore className="absolute top-12 left-1/2 -translate-x-1/2 w-[min(420px,calc(100%-24px))] z-10 rounded-ui-md bg-[#0b1d2e] strip-float-card">{overlay}</div>
+        <div data-pz-ignore className="absolute top-12 left-1/2 -translate-x-1/2 w-[min(420px,calc(100%-24px))] z-10 rounded-ui-md bg-specter-brand-ink strip-float-card">{overlay}</div>
       )}
 
       {selectedIdx !== null && groups[selectedIdx] && renderCabinet(selectedIdx, { side, style: cabinetStyle, headingRef, onClose: close })}

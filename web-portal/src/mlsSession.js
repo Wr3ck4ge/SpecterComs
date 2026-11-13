@@ -107,7 +107,19 @@ import initMls, {
   resync_external,
   message_epoch,
   device_credential,
+  group_ids,
 } from 'mls-crypto';
+import { noteCatchUp as noteHealthCatchUp, setMlsHealthLogger } from './engine/mlsHealth.js'; // S3
+import { plaintextFromBytes } from './engine/frank.js'; // S7: v2 envelopes keep their binary header
+
+// S7: wire formats this build can READ, advertised on device registration as
+// X-Specter-Wire-Caps (server: user_devices.wire_caps, migration 000086).
+// Bit 0 = chat/DM envelope v2 + franking (engine/frank.js), bit 1 = share
+// frames v2 (wasm-crypto share_frame.rs). Senders switch to v2 only when every
+// device of a conversation advertises the bit (S8).
+export const WIRE_CAP_CHAT_V2 = 1;
+export const WIRE_CAP_SHARE_V2 = 2;
+export const WIRE_CAPS = WIRE_CAP_CHAT_V2 | WIRE_CAP_SHARE_V2;
 
 let wasmReady = null;
 function ensureWasm() {
@@ -516,7 +528,7 @@ function registerDevice(api, deviceId, identity, credential) {
     toB64(textEncoder.encode(credential)),
     toB64(own_public_key(identity.device_state)),
   ];
-  if (typeof api.registerMlsDevice === 'function') return api.registerMlsDevice(...args);
+  if (typeof api.registerMlsDevice === 'function') return api.registerMlsDevice(...args, WIRE_CAPS);
   return api.registerDevice(...args);
 }
 
@@ -836,6 +848,7 @@ async function catchUpGroup(ctx) {
 
     let epoch = null;
     let failedAt = null;
+    let applied = 0; // S3: commits this catch-up applied (mlsHealth)
     if (group_exists(state, groupId)) {
       epoch = Number(group_epoch(state, groupId));
       const commits = [...(data.commits ?? [])].sort((a, b) => Number(a.epoch) - Number(b.epoch));
@@ -847,6 +860,7 @@ async function catchUpGroup(ctx) {
           state = process_commit(state, groupId, fromB64(c.commit));
           epoch = Number(group_epoch(state, groupId));
           changed = true;
+          applied += 1;
           if (!group_is_active(state, groupId)) break; // evicted: nothing later applies
         } catch (err) {
           if (Number(c.epoch) === epoch + 1 && failedAt === null) {
@@ -862,9 +876,16 @@ async function catchUpGroup(ctx) {
       removed = anyRemoved(before, labelsIn(state, groupId));
       await commitDurableLocked(state);
     }
-    return { changed, epoch };
+    return { changed, epoch, applied };
   });
   if (result.changed) emitGroupChange(groupIdStr, removed);
+  // S3: a catch-up that applied commits arms stuck-group detection.
+  if (result.epoch !== null && result.applied > 0) {
+    try {
+      setMlsHealthLogger(mlsLog);
+      noteHealthCatchUp(groupIdStr, { commitsApplied: result.applied });
+    } catch { /* health tracking is best-effort */ }
+  }
   if (welcomed) maybeRefreshKeyPackage(ctx.api, boundUserId, { force: true });
 
   const held = result.epoch !== null;
@@ -1377,6 +1398,97 @@ async function healOrgImpl(api, userId, orgId, force) {
   return result;
 }
 
+// ── Per-group repair ladder steps (S4, driven by engine/mlsRepair.js) ─────
+
+/** Drops this device's copy of one group (I1/I2: under the lock; I5: durable). → dropped? */
+async function dropLocalGroupCopy(groupIdStr) {
+  const groupId = textEncoder.encode(groupIdStr);
+  const dropped = await withStateLock(async () => {
+    const state = currentState();
+    if (!group_exists(state, groupId)) return false;
+    await commitDurableLocked(delete_group(state, groupId));
+    return true;
+  });
+  if (dropped) emitGroupChange(groupIdStr, false);
+  return dropped;
+}
+
+/**
+ * One step of the automatic repair ladder for ONE group this device already
+ * has a context for (it was opened / synced / decrypted this session). Never
+ * touches another group.
+ *   'sync'   catch up to the server's epoch (a diverged copy goes to the
+ *            normal heal), then re-export: every key consumer re-derives on
+ *            a group change.
+ *   'ensure' the full ensure*Group path (join / resync if diverged, reconcile).
+ *   'reset'  forced re-join: publish a fresh KeyPackage, then resync_external
+ *            (drops the local copy and, in the same external commit, removes
+ *            our old leaf). If the local copy is too broken to build that
+ *            (join_failed) or the server rejected it, delete the copy, apply
+ *            the newest Welcome if one is for us, else join fresh by external
+ *            commit (which also removes our stale leaf). A copy is never
+ *            dropped when the server can't take an external commit at all
+ *            (unsupported / no GroupInfo / not on the member list): nothing
+ *            would re-add this device then.
+ * → { action, reason? } (see externalJoinOrResync), or 'synced'/'ensured'.
+ */
+export async function repairGroupStep(api, currentUserId, groupIdStr, step) {
+  await ensureIdentity(api, currentUserId);
+  const ctx = groupCtx.get(groupIdStr);
+  if (!ctx) {
+    mlsLog('warn', 'repair: group context unknown on this device', { groupId: groupIdStr, step });
+    return { action: 'failed', reason: 'no_context' };
+  }
+  const groupId = textEncoder.encode(groupIdStr);
+  lastHealAt.set(groupIdStr, Date.now()); // the background heal stays out of the way
+
+  if (step === 'sync') {
+    const status = await catchUpGroup(ctx);
+    if (status.diverged) return healGroup(currentUserId, ctx);
+    emitGroupChange(groupIdStr, false);
+    return { action: 'synced', reason: status.held ? null : 'not_held' };
+  }
+
+  if (step === 'ensure') {
+    const r = ctx.kind === 'dm'
+      ? await ensureDmGroup(api, currentUserId, ctx.otherUserId, groupIdStr).then(() => ({ held: group_exists(deviceStateCache, groupId) }))
+      : await ensureReconciledGroup(api, currentUserId, ctx);
+    emitGroupChange(groupIdStr, false);
+    return { action: 'ensured', reason: r?.held ? null : (r?.reason ?? 'not_held') };
+  }
+
+  if (step !== 'reset') return { action: 'failed', reason: 'unknown_step' };
+
+  if (ctx.fetchMemberIds) {
+    let members;
+    try {
+      members = await ctx.fetchMemberIds();
+    } catch (err) {
+      mlsLog('warn', 'repair reset: member list unavailable; keeping the local copy', { groupId: groupIdStr, error: err });
+      return { action: 'failed', reason: 'member_list_unavailable' };
+    }
+    if (!members.has(currentUserId)) return { action: 'skipped', reason: 'not_on_list' };
+  }
+  maybeRefreshKeyPackage(api, currentUserId, { force: true });
+
+  const r = await externalJoinOrResync(ctx, { force: true });
+  if (r.action === 'resynced' || r.action === 'joined') {
+    await catchUpGroup(ctx);
+    return r;
+  }
+  if (r.reason !== 'join_failed' && r.reason !== 'rejected') {
+    mlsLog('warn', 'repair reset: forced re-join not possible; keeping the local copy', { groupId: groupIdStr, action: r.action, reason: r.reason });
+    return r;
+  }
+  mlsLog('warn', 'repair reset: dropping this device\'s copy of the group and re-joining', { groupId: groupIdStr, reason: r.reason });
+  await dropLocalGroupCopy(groupIdStr);
+  await catchUpGroup(ctx); // the newest Welcome, if one is meant for this device
+  if (group_exists(deviceStateCache, groupId)) return { action: 'welcomed' };
+  const j = await externalJoinOrResync(ctx);
+  await catchUpGroup(ctx);
+  return { ...j, dropped: true };
+}
+
 // ── Local epoch ──────────────────────────────────────────────────────────
 
 let epochMemo = { version: -1, map: new Map() };
@@ -1400,7 +1512,8 @@ export function groupEpoch(groupIdStr) {
 async function encryptGroup(api, currentUserId, groupIdStr, plaintext) {
   await ensureIdentity(api, currentUserId);
   const groupId = textEncoder.encode(groupIdStr);
-  const plainBytes = textEncoder.encode(plaintext);
+  // S7: a v2 envelope (engine/frank.js) is passed as bytes; text as a string.
+  const plainBytes = plaintext instanceof Uint8Array ? plaintext : textEncoder.encode(plaintext);
   // Durable before the ciphertext is returned (and therefore sent): a crash
   // must never make this device reuse a sender-ratchet generation.
   const ciphertext = await withStateLock(async () => {
@@ -1438,7 +1551,7 @@ function tryDecryptLocked(groupId, ciphertext) {
     try {
       const result = decrypt(state, groupId, ciphertext);
       commitState(result.device_state); // decrypt-only: lazily persisted (I5)
-      return { plaintext: textDecoder.decode(result.plaintext), localEpoch };
+      return { plaintext: plaintextFromBytes(result.plaintext), localEpoch };
     } catch (err) {
       return { error: err, localEpoch };
     }
@@ -1791,4 +1904,145 @@ export function handleEventGroupWelcome(api, currentUserId, eventId, welcomeB64)
 
 export function handleEventGroupCommit(api, currentUserId, eventId, commitB64) {
   return handleGroupCommit(api, currentUserId, eventId, commitB64);
+}
+
+// ── Read-only diagnostics (S2) ───────────────────────────────────────────
+
+/**
+ * What this device's local MLS state says about every group it holds:
+ * { loaded, ownLabel, stateVersion, groups: [{ groupId, epoch, memberCount,
+ * memberLabels, selfIsMember } | { groupId, error }] }.
+ *
+ * Read-only (I4): it takes ONE snapshot of the committed `deviceStateCache`
+ * reference (states are replaced on commit, never mutated in place) and runs
+ * only group_ids / group_epoch / group_member_labels on it — so the result is
+ * a consistent view of a single committed version without queueing behind
+ * (possibly network-bound) lock work. Nothing is written or persisted, and
+ * only ids, epochs and credential labels (`${userId}:${deviceId}`) leave this
+ * function — never key material. One unreadable group yields
+ * { groupId, error } instead of failing the whole report.
+ */
+export async function getMlsDiagnostics() {
+  const state = deviceStateCache; // single snapshot (I4)
+  const version = stateVersion;
+  const own = ownCredential;
+  if (!state) return { loaded: false, ownLabel: own, stateVersion: version, groups: [] };
+  await ensureWasm();
+  let ids;
+  try {
+    ids = group_ids(state);
+  } catch (err) {
+    return { loaded: true, ownLabel: own, stateVersion: version, groups: [], error: logValue(err) };
+  }
+  const groups = [];
+  for (const groupIdStr of Array.from(ids || [])) {
+    try {
+      const gid = textEncoder.encode(groupIdStr);
+      const memberLabels = Array.from(group_member_labels(state, gid) || []).map(String);
+      groups.push({
+        groupId: String(groupIdStr),
+        epoch: Number(group_epoch(state, gid)),
+        memberCount: memberLabels.length,
+        memberLabels,
+        selfIsMember: !!own && memberLabels.includes(own),
+      });
+    } catch (err) {
+      groups.push({ groupId: String(groupIdStr), error: logValue(err) });
+    }
+  }
+  return { loaded: true, ownLabel: own, stateVersion: version, groups };
+}
+
+// ── S5: Reset encryption identity (last-resort manual repair) ─────────────
+// (import kept here so this section stays append-only; ES imports hoist)
+import { runResetSteps } from './utils/resetIdentity.js';
+
+/**
+ * Makes this PC a brand-new MLS device for the signed-in account: every group
+ * it held is dropped, and other members' reconcile re-adds the new device
+ * (keys arrive when another member opens each channel). The caller must
+ * reload the engine afterwards — nothing in this window may keep using the
+ * old groups.
+ *
+ * Why a NEW device id and not just an empty state: reconcile keys membership
+ * on `${userId}:${deviceId}`, so a fresh keypair under the old id would look
+ * already present to everyone and never be re-added (permanent lockout).
+ * Why a fresh identity instead of an empty file: mls_save_state refuses empty
+ * bodies (and the old devtools `{ state: [] }` call isn't a raw body, so
+ * current builds reject it) — writing a fresh identity is exactly what a
+ * first start does, minus the restart.
+ *
+ * Order (each step stops the sequence on failure, except register):
+ *   1. load     — this window must hold the current state (Rust only accepts
+ *                 writes from the window that loaded it).
+ *   2. wipe     — forget the KeyPackage-refresh marker, then durably replace
+ *                 the state with a fresh identity under a new device id,
+ *                 and (still holding the lock) resetForUser: every
+ *                 in-memory cache is dropped and queued lock work fails with
+ *                 MLS_ACCOUNT_SWITCHED instead of writing. On load,
+ *                 initIdentity re-derives the device id from the state's
+ *                 credential, so a crash after this step is safe.
+ *   3. deviceId — store the new device id (drop the legacy per-PC id if it
+ *                 was the old one).
+ *   4. register — publish the new device + KeyPackage (optional: if it fails
+ *                 the next start re-registers, the refresh marker is gone).
+ * The server has no endpoint to remove a device, so the OLD device row stays
+ * (its leaf lingers in groups with no key behind it, until the server's
+ * 90-day inactive-device revocation).
+ *
+ * → { oldLabel, newLabel, registered, oldDeviceDropped: false, warnings }
+ */
+export async function resetEncryptionIdentity(api, currentUserId) {
+  const userId = currentUserId || boundUserId;
+  if (!userId) throw new Error('Not signed in');
+  if (!isTauri()) throw new Error('Only available in the SpecterComs desktop app');
+  let oldLabel = null;
+  let newDeviceId = null;
+  let newLabel = null;
+  let identity = null;
+  mlsLog('warn', 'resetting this device\'s encryption identity (user action)', {});
+  const { warnings } = await runResetSteps([
+    {
+      id: 'load', label: 'Load this device\'s encryption state',
+      run: async () => {
+        await ensureIdentity(api, userId);
+        oldLabel = ownCredential;
+      },
+    },
+    {
+      id: 'wipe', label: 'Replace the encryption state with a new identity',
+      run: async () => {
+        await ensureWasm();
+        storageRemove(keyPackageRefreshedKey(userId));
+        newDeviceId = crypto.randomUUID();
+        newLabel = credentialFor(userId, newDeviceId);
+        identity = generate_identity(newLabel);
+        await withStateLock(async () => {
+          await commitDurableLocked(identity.device_state);
+          // Still inside the lock: nothing queued behind us may run against
+          // the fresh state with the old groups' bookkeeping (I7 semantics).
+          resetForUser(userId);
+        });
+      },
+    },
+    {
+      id: 'deviceId', label: 'Switch to the new device id',
+      run: () => {
+        const oldDeviceId = oldLabel ? deviceIdOfLabel(oldLabel) : null;
+        if (oldDeviceId && storageGet(LEGACY_DEVICE_ID_KEY) === oldDeviceId) storageRemove(LEGACY_DEVICE_ID_KEY);
+        storageSet(deviceIdKey(userId), newDeviceId);
+      },
+    },
+    {
+      id: 'register', label: 'Register the new device', optional: true,
+      run: async () => {
+        const res = await registerDevice(api, newDeviceId, identity, newLabel);
+        if (res?.error) throw new Error(res.error);
+        storageSet(keyPackageRefreshedKey(userId), String(Date.now()));
+      },
+    },
+  ]);
+  const registered = !warnings.some((w) => w.startsWith('Register'));
+  mlsLog('warn', 'encryption identity reset', { oldLabel, newLabel, registered });
+  return { oldLabel, newLabel, registered, oldDeviceDropped: false, warnings };
 }

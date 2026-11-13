@@ -3,6 +3,7 @@ import { Response } from 'express';
 import { pool } from '../config/db.js';
 import { publishEvent } from '../config/nats.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
+import { parseFrankInput, issueFrank } from '../utils/franking.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -22,6 +23,9 @@ export const sendDirectMessage = async (req: AuthRequest, res: Response) => {
   if (!encrypted_content || encrypted_content.length < 1 || encrypted_content.length > 8000) {
     return res.status(400).json({ message: 'encrypted_content must be 1–8000 characters' });
   }
+  // S7 franking (optional until S9): 32-byte commitment, see utils/franking.ts.
+  const frankIn = parseFrankInput(req.body?.frank);
+  if (!frankIn.ok) return res.status(400).json({ message: frankIn.message, code: 'BAD_FRANK' });
 
   try {
     // Friendship gate — server only relays between friends
@@ -43,6 +47,9 @@ export const sendDirectMessage = async (req: AuthRequest, res: Response) => {
     const timestamp = new Date().toISOString();
     // Conversation ID is deterministic and order-independent
     const convId    = [me, recipientId].sort().join('-');
+    const frank = frankIn.frank
+      ? issueFrank(frankIn.frank, { senderId: me, conversationId: convId, msgId: msg_id, timestamp })
+      : undefined;
 
     const relayPayload = {
       id:                msg_id,
@@ -52,6 +59,7 @@ export const sendDirectMessage = async (req: AuthRequest, res: Response) => {
       callsign:          fromCallsign,
       encrypted_content,
       timestamp,
+      ...(frank ? { frank } : {}),
     };
 
     // Notify recipient of new DM (drives notification badge)

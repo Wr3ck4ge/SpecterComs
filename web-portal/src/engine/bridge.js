@@ -212,6 +212,12 @@
 //   gaveUp, timeouts, attempts, lastKind, via, message } (CommLink's classification,
 //   connectionRepair.connectIssueFrom) and state.voice.via = 'main' | 'alt' | null
 //   with state.voice.viaPort (the UDP port voice uses). Optional; older strips ignore them.
+// S3: state.mls = { stuck: [groupId…] } — MLS groups this device looks stuck in
+//   (engine/mlsHealth.js: decrypts keep failing with a key held after a
+//   catch-up applied commits). Detection only; the strip suggests Resync
+//   encryption. Optional; older strips ignore it.
+//   S4: state.mls.repairing = [groupId…] — groups an automatic repair ladder
+//   (engine/mlsRepair.js) is running for; the chip says "Repairing encryption…".
 //
 // PM (per-member menu, see engine/people.js). All take the member's userId
 // (state.people[callsign].userId); none applies to me.
@@ -455,6 +461,9 @@ export function engineChannel(ch, channelPresence = {}) {
     pendingMine: ch.my_signup_pending === true, // my sign-up here awaits approval
     // Visibility: only ranks at/above this level (and the owner) see it. 0 = everyone.
     minLevel: Number(ch.visible_min_level) || 0,
+    // L11: an 18+ channel; locked until I confirm my age (server list: adult_locked).
+    adult: ch.is_adult === true,
+    adultLocked: ch.adult_locked === true,
   };
 }
 
@@ -477,6 +486,8 @@ export function buildEngineState({
   people = {}, prefs = null, // PM: engine/people.js buildPeople, { overlayDms }
   voiceConnect = null, // NET: CommLink's { connectIssue, via, port }
   liveOps = [], // LIVE: engine/liveOps.js buildLiveOps
+  mlsStuck = [], // S3: engine/mlsHealth.js stuckGroups()
+  mlsRepairing = [], // S4: engine/mlsRepair.js groups with a repair ladder running
 }) {
   const callsign = user?.callsign || user?.username || null;
   const inVoice = Boolean(inComms && voiceChannel);
@@ -540,6 +551,7 @@ export function buildEngineState({
     people: inVoice ? people || {} : {}, // PM
     prefs: { overlayDms: prefs?.overlayDms !== false }, // PM
     liveOps: Array.isArray(liveOps) ? liveOps : [], // LIVE
+    mls: { stuck: Array.isArray(mlsStuck) ? mlsStuck : [], repairing: Array.isArray(mlsRepairing) ? mlsRepairing : [] }, // S3, S4
   };
 }
 
@@ -594,10 +606,13 @@ export function buildChatRows(messages = [], { userId, resolveImageUrl = (u) => 
       callsign: m.callsign || null,
       timestamp: m.timestamp,
       text,
-      imageUrl: m.image_url ? resolveImageUrl(m.image_url) : null,
+      imageUrl: null, // relay-supplied images bypass E2E; never rendered
       mine: Boolean(userId) && m.sender_id === userId,
       pending: text == null,
       relayedBy: m.relayed_by ?? null,
+      // S7 (D2): the franking commitment didn't match — the UI hides the text
+      // behind "couldn't be verified" until clicked.
+      ...(m.verify === 'failed' ? { unverified: true } : {}),
     };
   });
 }

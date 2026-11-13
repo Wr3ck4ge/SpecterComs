@@ -125,7 +125,7 @@ export default function FriendsCabinet({ userId, onClose, maxHeight = 560, onMes
             {results.error && <div className="px-2"><Alert variant="error">{results.error}</Alert></div>}
             {!results.error && results.loading && <p className="px-2 py-1 text-ui-sm text-specter-text-subtle">Searching…</p>}
             {!results.error && !results.loading && !results.users.length && (
-              <p className="px-2 py-1 text-ui-sm text-specter-text-subtle">No one found. Search matches the start of a callsign.</p>
+              <p className="px-2 py-1 text-ui-sm text-specter-text-subtle">No one found. Suggestions only include people in your servers; to find anyone else, type their exact callsign.</p>
             )}
             <ul aria-label="Search results" className="space-y-0.5">
               {results.users.map((u) => {

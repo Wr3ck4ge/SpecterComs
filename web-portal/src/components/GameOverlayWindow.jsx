@@ -908,7 +908,27 @@ export default function GameOverlayWindow() {
     }
   };
 
-  const { voiceRoster, localSpeaking, activeSharers, remoteLevels, userCallsign, watchTarget, voiceChannelName, voiceOpName, missionWide } = data;
+  const { voiceRoster, localSpeaking, activeSharers, remoteLevels, userCallsign, watchTarget, voiceChannelName, voiceOpName, missionWide, selfSharing } = data;
+
+  // C4: short notices from the engine (the streaming hotkey: "Streaming X",
+  // "Stream stopped", or why it couldn't start). Shown in the header's channel
+  // label for ~2.5 s, so the HUD never grows or reflows for them.
+  const [notice, setNotice] = useState(null); // { text, kind: 'info'|'live'|'error', at }
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return undefined;
+    let unlisten;
+    let disposed = false;
+    import('@tauri-apps/api/event').then(({ listen }) => listen('overlay-notice', (e) => {
+      const p = e?.payload;
+      if (p && typeof p.text === 'string') setNotice({ text: p.text.slice(0, 80), kind: p.kind || 'info', at: Date.now() });
+    })).then((fn) => { if (disposed) fn(); else unlisten = fn; });
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+  useEffect(() => {
+    if (!notice) return undefined;
+    const t = setTimeout(() => setNotice(null), 2500);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   // OVH: the channel label ("<op> › <group>" in an op, cut in the middle if
   // it must be) and the overlay width that fits it. The header's controls
@@ -917,9 +937,13 @@ export default function GameOverlayWindow() {
   // Phase 3: Mission Wide takes the header while it plays for a listener.
   const missionLabel = missionWide?.playing && !missionWide.transmitting
     ? `MISSION WIDE${missionWide.speaker ? ` · ${missionWide.speaker}` : ''}` : null;
-  const channelLabel = missionLabel
+  const baseLabel = missionLabel
     ? { lead: missionLabel, tail: null, full: missionLabel }
     : overlayChannelLabel({ channelName: voiceChannelName, opName: voiceOpName });
+  // C4: a notice briefly takes the label's place (the width measurement
+  // below keeps using the real label, so the HUD doesn't resize).
+  const channelLabel = notice ? { lead: notice.text, tail: null, full: notice.text } : baseLabel;
+  const noticeColor = notice ? (notice.kind === 'error' ? '#fbbf24' : notice.kind === 'live' ? '#f87171' : '#a5f3fc') : null;
   const headerRef = useRef(null);
   const channelBtnRef = useRef(null);
   const channelMeasureRef = useRef(null);
@@ -971,16 +995,27 @@ export default function GameOverlayWindow() {
           <span className="sov-channel-icon">◈</span>
           {/* Phase 3: Mission Wide is red in the header (commander while it is
               their active net, everyone while its audio plays). */}
-          <ChannelLabel label={channelLabel} style={missionWide ? { color: '#f87171', fontWeight: 700 } : undefined} />
+          <ChannelLabel label={channelLabel} style={noticeColor ? { color: noticeColor, fontWeight: 600 } : missionWide ? { color: '#f87171', fontWeight: 700 } : undefined} />
           {activeSharers?.length > 0 && (
             <span className="sov-caret">{showPicker ? '▲' : '▼'}</span>
           )}
         </button>
+        {/* C4: my own share is live: a small, persistent LIVE pip. */}
+        {selfSharing && (
+          <span
+            title="You're streaming"
+            aria-label="You're streaming"
+            style={{ flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 3, padding: '0 5px', marginLeft: 2,
+              fontSize: 9, fontWeight: 700, letterSpacing: '0.08em', color: '#fca5a5', border: '1px solid rgba(248,113,113,0.5)', borderRadius: 3, lineHeight: '14px' }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#ef4444' }} />LIVE
+          </span>
+        )}
         {/* OVH: the same button's content at its natural width, off-screen,
             for the width measurement above. */}
         <span ref={channelMeasureRef} aria-hidden="true" className="sov-btn sov-channel sov-channel--measure">
           <span className="sov-channel-icon">◈</span>
-          <ChannelLabel label={channelLabel} />
+          <ChannelLabel label={baseLabel} />
           {activeSharers?.length > 0 && <span className="sov-caret">▼</span>}
         </span>
 

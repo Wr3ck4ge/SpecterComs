@@ -27,4 +27,14 @@
   --ui-text-main: #ecf9ff;
   --ui-text-muted: #b7d1df;
   --ui-accent: #22d3ee;
+
+  /* BRAND (2026-11-12): mirrors tailwind `specter.brand.*`. */
+  --brand-near-black: #050B10;
+  --brand-blue-black: #0A1A24;
+  --brand-steel: #7A8B97;
+  --brand-cyan: #00E5FF;
+  --brand-error: #FF5266;
+  --brand-tile-border: rgba(122, 139, 151, 0.30);
+  --brand-tile-border-hover: rgba(122, 139, 151, 0.55);
+  --brand-panel-border: rgba(122, 139, 151, 0.32);
 }

@@ -49,10 +49,22 @@ import { authenticateTokenStrict } from '../middleware/authMiddleware.js';
 import { loginRateLimiter } from '../middleware/rateLimit.js';
 import adminBillingRoutes from './adminBilling.js';
 import { getTrafficStats } from '../controllers/trafficController.js';
+import {
+  listBugReportKeys, setBugReportKey, listBugReportsAdmin, updateBugReportAdmin, deleteBugReportAdmin,
+} from '../controllers/bugReportAdminController.js';
+import { listDataRequestsAdmin, completeDataRequestAdmin } from '../controllers/dataRequestController.js';
+import { listAppealsAdmin, decideAppealAdmin } from '../controllers/banAppealController.js';
+import {
+  listTsReportKeys, setTsReportKey, listTsReportsAdmin, getTsReportBlobAdmin, getTsReportCustodyAdmin,
+  setTsReportStateAdmin, setTsReportHoldAdmin,
+} from '../controllers/tsReportAdminController.js';
+import { getNoticeAdmin, setNotice, clearNotice } from '../controllers/statusController.js';
+import { adminLoginTwoFactor } from '../controllers/adminController.js';
+import { adminTwoFactor, requireAdminTwoFactor } from '../controllers/twoFactorController.js';
 
 const router = Router();
 
-// Every admin response may carry personal data — never cache it anywhere.
+// Every admin response may carry personal data â€” never cache it anywhere.
 router.use((_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Pragma', 'no-cache');
@@ -60,6 +72,7 @@ router.use((_req, res, next) => {
 });
 
 router.post('/login', loginRateLimiter, adminLogin);
+router.post('/login/2fa', loginRateLimiter, adminLoginTwoFactor); // L3: second step
 
 // Everything below: valid JWT -> live, non-idle admin_sessions row -> current
 // role from platform_admins -> per-admin rate limit. Authorization is entirely
@@ -77,6 +90,18 @@ const owner    = requireRole('owner');
 router.get('/me',      viewer, getAdminMe);
 router.post('/logout', viewer, adminLogout);
 router.post('/reauth', viewer, sensitiveRateLimit('reauth'), adminReauth);
+
+// L3: the admin's own two-factor setup. Registered BEFORE requireAdminTwoFactor
+// so an admin who still has to enrol can reach it (and /me, /logout, /reauth).
+router.get('/2fa',                 viewer, adminTwoFactor.status);
+router.post('/2fa/enroll',         viewer, adminTwoFactor.enroll);
+router.post('/2fa/confirm',        viewer, adminTwoFactor.confirm);
+router.post('/2fa/disable',        viewer, adminTwoFactor.disable);
+router.post('/2fa/recovery-codes', viewer, adminTwoFactor.regenerate);
+
+// Everything below: 403 TWO_FACTOR_REQUIRED for an admin without 2FA while
+// REQUIRE_2FA_FOR_PRIVILEGED is on (a no-op while it is off).
+router.use(requireAdminTwoFactor);
 
 // Admin accounts
 router.get('/admins',                owner, listAdmins);
@@ -128,7 +153,7 @@ router.get('/nodes',                         viewer,   listMediaNodes);
 router.put('/nodes/:nodeId',                 operator, updateMediaNode);
 router.get('/nodes/:nodeId/metrics-history', viewer,   getNodeMetricsHistory);
 
-// Node Provisioning (Phase B of multi-tenant infra) — creates billable droplets
+// Node Provisioning (Phase B of multi-tenant infra) â€” creates billable droplets
 router.post('/nodes/provision',   owner,  requireReauth, provisionNode);
 router.get('/nodes/provisioning', viewer, listProvisioningRequests);
 router.get('/nodes/orphans',      owner,  listOrphanDroplets);
@@ -143,5 +168,34 @@ router.get('/node-alerts',      viewer, listNodeAlertEvents);
 router.get('/voice-reports',            operator, listVoiceReportsAdmin);
 router.get('/voice-reports/:id/audio',  operator, sensitiveRateLimit('audio'), getVoiceReportAudioAdmin);
 router.patch('/voice-reports/:id',      operator, updateVoiceReportAdmin);
+
+// D1: bug reports â€” owner only (only the owner's browser can open them).
+router.get('/bug-reports/keys',      owner, listBugReportKeys);
+router.put('/bug-reports/key',       owner, requireReauth, sensitiveRateLimit('destructive'), setBugReportKey);
+router.get('/bug-reports',           owner, listBugReportsAdmin);
+router.patch('/bug-reports/:id',     owner, updateBugReportAdmin);
+router.delete('/bug-reports/:id',    owner, deleteBugReportAdmin);
+// L7: status page incident notice.
+router.get('/status-notice',         operator, getNoticeAdmin);
+router.put('/status-notice',         operator, setNotice);
+router.delete('/status-notice',      operator, clearNotice);
+
+// L6: user data requests â€” owner only (the export / erasure they trigger are owner actions).
+// L12: platform ban appeals (operators decide; a different admin than the one who acted)
+router.get('/appeals',                     operator, listAppealsAdmin);
+router.post('/appeals/:id/decide',         operator, sensitiveRateLimit('destructive'), decideAppealAdmin);
+
+router.get('/data-requests',              owner, listDataRequestsAdmin);
+router.post('/data-requests/:id/complete', owner, completeDataRequestAdmin);
+
+// T3: trust & safety queue â€” owner only, like bug reports (the reviewer's
+// browser holds the T&S key). Every per-report action writes a custody row.
+router.get('/ts-reports/keys',            owner, listTsReportKeys);
+router.put('/ts-reports/key',             owner, requireReauth, sensitiveRateLimit('destructive'), setTsReportKey);
+router.get('/ts-reports',                 owner, listTsReportsAdmin);
+router.get('/ts-reports/:id/blob',        owner, getTsReportBlobAdmin);
+router.get('/ts-reports/:id/custody',     owner, getTsReportCustodyAdmin);
+router.patch('/ts-reports/:id/state',     owner, setTsReportStateAdmin);
+router.put('/ts-reports/:id/legal-hold',  owner, requireReauth, setTsReportHoldAdmin);
 
 export default router;

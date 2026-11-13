@@ -1,28 +1,34 @@
 // P2C: the tray strip's Games cabinet — "Supported games" (the same list an
-// operation can be tagged with, gameOptions.js) → a game's tools. Picking a
-// tool opens it as a wide panel beside the cabinet (games/GameToolPanel,
-// lazy-loaded by StripApp). Also carries the per-user "I play this" flag
-// (/users/games) that used to be Settings → Games in the main window.
-import { useEffect, useState } from 'react';
+// operation can be tagged with, gameOptions.js) → a game's tools. GAMEFIT
+// (owner 2026-11-13): picking a tool REPLACES the game list inside this
+// cabinet (games/GameToolPanel, lazy-loaded); StripApp widens the cabinet
+// toward the free side (useFluidExpand), never past the screen. Closing the
+// tool returns to the game's tools. Also carries the per-user "I play this"
+// flag (/users/games) that used to be Settings → Games in the main window.
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { ChevronLeft, Gamepad2, Rocket, Wrench, X } from 'lucide-react';
 import { Alert, IconButton, Row, Toggle } from '../ui';
 import { api as realApi } from '../../api';
 import { GAME_OPTIONS } from '../../gameOptions';
 import { GAME_BLURB, GAME_TOOLS } from './games/gameTools';
 
+const GameToolPanel = lazy(() => import('./games/GameToolPanel'));
 const TOOL_ICONS = { hangar: Rocket, editor: Wrench };
+const TOOL_MAX_H = 820;
 
 // 'STAR CITIZEN' → 'Star Citizen'
 const gameTitle = (label) => label.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 export const SUPPORTED_GAMES = GAME_OPTIONS.filter((g) => g.v !== 'none').map((g) => ({ id: g.v, title: gameTitle(g.l) }));
 
 /**
- * activeTool       { game, tool } | null — highlights the open tool
- * onOpenTool(game, toolId), onClose(), maxHeight
+ * activeTool       { game, tool, shipId } | null — the open tool, shown in place of the list
+ * onOpenTool(game, toolId), onToolChange(tool), onCloseTool(), onClose(), maxHeight
  * initialGame      dev preview
  * api              defaults to the real client
  */
-export default function GamesCabinet({ activeTool, onOpenTool, onClose, maxHeight = 560, initialGame = null, api = realApi }) {
+export default function GamesCabinet({
+  activeTool, onOpenTool, onToolChange, onCloseTool, onClose, maxHeight = 560, initialGame = null, api = realApi,
+}) {
   const [gameId, setGameId] = useState(initialGame ?? activeTool?.game ?? null);
   const [myGames, setMyGames] = useState(null);
   const [mineError, setMineError] = useState(null);
@@ -46,6 +52,22 @@ export default function GamesCabinet({ activeTool, onOpenTool, onClose, maxHeigh
     const { error } = await api.updateMyGames(next);
     if (error) { setMyGames(prev); setMineError(typeof error === 'string' ? error : 'Could not save'); }
   };
+
+  if (activeTool) {
+    const h = Math.min(maxHeight, TOOL_MAX_H);
+    return (
+      <Suspense fallback={<div style={{ height: 120 }} className="p-4 text-ui-sm text-specter-text-subtle">Loading…</div>}>
+        <GameToolPanel
+          tool={activeTool.tool}
+          shipId={activeTool.shipId}
+          onOpenShip={(shipId) => onToolChange?.({ ...activeTool, shipId })}
+          onClose={() => onCloseTool?.()}
+          width="100%"
+          height={h}
+        />
+      </Suspense>
+    );
+  }
 
   return (
     <div className="flex flex-col" style={{ maxHeight }}>

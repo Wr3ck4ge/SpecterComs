@@ -344,9 +344,21 @@ pub fn start(app: AppHandle) {
 /// CSS px using the monitor's own scale factor, so it's right on mixed-DPI
 /// setups (the window takes that monitor's scale once it's moved there).
 fn position_strip(app: &AppHandle, win: &WebviewWindow) {
-    let anchor = *lock_ignore_poison(&state(app).anchor);
-    let monitor = anchor
-        .and_then(|(x, y)| app.monitor_from_point(x, y).ok().flatten())
+    let mut anchor = *lock_ignore_poison(&state(app).anchor);
+    // C1: a monitor chosen in Settings → Display wins over the tray icon's;
+    // unplugged (or Auto) falls back to the tray icon's, else the primary.
+    let chosen = crate::displays::chosen_strip_monitor(app);
+    if let (Some(m), Some((ax, ay))) = (&chosen, anchor) {
+        // The tray icon is on another monitor: its x means nothing here.
+        let (p, s) = (m.position(), m.size());
+        let inside = ax >= p.x as f64 && ax < (p.x + s.width as i32) as f64
+            && ay >= p.y as f64 && ay < (p.y + s.height as i32) as f64;
+        if !inside {
+            anchor = None;
+        }
+    }
+    let monitor = chosen
+        .or_else(|| anchor.and_then(|(x, y)| app.monitor_from_point(x, y).ok().flatten()))
         .or_else(|| app.primary_monitor().ok().flatten());
     let Some(monitor) = monitor else {
         write_setup_error("[strip] no monitor found; leaving strip where it is");
@@ -511,6 +523,19 @@ pub fn show_strip(app: &AppHandle, anchor: Option<(f64, f64)>) {
     let _ = win.set_focus();
     let layout = lock_ignore_poison(&state(app).layout).clone();
     let _ = app.emit_to(STRIP_LABEL, "strip-shown", layout);
+}
+
+/// C1: the "Show Specter on" choice changed. A showing strip re-docks onto the
+/// new monitor now (show_strip repositions and re-sends the layout); a hidden
+/// one picks it up the next time it's shown.
+pub fn redock_if_visible(app: &AppHandle) {
+    let visible = app
+        .get_webview_window(STRIP_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if visible {
+        show_strip(app, None);
+    }
 }
 
 /// Is the foreground window one of this process's own windows that the user

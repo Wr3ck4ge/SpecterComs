@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url';
 import multer from 'multer';
 import { pool } from '../config/db.js';
 import { AuthRequest } from '../middleware/authMiddleware.js';
+import { adultRegionRefusal, hasAttested, ADULT_ATTESTATION_REQUIRED } from '../utils/adultAccess.js'; // L11
 import { CreateOrgInput, TEXT_LIMITS, textLength, tooLong } from '../utils/validation.js';
 import { resolveMediaUrlForOrg } from '../utils/discovery.js';
 import { getOrgTiers } from '../utils/orgTiers.js';
@@ -417,6 +418,17 @@ export const getOrgToken = async (req: AuthRequest, res: Response) => {
   }
 
   try {
+    // L11: an adult channel's ticket needs an available region and the
+    // member's 18+ attestation (canUseChannel below also enforces the latter).
+    const adultScope = channel_id ? await getChannelScope(channel_id, String(orgId)) : null;
+    if (adultScope && adultScope.scope === 'org' && adultScope.adult) {
+      const no = await adultRegionRefusal(adultScope, req.ip);
+      if (no) return res.status(403).json(no);
+      if (!(await hasAttested(String(orgId), userId))) {
+        return res.status(403).json({ message: '18+ channel: confirm your age to enter', code: ADULT_ATTESTATION_REQUIRED });
+      }
+    }
+
     const ctx = await getOrgChannelAccessContext({
       userId,
       orgId,
@@ -667,6 +679,17 @@ export const issueOrgMediaTicket = async (req: AuthRequest, res: Response) => {
   }
 
   try {
+    // L11: an adult channel's ticket needs an available region and the
+    // member's 18+ attestation (canUseChannel below also enforces the latter).
+    const adultScope = await getChannelScope(channel_id, String(orgId));
+    if (adultScope && adultScope.scope === 'org' && adultScope.adult) {
+      const no = await adultRegionRefusal(adultScope, req.ip);
+      if (no) return res.status(403).json(no);
+      if (!(await hasAttested(String(orgId), userId))) {
+        return res.status(403).json({ message: '18+ channel: confirm your age to enter', code: ADULT_ATTESTATION_REQUIRED });
+      }
+    }
+
     const ctx = await getOrgChannelAccessContext({
       userId,
       orgId,
@@ -692,6 +715,15 @@ export const issueOrgMediaTicket = async (req: AuthRequest, res: Response) => {
     // op-wide key (event MLS group, label 'video-op'), not the channel's.
     const opVideo = ctx.opLive && ctx.eventId
       && (ctx.channelKind === 'group' || ticketChannelId !== channel_id);
+
+    // S7 (share frames v2): the sharer's user id, which a v2 viewer binds into
+    // every frame's AAD — resolved here from the callsign the ticket pins,
+    // not taken from the stream's unauthenticated header JSON.
+    let sharerUserId: string | null = null;
+    if ((kind === 'video_subscribe' || kind === 'video_subscribe_overlay') && sharer) {
+      const sharerRes = await pool.query('SELECT id FROM users WHERE callsign = $1', [String(sharer)]);
+      sharerUserId = sharerRes.rows[0]?.id ?? null;
+    }
 
     const expiresInSeconds = 90;
     const purpose = kind === 'voice' ? 'media_voice' : 'media_video';
@@ -745,6 +777,7 @@ export const issueOrgMediaTicket = async (req: AuthRequest, res: Response) => {
       // when asked via a frequency) and which video key this room's shares use.
       channel_id: ticketChannelId,
       video_key_scope: opVideo ? 'op' : 'channel',
+      ...(sharerUserId ? { sharer_user_id: sharerUserId } : {}),
     });
   } catch (error: any) {
     if (error?.status) {

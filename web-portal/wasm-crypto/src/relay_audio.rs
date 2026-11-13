@@ -70,8 +70,6 @@
 //!   high-water mark is remembered (bounded) so its old frames stay rejected
 //!   if it is later re-admitted.
 
-use std::collections::{HashMap, VecDeque};
-
 use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     ChaCha20Poly1305, Key, Nonce,
@@ -79,6 +77,9 @@ use chacha20poly1305::{
 use getrandom::getrandom;
 use hkdf::Hkdf;
 use sha2::Sha256;
+
+use crate::replay::{self, OpenError, SessionTable};
+pub use crate::replay::REPLAY_WINDOW;
 
 pub const VERSION: u8 = 0x03;
 pub const SESSION_ID_LEN: usize = 16;
@@ -99,9 +100,6 @@ const KDF_SALT: &[u8] = b"specter/relay-audio/v3";
 const KDF_INFO_PREFIX: &[u8] = b"specter/relay-audio/v3/session-key";
 const KDF_FINGERPRINT_INFO: &[u8] = b"specter/relay-audio/v3/secret-fingerprint";
 
-/// Replay window width in frames (bitmap in a u128). At 50 frames/s this
-/// tolerates ~2.5s of reordering, far beyond what the jitter path keeps.
-pub const REPLAY_WINDOW: u64 = 128;
 /// Max concurrently tracked sessions for one ssrc (devices + reconnects of one
 /// user within one key epoch).
 pub const MAX_SESSIONS_PER_SSRC: usize = 8;
@@ -348,78 +346,32 @@ impl SenderCore {
 
 // ── Receiver ─────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Default)]
-struct ReplayWindow {
-    /// Highest authenticated sequence seen.
-    highest: u64,
-    /// Bit i set ⇔ (highest - i) was accepted.
-    bitmap: u128,
-}
+/// (ssrc, session_id); the per-group session cap applies per ssrc.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct SessionKey(u32, [u8; SESSION_ID_LEN]);
 
-impl ReplayWindow {
-    fn fresh(seq: u64) -> Self {
-        ReplayWindow { highest: seq, bitmap: 0 }
-    }
-
-    /// Window for a session re-admitted after eviction: everything at or
-    /// below its last known high-water mark counts as already seen.
-    fn resumed(highest: u64) -> Self {
-        ReplayWindow { highest, bitmap: u128::MAX }
-    }
-
-    fn check(&self, seq: u64) -> Result<(), RelayError> {
-        if seq > self.highest {
-            return Ok(());
-        }
-        let back = self.highest - seq;
-        if back >= REPLAY_WINDOW {
-            return Err(RelayError::Replay);
-        }
-        if self.bitmap & (1u128 << back) != 0 {
-            return Err(RelayError::Replay);
-        }
-        Ok(())
-    }
-
-    fn accept(&mut self, seq: u64) {
-        if seq > self.highest {
-            let shift = seq - self.highest;
-            self.bitmap = if shift >= REPLAY_WINDOW { 0 } else { self.bitmap << shift };
-            self.highest = seq;
-            self.bitmap |= 1;
-        } else {
-            self.bitmap |= 1u128 << (self.highest - seq);
-        }
+impl replay::SessionKey for SessionKey {
+    type Group = u32;
+    fn group(&self) -> u32 {
+        self.0
     }
 }
 
-type SessionKey = (u32, [u8; SESSION_ID_LEN]);
-
-struct SessionState {
-    cipher: ChaCha20Poly1305,
-    window: ReplayWindow,
-    last_used: u64,
-}
+const LIMITS: replay::Limits = replay::Limits {
+    per_group: MAX_SESSIONS_PER_SSRC,
+    total: MAX_SESSIONS_TOTAL,
+    retired: MAX_RETIRED,
+};
 
 pub struct ReceiverCore {
     kdf: GroupKdf,
     lane: Lane,
-    sessions: HashMap<SessionKey, SessionState>,
-    retired: HashMap<SessionKey, u64>,
-    retired_order: VecDeque<SessionKey>,
-    tick: u64,
+    sessions: SessionTable<SessionKey, ChaCha20Poly1305>,
 }
 
 impl ReceiverCore {
     pub fn new(group_secret: &[u8], lane: Lane) -> Result<Self, RelayError> {
-        Ok(ReceiverCore {
-            kdf: GroupKdf::new(group_secret)?,
-            lane,
-            sessions: HashMap::new(),
-            retired: HashMap::new(),
-            retired_order: VecDeque::new(),
-            tick: 0,
-        })
+        Ok(ReceiverCore { kdf: GroupKdf::new(group_secret)?, lane, sessions: SessionTable::new(LIMITS) })
     }
 
     pub fn lane(&self) -> Lane {
@@ -440,93 +392,36 @@ impl ReceiverCore {
     /// tag verified (so `stale-timestamp` always means an authentic but
     /// out-of-window frame — a replay or a badly wrong clock) and before the
     /// replay window / session table is touched, so a stale frame changes no
-    /// state.
+    /// state (see replay::SessionTable::open).
     pub fn open(&mut self, frame: &[u8], ssrc: u32, now_ms: u64) -> Result<Vec<u8>, RelayError> {
         let parsed = parse(frame)?;
         let fresh = within_skew(parsed.ts_ms, now_ms);
-        let key: SessionKey = (ssrc, parsed.session_id);
         let aad = aad_for(parsed.header, ssrc, self.lane);
         let nonce = nonce_for(parsed.seq);
-        self.tick += 1;
-        let tick = self.tick;
-
-        if let Some(state) = self.sessions.get_mut(&key) {
-            state.window.check(parsed.seq)?;
-            let pt = state
-                .cipher
-                .decrypt(Nonce::from_slice(&nonce), Payload { msg: parsed.body, aad: &aad })
-                .map_err(|_| RelayError::AuthFailed)?;
-            if !fresh {
-                return Err(RelayError::StaleTimestamp);
-            }
-            state.window.accept(parsed.seq);
-            state.last_used = tick;
-            return Ok(pt);
-        }
-
-        // Unknown (or evicted) session. Nothing is stored until the tag
-        // verifies, so a party without the group secret can't create state,
-        // burn window slots, or evict genuine sessions.
-        let mut window = match self.retired.get(&key) {
-            Some(&highest) => {
-                let w = ReplayWindow::resumed(highest);
-                w.check(parsed.seq)?;
-                w
-            }
-            None => ReplayWindow::fresh(parsed.seq),
-        };
-        let cipher = self.kdf.session_cipher(self.lane, &parsed.session_id);
-        let pt = cipher
-            .decrypt(Nonce::from_slice(&nonce), Payload { msg: parsed.body, aad: &aad })
-            .map_err(|_| RelayError::AuthFailed)?;
-        if !fresh {
-            return Err(RelayError::StaleTimestamp);
-        }
-        window.accept(parsed.seq);
-        if self.retired.remove(&key).is_some() {
-            self.retired_order.retain(|k| k != &key);
-        }
-        self.make_room_for(ssrc);
-        self.sessions.insert(key, SessionState { cipher, window, last_used: tick });
-        Ok(pt)
-    }
-
-    fn make_room_for(&mut self, ssrc: u32) {
-        let same_ssrc = self.sessions.keys().filter(|k| k.0 == ssrc).count();
-        if same_ssrc >= MAX_SESSIONS_PER_SSRC {
-            self.evict_lru(Some(ssrc));
-        }
-        if self.sessions.len() >= MAX_SESSIONS_TOTAL {
-            self.evict_lru(None);
-        }
-    }
-
-    fn evict_lru(&mut self, only_ssrc: Option<u32>) {
-        let victim = self
-            .sessions
-            .iter()
-            .filter(|(k, _)| only_ssrc.is_none_or(|s| k.0 == s))
-            .min_by_key(|(_, st)| st.last_used)
-            .map(|(k, _)| *k);
-        if let Some((k, st)) = victim.and_then(|k| self.sessions.remove(&k).map(|st| (k, st))) {
-            self.retire(k, st.window.highest);
-        }
-    }
-
-    fn retire(&mut self, key: SessionKey, highest: u64) {
-        if self.retired.insert(key, highest).is_none() {
-            self.retired_order.push_back(key);
-        }
-        while self.retired_order.len() > MAX_RETIRED {
-            if let Some(old) = self.retired_order.pop_front() {
-                self.retired.remove(&old);
-            }
-        }
+        let (kdf, lane) = (&self.kdf, self.lane);
+        let session_id = parsed.session_id;
+        self.sessions
+            .open(
+                SessionKey(ssrc, session_id),
+                parsed.seq,
+                fresh,
+                || kdf.session_cipher(lane, &session_id),
+                |cipher| {
+                    cipher
+                        .decrypt(Nonce::from_slice(&nonce), Payload { msg: parsed.body, aad: &aad })
+                        .map_err(|_| RelayError::AuthFailed)
+                },
+            )
+            .map_err(|e| match e {
+                OpenError::Replay => RelayError::Replay,
+                OpenError::Stale => RelayError::StaleTimestamp,
+                OpenError::Decrypt(e) => e,
+            })
     }
 
     #[cfg(test)]
     fn retired_len(&self) -> usize {
-        self.retired.len()
+        self.sessions.retired_len()
     }
 }
 
@@ -793,20 +688,6 @@ mod tests {
             assert!(rx.session_count() <= MAX_SESSIONS_TOTAL);
         }
         assert_eq!(rx.session_count(), MAX_SESSIONS_TOTAL);
-    }
-
-    #[test]
-    fn window_shift_math() {
-        let mut w = ReplayWindow::fresh(10);
-        w.accept(10);
-        assert_eq!(w.check(10), Err(RelayError::Replay));
-        assert!(w.check(9).is_ok());
-        w.accept(10 + REPLAY_WINDOW + 5);
-        assert_eq!(w.check(10), Err(RelayError::Replay)); // fell out of window
-        assert!(w.check(10 + REPLAY_WINDOW + 4).is_ok());
-        w.accept(u64::MAX - 1);
-        assert_eq!(w.check(u64::MAX - 1), Err(RelayError::Replay));
-        assert!(w.check(u64::MAX).is_ok());
     }
 
     // ── v3 sender timestamp ─────────────────────────────────────────────────

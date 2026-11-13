@@ -126,7 +126,7 @@ export default function OpView({
                 Details
               </Button>
               {needsResponse && !detailsOpen && (
-                <span aria-label="Your response is needed" role="img" className="pointer-events-none absolute -top-1 -right-1 h-3 w-3 rounded-pill bg-specter-state-warning border-2 border-[#0b1d2e]" />
+                <span aria-label="Your response is needed" role="img" className="pointer-events-none absolute -top-1 -right-1 h-3 w-3 rounded-pill bg-specter-state-warning border-2 border-specter-brand-ink" />
               )}
             </span>
             {ended && (

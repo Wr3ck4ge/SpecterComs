@@ -55,6 +55,7 @@ import { ensureChannelGroup, ensureEventGroup, syncChannelGroupEpoch, syncEventG
 // mlsSession (both are then simply skipped).
 import * as mlsSession from './mlsSession';
 import { getClientVersion } from './clientVersion'; // E2EV
+import { noteDecrypt as noteMlsHealth } from './engine/mlsHealth'; // S3
 import {
   routeAudioDatagram,
   encodeAudioFrameProto,
@@ -584,7 +585,10 @@ export default function useMonitorChannel({ org, channel, volume = 0.3, enabled 
         channelPrevKey: s.channelRx.previous,
         cascadePrevKey: s.cascadeRx.previous,
       });
+      // S3: the MLS group behind this frame's lane (stuck-group detection).
+      const laneGroupId = r.frame ? (r.frame.isGlobalBroadcast ? s.eventId : channelId) : null;
       if (r.action === 'play') {
+        noteMlsHealth(laneGroupId, true); // S3
         s.decryptFailStreak[r.frame.isGlobalBroadcast ? 'cascade' : 'channel'] = 0;
         s.decryptRecoveryAttempt = 0;
         verifySenderSignature(r.frame);
@@ -605,6 +609,7 @@ export default function useMonitorChannel({ org, channel, volume = 0.3, enabled 
         // Tracked per key, so a healthy channel key can't mask a stale
         // cascade key (or vice versa).
         const which = r.frame?.isGlobalBroadcast ? 'cascade' : 'channel';
+        noteMlsHealth(laneGroupId, false, { keyHeld: true }); // S3
         s.decryptFailStreak[which] += 1;
         const backoff = Math.min(KEY_RETRY_BASE_MS * 2 ** s.decryptRecoveryAttempt, KEY_RETRY_MAX_MS);
         if (s.decryptFailStreak[which] >= DECRYPT_FAIL_RECOVERY_THRESHOLD && Date.now() - s.decryptRecoveryAt >= backoff) {
